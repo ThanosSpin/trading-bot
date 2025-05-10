@@ -1,0 +1,11 @@
+# Ignore Python environment files
+__pycache__/
+*.pyc
+.env
+
+# VS Code settings (optional)
+.vscode/
+
+# Model and log files
+models/
+logs/
