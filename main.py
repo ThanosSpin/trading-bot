@@ -4,7 +4,7 @@ from indicators import add_indicators
 from model import train_model, load_model, predict_next
 from strategy import should_trade
 from portfolio import load_portfolio, update_portfolio, save_portfolio, portfolio_value
-from trader import execute_trade
+from trader import execute_trade, is_market_open
 
 import os
 
@@ -25,11 +25,15 @@ price = fetch_latest_price()
 
 print(f"Prediction: {prob_up:.2f}, Action: {action}")
 
-# Execute trade and update portfolio
-if action in ["buy", "sell"] and price:
-    execute_trade(action)
-    portfolio = update_portfolio(action, price, portfolio)
-    save_portfolio(portfolio)
-    print(f"[INFO] Updated Portfolio Value: {portfolio_value(portfolio):.2f}")
+# Check if the market is open
+if not is_market_open():
+    print("[INFO] Market is closed. Skipping trade.")
 else:
-    print("[INFO] No action taken.")
+    # Execute trade and update portfolio if market is open
+    if action in ["buy", "sell"] and price:
+        execute_trade(action)
+        portfolio = update_portfolio(action, price, portfolio)
+        save_portfolio(portfolio)
+        print(f"[INFO] Updated Portfolio Value: {portfolio_value(portfolio):.2f}")
+    else:
+        print("[INFO] No action taken.")
