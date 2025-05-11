@@ -1,9 +1,19 @@
+# decision_logic.py
 from config import THRESHOLD
 
-def should_trade(prob_up):
+def should_trade(prob_up: float) -> str:
+    """
+    Decide trade action based on model probability.
+    """
     if prob_up > 0.5 + THRESHOLD:
-        return 'buy'
+        return "buy"
     elif prob_up < 0.5 - THRESHOLD:
-        return 'sell'
+        return "sell"
     else:
-        return 'hold'
+        return "hold"
+
+if __name__ == "__main__":
+    print(should_trade(0.62))  # buy
+    print(should_trade(0.48))  # hold
+    print(should_trade(0.40))  # sell
+

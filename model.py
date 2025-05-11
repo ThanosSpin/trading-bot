@@ -1,21 +1,28 @@
+# model.py
 from sklearn.ensemble import RandomForestClassifier
 import pandas as pd
 import pickle
 import os
 
+from config import MODEL_PATH
+
 def train_model(df):
+    df = df.copy()
     df['Target'] = (df['Return'].shift(-1) > 0).astype(int)
-    X = df[['Return']].dropna()
-    y = df['Target'].dropna()
+    df = df.dropna()
+
+    X = df[['Return']]
+    y = df['Target']
     model = RandomForestClassifier()
     model.fit(X, y)
-    
-    with open('models/model.pkl', 'wb') as f:
+
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    with open(MODEL_PATH, 'wb') as f:
         pickle.dump(model, f)
     return model
 
 def load_model():
-    with open('models/model.pkl', 'rb') as f:
+    with open(MODEL_PATH, 'rb') as f:
         return pickle.load(f)
 
 def predict_next(df, model):

@@ -1,23 +1,16 @@
 # data_loader.py
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
-
 from config import SYMBOL
 
-def fetch_historical_data(symbol=SYMBOL, period="60d", interval="1d"):
-    """Fetch historical stock data from Yahoo Finance."""
-    data = yf.download(symbol, period=period, interval=interval, progress=False)
-    data = data.dropna()
+def fetch_historical_data(period="60d", interval="1d"):
+    data = yf.download(SYMBOL, period=period, interval=interval)
+    data = data[['Open', 'High', 'Low', 'Close', 'Volume']]
     return data
 
-def fetch_latest_price(symbol=SYMBOL):
-    """Fetch the latest close price."""
-    data = yf.download(symbol, period="1d", interval="1m", progress=False)
+def fetch_latest_price():
+    data = yf.download(SYMBOL, period="1d", interval="1m")
     if not data.empty:
-        return data.iloc[-1]['Close']
+        price = data['Close'].iloc[-1]
+        return float(price)
     return None
-
-if __name__ == "__main__":
-    df = fetch_historical_data()
-    print(df.tail())
