@@ -43,7 +43,7 @@ multidict==6.4.3
 multitasking==0.0.11
 narwhals==1.38.2
 nest_asyncio==1.6.0
-numpy==2.2.5
+numpy
 packaging==24.2
 pandas==2.2.3
 peewee==3.18.1
