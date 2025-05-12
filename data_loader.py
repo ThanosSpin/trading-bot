@@ -12,5 +12,5 @@ def fetch_latest_price():
     data = yf.download(SYMBOL, period="1d", interval="1m")
     if not data.empty:
         price = data['Close'].iloc[-1]
-        return float(price)
+        return float(price.iloc[0])
     return None

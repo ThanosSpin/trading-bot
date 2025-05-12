@@ -1,18 +1,17 @@
-import datetime, time
-from zoneinfo import ZoneInfo
+from datetime import datetime
+import pytz
 
 def is_market_open():
-    # Get current time in US Eastern Time
-    eastern = ZoneInfo("America/New_York")
+    # Define the timezone for US Eastern Time
+    eastern = pytz.timezone("US/Eastern")
     now = datetime.now(tz=eastern)
 
-    # Check if it's a weekday (Monday=0 to Friday=4)
-    if now.weekday() >= 5:  # Saturday or Sunday
+    # Check if today is a weekday (0=Monday, 4=Friday)
+    if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
         return False
 
-    # Define market open and close times
-    market_open = time(hour=9, minute=30)
-    market_close = time(hour=16, minute=0)
+    # Market hours in ET: 9:30 AM to 4:00 PM
+    market_open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
 
-    # Check if current time is within market hours
-    return market_open <= now.time() <= market_close
+    return market_open_time <= now <= market_close_time
