@@ -1,16 +1,18 @@
-import datetime
+import datetime, time
+from zoneinfo import ZoneInfo
 
 def is_market_open():
-    # Get the current date and time in UTC
-    now = datetime.datetime.utcnow()
+    # Get current time in US Eastern Time
+    eastern = ZoneInfo("America/New_York")
+    now = datetime.now(tz=eastern)
 
-    # Check if today is a weekday (0: Monday, 4: Friday)
-    if now.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+    # Check if it's a weekday (Monday=0 to Friday=4)
+    if now.weekday() >= 5:  # Saturday or Sunday
         return False
-    
-    # Market hours: 9:30 AM to 4:00 PM (UTC)
-    market_open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
 
-    # Check if the current time is between market open and close
-    return market_open_time <= now <= market_close_time
+    # Define market open and close times
+    market_open = time(hour=9, minute=30)
+    market_close = time(hour=16, minute=0)
+
+    # Check if current time is within market hours
+    return market_open <= now.time() <= market_close
