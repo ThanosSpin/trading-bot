@@ -23,7 +23,7 @@ def should_trade(prob_up: float) -> str:
             return "sell"
         else:
             return "hold"
-    elif shares == 0:
+    elif shares <= 0:
         return "buy" if prob_up > 0.5 + THRESHOLD else "hold"
     elif cash == 0 and shares > 0:
         return "sell" if prob_up < 0.5 - THRESHOLD else "hold"
