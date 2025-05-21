@@ -2,18 +2,12 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import json
 import os
 from config import PORTFOLIO_PATH
+from portfolio import get_live_portfolio  # ✅ Use live data
 
 TRADE_LOG_PATH = "data/trade_log.csv"
 PLOT_PATH = "data/portfolio_performance.png"
-
-def load_portfolio():
-    if os.path.exists(PORTFOLIO_PATH):
-        with open(PORTFOLIO_PATH, 'r') as f:
-            return json.load(f)
-    return {"cash": 0.0, "shares": 0.0, "last_price": 0.0}
 
 def load_trade_log():
     if os.path.exists(TRADE_LOG_PATH):
@@ -24,15 +18,15 @@ def load_trade_log():
 st.set_page_config(page_title="Trading Bot Dashboard", layout="wide")
 st.title("📊 Trading Bot Dashboard")
 
-# Portfolio Summary
+# ✅ Live Portfolio Summary
 st.header("Portfolio Summary")
-portfolio = load_portfolio()
+portfolio = get_live_portfolio()
 value = portfolio["cash"] + portfolio["shares"] * portfolio["last_price"]
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Cash (€)", f"{portfolio['cash']:.2f}")
+col1.metric("Cash ($)", f"{portfolio['cash']:.2f}")
 col2.metric("Shares", f"{portfolio['shares']:.2f}")
-col3.metric("Portfolio Value (€)", f"{value:.2f}")
+col3.metric("Portfolio Value ($)", f"{value:.2f}")
 
 # Trade Log
 st.header("Trade Log")
