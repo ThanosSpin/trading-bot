@@ -63,6 +63,9 @@ def update_portfolio(action, price, portfolio):
     log_trade(action, price, portfolio)
     return portfolio
 
+import pytz
+from config import TIMEZONE
+
 def plot_portfolio_performance():
     if not os.path.exists(TRADE_LOG_PATH):
         print("No trade log found to plot performance.")
@@ -71,27 +74,26 @@ def plot_portfolio_performance():
     timestamps = []
     values = []
 
+    local_tz = pytz.timezone(TIMEZONE)
+
     with open(TRADE_LOG_PATH, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            try:
-                time = datetime.fromisoformat(row["timestamp"])
-                value = float(row["value"])
-                timestamps.append(time)
-                values.append(value)
-            except Exception as e:
-                print(f"[WARN] Skipping row: {e}")
+            # Convert UTC timestamp to local timezone
+            utc_time = datetime.fromisoformat(row["timestamp"])
+            local_time = utc_time.replace(tzinfo=pytz.utc).astimezone(local_tz)
+            timestamps.append(local_time)
+            values.append(float(row["value"]))
 
-    if timestamps:
-        plt.figure(figsize=(10, 5))
-        plt.plot(timestamps, values, marker='o')
-        plt.title("Portfolio Value Over Time")
-        plt.xlabel("Time")
-        plt.ylabel("Value ($)")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig("data/portfolio_performance.png")
-        plt.close()
+    plt.figure(figsize=(10, 5))
+    plt.plot(timestamps, values, marker='o')
+    plt.title("Portfolio Value Over Time")
+    plt.xlabel("Time")
+    plt.ylabel("Value ($)")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("data/portfolio_performance.png")
+    plt.close()
 
 if __name__ == "__main__":
     TEST = True
