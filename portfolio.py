@@ -4,15 +4,45 @@ import os
 import csv
 from datetime import datetime
 import matplotlib.pyplot as plt
-from config import PORTFOLIO_PATH, INITIAL_CAPITAL
+from config import SYMBOL, INITIAL_CAPITAL, PORTFOLIO_PATH, \
+    USE_LIVE_TRADING, API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
+import alpaca_trade_api as tradeapi
 
 TRADE_LOG_PATH = "data/trade_log.csv"
 
 def load_portfolio():
+    if USE_LIVE_TRADING:
+        try:
+            api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL)
+            account = api.get_account()
+            cash = float(account.cash)
+
+            try:
+                position = api.get_position(SYMBOL)
+                shares = float(position.qty)
+                last_price = float(position.current_price)
+            except tradeapi.rest.APIError as e:
+                if "position does not exist" in str(e).lower():
+                    shares = 0.0
+                    last_price = 0.0
+                else:
+                    raise e
+
+            return {"cash": cash, "shares": shares, "last_price": last_price}
+
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch Alpaca portfolio: {e}")
+            # Fallback to JSON
+            if os.path.exists(PORTFOLIO_PATH):
+                with open(PORTFOLIO_PATH, 'r') as f:
+                    return json.load(f)
+            return {"cash": INITIAL_CAPITAL, "shares": 0.0, "last_price": 0.0}
+
+    # SIMULATION / OFFLINE
     if os.path.exists(PORTFOLIO_PATH):
         with open(PORTFOLIO_PATH, 'r') as f:
             return json.load(f)
-    return {"cash": 0.0, "shares": 8.7, "last_price": 0.0}
+    return {"cash": INITIAL_CAPITAL, "shares": 0.0, "last_price": 0.0}
 
 def save_portfolio(portfolio):
     os.makedirs(os.path.dirname(PORTFOLIO_PATH), exist_ok=True)
