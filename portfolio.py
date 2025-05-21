@@ -2,6 +2,8 @@
 import json
 import os
 import csv
+import pytz
+from config import TIMEZONE
 from datetime import datetime
 import matplotlib.pyplot as plt
 from config import SYMBOL, INITIAL_CAPITAL, PORTFOLIO_PATH, \
@@ -62,9 +64,6 @@ def update_portfolio(action, price, portfolio):
     portfolio = get_live_portfolio()
     log_trade(action, price, portfolio)
     return portfolio
-
-import pytz
-from config import TIMEZONE
 
 def plot_portfolio_performance():
     if not os.path.exists(TRADE_LOG_PATH):
