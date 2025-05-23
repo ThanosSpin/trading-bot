@@ -4,6 +4,7 @@ import pandas as pd
 import pickle
 import os
 
+from data_loader import fetch_historical_data
 from config import MODEL_PATH
 
 def train_model(df):
@@ -28,3 +29,13 @@ def load_model():
 def predict_next(df, model):
     latest = df[['Return']].iloc[-1:]
     return model.predict_proba(latest)[0][1]
+
+
+def predict_market_direction():
+    """Loads data and model, returns the probability that the stock will go up."""
+    df = fetch_historical_data()
+    df['Return'] = df['Close'].pct_change()
+    df = df.dropna()
+
+    model = load_model()
+    return predict_next(df, model)
