@@ -1,38 +1,42 @@
 # strategy.py
 from config import THRESHOLD
 from portfolio import load_portfolio
+from data_loader import fetch_latest_price
 
-def should_trade(prob_up: float) -> str:
+def should_trade(prob_up: float):
     """
-    Decide trade action based on model probability and current portfolio state.
+    Decide trade action and quantity based on model probability and portfolio state.
 
-    Strategy:
-    - If prediction is high and no shares: BUY
-    - If prediction is low and have shares: SELL
+    - If prediction is high and no shares: BUY max with all cash
+    - If prediction is low and have shares: SELL all shares
     - Else: HOLD
     """
     portfolio = load_portfolio()
     shares = portfolio.get("shares", 0)
     cash = portfolio.get("cash", 0)
+    price = fetch_latest_price()
 
-    # Decision thresholds
     upper = 0.5 + THRESHOLD
     lower = 0.5 - THRESHOLD
 
+    if price is None:
+        return ("hold", 0)
+
     if prob_up > upper:
-        if shares == 0 and cash > 0:
-            return "buy"
+        if shares == 0 and cash >= price:
+            quantity = int(cash // price)
+            return ("buy", quantity if quantity > 0 else 0)
         else:
-            return "hold"  # Already holding shares, wait
+            return ("hold", 0)
     elif prob_up < lower:
         if shares > 0:
-            return "sell"
+            return ("sell", int(shares))
         else:
-            return "hold"  # No shares to sell
+            return ("hold", 0)
     else:
-        return "hold"  # No strong signal
+        return ("hold", 0)
 
 if __name__ == "__main__":
-    print("0.62 →", should_trade(0.62))  # buy if no shares
-    print("0.40 →", should_trade(0.40))  # sell if have shares
-    print("0.51 →", should_trade(0.51))  # hold
+    print(should_trade(0.62))  # Example: ("buy", X)
+    print(should_trade(0.40))  # Example: ("sell", Y)
+    print(should_trade(0.51))  # ("hold", 0)
