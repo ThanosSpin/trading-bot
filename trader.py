@@ -1,13 +1,15 @@
-# trader.py
 import time
 import alpaca_trade_api as tradeapi
 from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, USE_LIVE_TRADING, SYMBOL
-from market import is_market_open 
+from market import is_market_open
+from strategy import should_trade
+from model import predict_market_direction
+from portfolio import load_portfolio
 
-# Alpaca API setup
+# Initialize Alpaca API
 api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')
 
-def execute_trade(action, quantity=1):
+def execute_trade(action, quantity):
     if not is_market_open():
         print("⏳ Market is closed. Skipping this trade.")
         return
@@ -17,7 +19,7 @@ def execute_trade(action, quantity=1):
         return
 
     try:
-        # Submit the live order
+        # Submit order
         order = api.submit_order(
             symbol=SYMBOL,
             qty=quantity,
@@ -27,9 +29,7 @@ def execute_trade(action, quantity=1):
         )
 
         print(f"[LIVE] {action.upper()} order submitted: ID={order.id}, status={order.status}")
-
-        # Give the order time to process (e.g., 2 seconds)
-        time.sleep(2)
+        time.sleep(2)  # Wait for order to process
         order_result = api.get_order(order.id)
 
         print(f"[LIVE] Order status: {order_result.status}")
@@ -39,11 +39,32 @@ def execute_trade(action, quantity=1):
             print(f"❌ Order rejected. Reason: {order_result.fail_reason or 'Not specified'}")
         else:
             print(f"ℹ️ Order still pending or partially filled.")
-
     except Exception as e:
         print(f"[ERROR] Failed to execute trade: {e}")
 
-# Example usage
+def run_trading_bot():
+    prob_up = predict_market_direction()
+    action = should_trade(prob_up)
+    portfolio = load_portfolio()
+
+    print(f"📈 Prediction: {prob_up:.2f}, Action: {action}")
+
+    if action == "buy":
+        last_price = portfolio["last_price"]
+        cash = portfolio["cash"]
+        quantity = int(cash // last_price)
+        if quantity > 0:
+            execute_trade("buy", quantity)
+        else:
+            print("[INFO] Not enough cash to buy.")
+    elif action == "sell":
+        quantity = int(portfolio["shares"])
+        if quantity > 0:
+            execute_trade("sell", quantity)
+        else:
+            print("[INFO] No shares to sell.")
+    else:
+        print("🟡 Hold — No action taken.")
+
 if __name__ == "__main__":
-    execute_trade("buy", 1)  # Try buying 1 share
-    execute_trade("sell", 1)  # Try selling 1 share
+    run_trading_bot()
