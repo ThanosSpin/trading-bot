@@ -7,7 +7,7 @@ def should_trade(prob_up: float):
     """
     Decide trade action and quantity based on model probability and portfolio state.
 
-    - If prediction is high and no shares: BUY max with all cash
+    - If prediction is high and cash >= 1 share: BUY max with all cash
     - If prediction is low and have shares: SELL all shares
     - Else: HOLD
     """
@@ -22,21 +22,15 @@ def should_trade(prob_up: float):
     if price is None:
         return ("hold", 0)
 
-    if prob_up > upper:
-        if shares == 0 and cash >= price:
-            quantity = int(cash // price)
-            return ("buy", quantity if quantity > 0 else 0)
-        else:
-            return ("hold", 0)
-    elif prob_up < lower:
-        if shares > 0:
-            return ("sell", int(shares))
-        else:
-            return ("hold", 0)
+    if prob_up > upper and cash >= price:
+        quantity = int(cash // price)
+        return ("buy", quantity if quantity > 0 else 0)
+    elif prob_up < lower and shares > 0:
+        return ("sell", int(shares))
     else:
         return ("hold", 0)
 
 if __name__ == "__main__":
-    print(should_trade(0.62))  # Example: ("buy", X)
-    print(should_trade(0.40))  # Example: ("sell", Y)
-    print(should_trade(0.51))  # ("hold", 0)
+    print(should_trade(0.62))  # Example
+    print(should_trade(0.40))
+    print(should_trade(0.51))
