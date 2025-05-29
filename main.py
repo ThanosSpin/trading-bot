@@ -17,7 +17,8 @@ model = train_model(df) if not os.path.exists("models/model.pkl") else load_mode
 
 # Predict next move
 prob_up = predict_next(df, model)
-action = should_trade(prob_up)
+# Get trade decision
+action, quantity = should_trade(prob_up)
 
 # Load portfolio and price
 portfolio = load_portfolio()
@@ -29,9 +30,9 @@ print(f"Prediction: {prob_up:.2f}, Action: {action}")
 if not is_market_open():
     print("[INFO] Market is closed. Skipping trade.")
 else:
-    # Execute trade and update portfolio if market is open
-    if action in ["buy", "sell"] and price:
-        execute_trade(action)
+    # Only trade if action is not hold and quantity is positive
+    if action in ["buy", "sell"] and quantity > 0 and price:
+        execute_trade(action, quantity)
         portfolio = update_portfolio(action, price, portfolio)
         save_portfolio(portfolio)
         print(f"[INFO] Updated Portfolio Value: {portfolio_value(portfolio):.2f}")
