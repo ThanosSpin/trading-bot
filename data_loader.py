@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 from config import SYMBOL
 
-def fetch_historical_data(period="60d", interval="1d"):
+def fetch_historical_data(period="90d", interval="1d"):
     data = yf.download(SYMBOL, period=period, interval=interval)
     data = data[['Open', 'High', 'Low', 'Close', 'Volume']]
     return data
