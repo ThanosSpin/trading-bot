@@ -1,17 +1,25 @@
 from datetime import datetime
+import alpaca_trade_api as tradeapi
+from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
 import pytz
 
-def is_market_open():
-    # Define the timezone for US Eastern Time
-    eastern = pytz.timezone("US/Eastern")
-    now = datetime.now(tz=eastern)
+api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL)
 
-    # Check if today is a weekday (0=Monday, 4=Friday)
-    if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
+def is_market_open():
+    try:
+        clock = api.get_clock()
+        return clock.is_open
+    except Exception as e:
+        print(f"[ERROR] Could not retrieve market clock: {e}")
         return False
 
-    # Market hours in ET: 9:30 AM to 4:00 PM
-    market_open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+def is_trading_day():
+    try:
+        eastern = pytz.timezone("US/Eastern")
+        today = datetime.now(tz=eastern).date()
 
-    return market_open_time <= now <= market_close_time
+        calendar = api.get_calendar(start=str(today), end=str(today))
+        return len(calendar) > 0
+    except Exception as e:
+        print(f"[ERROR] Could not retrieve market calendar: {e}")
+        return False
