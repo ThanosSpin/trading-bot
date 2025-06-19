@@ -1,7 +1,7 @@
 import time
 import alpaca_trade_api as tradeapi
 from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, USE_LIVE_TRADING, SYMBOL
-from market import is_market_open
+from market import is_market_open, is_trading_day
 from strategy import should_trade
 from model import predict_market_direction
 from portfolio import load_portfolio
@@ -10,8 +10,8 @@ from portfolio import load_portfolio
 api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')
 
 def execute_trade(action, quantity):
-    if not is_market_open():
-        print("⏳ Market is closed. Skipping this trade.")
+    if not is_trading_day() or not is_market_open():
+        print("⏳ Market is closed or it's a holiday. Skipping this trade.")
         return
 
     if not USE_LIVE_TRADING:
