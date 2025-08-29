@@ -1,6 +1,6 @@
 # strategy.py
 
-from config import THRESHOLD
+from config_multi import THRESHOLD
 from portfolio_multi import load_portfolio
 from data_loader_multi import fetch_latest_price
 

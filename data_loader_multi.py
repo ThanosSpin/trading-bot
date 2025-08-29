@@ -1,7 +1,7 @@
 # data_loader.py
 import yfinance as yf
 import pandas as pd
-from config import SYMBOL  # Default symbol fallback
+from config_multi import SYMBOL  # Default symbol fallback
 
 def fetch_historical_data(symbol=SYMBOL, period="90d", interval="1d"):
     """

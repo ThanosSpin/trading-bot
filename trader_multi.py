@@ -5,7 +5,7 @@ import alpaca_trade_api as tradeapi
 from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, USE_LIVE_TRADING, SYMBOL
 from market import is_market_open, is_trading_day
 from strategy_multi import should_trade
-from model_xgb import load_model, predict_next  # or dynamically select model per symbol
+from updated_model_xgb import load_model, predict_next  # or dynamically select model per symbol
 from portfolio_multi import load_portfolio, update_portfolio, portfolio_value
 from data_loader import fetch_historical_data, fetch_latest_price
 

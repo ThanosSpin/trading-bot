@@ -3,10 +3,10 @@ from xgboost import XGBClassifier
 import pandas as pd
 import pickle
 import os
+from datetime import datetime
+from config_multi import get_model_path, MODEL_DIR
 
-MODEL_DIR = "models"  # base directory to store models
-
-def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_features(df):
     """
     Add technical indicators and drop rows with NaNs.
     """
@@ -19,14 +19,11 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     df['Volume_Change'] = df['Volume'].pct_change()
     return df.dropna()
 
-def train_model(df: pd.DataFrame, symbol: str):
+def train_model(df, symbol):
     """
-    Train and save XGBoost model for a given symbol.
+    Train XGBoost model and save it with a monthly backup.
     """
     df = prepare_features(df)
-    if df.empty:
-        raise ValueError(f"Not enough data to train model for {symbol}")
-
     df['Target'] = (df['Return'].shift(-1) > 0).astype(int)
     df = df.dropna()
 
@@ -34,32 +31,37 @@ def train_model(df: pd.DataFrame, symbol: str):
     X = df[features]
     y = df['Target']
 
-    # ✅ Removed deprecated `use_label_encoder`
-    model = XGBClassifier(eval_metric='logloss')
+    model = XGBClassifier(eval_metric='logloss')  # use_label_encoder deprecated
     model.fit(X, y)
 
+    # Save main model
+    model_path = get_model_path(symbol)
     os.makedirs(MODEL_DIR, exist_ok=True)
-    model_path = os.path.join(MODEL_DIR, f"model_{symbol}.pkl")
     with open(model_path, 'wb') as f:
         pickle.dump(model, f)
 
-    print(f"✅ Model trained and saved for {symbol} at {model_path}")
+    # Save monthly backup
+    month_str = datetime.now().strftime("%Y_%m")
+    backup_path = os.path.join(MODEL_DIR, f"model_{symbol}_{month_str}.pkl")
+    with open(backup_path, 'wb') as f:
+        pickle.dump(model, f)
+
+    print(f"✅ Model trained and saved for {symbol}. Backup: {backup_path}")
     return model
 
-def load_model(symbol: str):
+def load_model(symbol):
     """
     Load the XGBoost model for a specific symbol.
     """
-    model_path = os.path.join(MODEL_DIR, f"model_{symbol}.pkl")
+    model_path = get_model_path(symbol)
     if not os.path.exists(model_path):
         print(f"[ERROR] Model file not found for {symbol} at {model_path}")
         return None
 
     with open(model_path, 'rb') as f:
-        model = pickle.load(f)
-    return model
+        return pickle.load(f)
 
-def predict_next(df: pd.DataFrame, model):
+def predict_next(df, model):
     """
     Generate probability prediction using the model and input dataframe.
     """
@@ -75,4 +77,4 @@ def predict_next(df: pd.DataFrame, model):
         print("[WARN] No valid row to predict.")
         return None
 
-    return float(model.predict_proba(latest)[0][1])
+    return model.predict_proba(latest)[0][1]
