@@ -6,7 +6,7 @@ from datetime import datetime
 import glob
 from data_loader_multi import fetch_historical_data
 from updated_model_xgb import train_model
-from config import SYMBOL
+from config_multi import SYMBOL
 
 MODEL_DIR = "models"
 MAX_BACKUPS = 6  # keep only last 6 months
