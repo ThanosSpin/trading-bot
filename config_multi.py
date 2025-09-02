@@ -22,6 +22,10 @@ SYMBOL = ["NVDA", "AAPL"]  # List of symbols
 INITIAL_CAPITAL = 0
 THRESHOLD = 0.05
 
+# Training / Data configs
+LOOKBACK_YEARS = 2   # how many years of historical data to use
+INTERVAL = "1d"      # interval for historical data (daily)
+
 # Model path management
 MODEL_DIR = "models"
 def get_model_path(symbol):

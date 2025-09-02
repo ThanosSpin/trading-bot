@@ -6,7 +6,7 @@ from datetime import datetime
 import glob
 from data_loader_multi import fetch_historical_data
 from updated_model_xgb import train_model
-from config_multi import SYMBOL
+from config_multi import SYMBOL, LOOKBACK_YEARS, INTERVAL
 
 MODEL_DIR = "models"
 MAX_BACKUPS = 6  # keep only last 6 months
@@ -45,7 +45,8 @@ def main():
     for symbol in SYMBOL:
         print(f"\n📈 Training model for {symbol}...")
 
-        df = fetch_historical_data(symbol)
+        # Use config values
+        df = fetch_historical_data(symbol, years=LOOKBACK_YEARS, interval=INTERVAL)
         if df is None or df.empty:
             print(f"[ERROR] No data found for {symbol}. Skipping.")
             continue
