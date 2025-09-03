@@ -52,9 +52,9 @@ def process_symbol(symbol):
 
 
 def main():
-    # if not is_market_open():
-    #     print("⏳ Market is closed. Skipping all trades.")
-    #     return
+    if not is_market_open():
+        print("⏳ Market is closed. Skipping all trades.")
+        return
 
     # Handle single or multiple symbols
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
