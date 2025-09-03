@@ -23,7 +23,8 @@ INITIAL_CAPITAL = 0
 THRESHOLD = 0.05
 
 # Model path management
-MODEL_DIR = "models"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 def get_model_path(symbol):
     """Return the model path for a given symbol."""
     os.makedirs(MODEL_DIR, exist_ok=True)
