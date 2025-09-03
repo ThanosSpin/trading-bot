@@ -1,10 +1,14 @@
 # retrain_model.py
-from data_loader import fetch_historical_data
+from data_loader_multi import fetch_historical_data
 from model_xgb import train_model
+from config import SYMBOL
 import pandas as pd
 
+LOOKBACK_YEARS = 2   # how many years of historical data to use
+INTERVAL = "1d" 
+
 # Fetch data
-df = fetch_historical_data(period="6mo", interval="1d")
+df = fetch_historical_data(symbol=SYMBOL, years=LOOKBACK_YEARS, interval=INTERVAL)
 df['Return'] = df['Close'].pct_change()
 
 # Add technical indicators
