@@ -3,7 +3,7 @@ from xgboost import XGBClassifier
 import pandas as pd
 import pickle
 import os
-from config_multi import get_model_path  # ✅ per-symbol model paths
+from config import MODEL_DIR  # ✅ per-symbol model paths
 
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -19,6 +19,9 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     df['Volume_Change'] = df['Volume'].pct_change()
     return df.dropna()
 
+
+def get_model_path(symbol):
+    return os.path.join(MODEL_DIR, f"model_{symbol}.pkl")
 
 def train_model(df: pd.DataFrame, symbol: str):
     """
@@ -45,16 +48,12 @@ def train_model(df: pd.DataFrame, symbol: str):
     return model
 
 
-def load_model(symbol: str):
-    """
-    Load the XGBoost model for a specific symbol.
-    """
-    model_path = get_model_path(symbol)
-    if not os.path.exists(model_path):
-        print(f"[ERROR] Model file not found for {symbol} at {model_path}")
+def load_model(symbol):
+    path = get_model_path(symbol)
+    if not os.path.exists(path):
+        print(f"[ERROR] Model file not found for {symbol} at {path}")
         return None
-
-    with open(model_path, 'rb') as f:
+    with open(path, "rb") as f:
         return pickle.load(f)
 
 

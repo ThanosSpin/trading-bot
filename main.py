@@ -6,25 +6,35 @@ from portfolio import load_portfolio, update_portfolio, save_portfolio, portfoli
 from trader import execute_trade, is_market_open
 from config import SYMBOL  # This can now be a list of symbols
 
+# Prediction settings: use last 6 months for prediction
+PREDICTION_PERIOD = "6mo"
+PREDICTION_INTERVAL = "1d"
+
+
 def process_symbol(symbol):
     print(f"\n--- Processing {symbol} ---")
 
-    # Load historical data and model
-    df = fetch_historical_data(symbol)
-    model = load_model(symbol)
+    # Load recent historical data for prediction only (6 months)
+    df_recent = fetch_historical_data(symbol, period=PREDICTION_PERIOD, interval=PREDICTION_INTERVAL)
+    if df_recent is None or df_recent.empty:
+        print(f"[WARN] Recent data missing for {symbol}. Skipping prediction.")
+        return
 
+    # Load trained model (trained on 2 years of data)
+    model = load_model(symbol)
     if model is None:
         print(f"[ERROR] No model found for {symbol}. Skipping.")
         return
 
     # Make prediction
-    prob_up = predict_next(df, model)
+    prob_up = predict_next(df_recent, model)
     if prob_up is None:
         print(f"[INFO] Skipping trade decision for {symbol} due to invalid prediction.")
         return
 
     # Decide trade action
-    action, quantity = should_trade(symbol, prob_up, total_symbols=len(SYMBOL) if isinstance(SYMBOL, list) else 1)
+    total_symbols = len(SYMBOL) if isinstance(SYMBOL, list) else 1
+    action, quantity = should_trade(symbol, prob_up, total_symbols=total_symbols)
     print(f"{symbol} → Prediction: {prob_up:.2f}, Action: {action.upper()} {quantity}")
 
     # Load portfolio and latest price
