@@ -9,19 +9,19 @@ from portfolio import load_portfolio
 # Initialize Alpaca API
 api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')
 
-def execute_trade(action, quantity):
+def execute_trade(action, quantity, symbol):
     if not is_trading_day() or not is_market_open():
         print("⏳ Market is closed or it's a holiday. Skipping this trade.")
         return
 
     if not USE_LIVE_TRADING:
-        print(f"[SIMULATION] {action.upper()} {quantity} share(s) of {SYMBOL}")
+        print(f"[SIMULATION] {action.upper()} {quantity} share(s) of {symbol}")
         return
 
     try:
         # Submit order
         order = api.submit_order(
-            symbol=SYMBOL,
+            symbol=symbol,
             qty=quantity,
             side=action,
             type='market',
@@ -34,13 +34,14 @@ def execute_trade(action, quantity):
 
         print(f"[LIVE] Order status: {order_result.status}")
         if order_result.status == "filled":
-            print(f"✅ Order filled at ${order_result.filled_avg_price} for {order_result.filled_qty} share(s).")
+            print(f"✅ Order filled at ${order_result.filled_avg_price} "
+                  f"for {order_result.filled_qty} share(s) of {symbol}.")
         elif order_result.status == "rejected":
             print(f"❌ Order rejected. Reason: {order_result.fail_reason or 'Not specified'}")
         else:
             print(f"ℹ️ Order still pending or partially filled.")
     except Exception as e:
-        print(f"[ERROR] Failed to execute trade: {e}")
+        print(f"[ERROR] Failed to execute trade for {symbol}: {e}")
 
 def run_trading_bot():
     prob_up = predict_market_direction()
