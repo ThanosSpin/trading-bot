@@ -58,18 +58,25 @@ def load_model(symbol: str):
         return pickle.load(f)
 
 
-def predict_next(df: pd.DataFrame, model):
-    """
-    Generate probability prediction using the trained model and input dataframe.
-    """
+def predict_next(df, model):
+    if model is None:
+        print("[ERROR] No model loaded. Did you run retrain_model.py?")
+        return None
+
     if df.empty or 'Close' not in df.columns or 'Volume' not in df.columns:
         print("[WARN] DataFrame is empty or missing required columns.")
         return None
 
-    df = prepare_features(df)
+    df = df.copy()
+    df['Return'] = df['Close'].pct_change()
+    df['MA_5'] = df['Close'].rolling(window=5).mean()
+    df['MA_20'] = df['Close'].rolling(window=20).mean()
+    df['Momentum_10'] = df['Close'] - df['Close'].shift(10)
+    df['Volatility_10'] = df['Return'].rolling(window=10).std()
+    df['Volume_Change'] = df['Volume'].pct_change()
+    df = df.dropna()
 
-    features = ['Return', 'MA_5', 'MA_20',
-                'Momentum_10', 'Volatility_10', 'Volume_Change']
+    features = ['Return', 'MA_5', 'MA_20', 'Momentum_10', 'Volatility_10', 'Volume_Change']
     if df.empty or not all(col in df.columns for col in features):
         print("[WARN] Not enough data to compute features for prediction.")
         return None
