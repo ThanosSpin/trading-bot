@@ -4,6 +4,8 @@ import csv
 from datetime import datetime
 import pytz
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
 from config import PORTFOLIO_PATH, TIMEZONE
 from broker import api
 
@@ -110,10 +112,13 @@ def update_portfolio(action, price, portfolio, symbol):
 # ----------------------------
 # Performance plotting
 # ----------------------------
+import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
+
 def plot_portfolio_performance(symbol):
     log_path = _trade_log_file(symbol)
     if not os.path.exists(log_path):
-        print(f"[INFO] No trade log found for {symbol} to plot performance.")
+        print(f"No trade log found for {symbol} to plot performance.")
         return
 
     timestamps, values = [], []
@@ -122,24 +127,25 @@ def plot_portfolio_performance(symbol):
     with open(log_path, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            try:
-                utc_time = datetime.fromisoformat(row["timestamp"])
-                local_time = utc_time.replace(tzinfo=pytz.utc).astimezone(local_tz)
-                timestamps.append(local_time)
-                values.append(float(row["value"]))
-            except Exception as e:
-                print(f"[WARN] Skipping invalid row in trade log: {row}, Error: {e}")
+            utc_time = datetime.fromisoformat(row["timestamp"])
+            local_time = utc_time.replace(tzinfo=pytz.utc).astimezone(local_tz)
+            timestamps.append(local_time)
+            values.append(float(row["value"]))
 
-    if not timestamps:
-        print(f"[INFO] No valid trade data for {symbol} to plot.")
-        return
-
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(12, 6))
     plt.plot(timestamps, values, marker="o")
     plt.title(f"Portfolio Value Over Time ({symbol})")
     plt.xlabel("Time")
     plt.ylabel("Value ($)")
     plt.grid(True)
+
+    # Format y-axis as dollars
+    plt.gca().yaxis.set_major_formatter(mticker.StrMethodFormatter('${x:,.2f}'))
+
+    # Format x-axis as dates nicely
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+    plt.gcf().autofmt_xdate(rotation=45)  # rotate for readability
+
     plt.tight_layout()
     chart_path = _performance_chart_file(symbol)
     plt.savefig(chart_path)
