@@ -6,7 +6,7 @@ import os
 import pytz
 from config import PORTFOLIO_PATH
 from portfolio import get_live_portfolio  # ✅ Use live data
-from config import TIMEZONE
+from config import TIMEZONE ,SYMBOL
 
 TRADE_LOG_PATH = "data/trade_log.csv"
 PLOT_PATH = "data/portfolio_performance.png"
@@ -26,13 +26,17 @@ st.title("📊 Trading Bot Dashboard")
 
 # ✅ Live Portfolio Summary
 st.header("Portfolio Summary")
-portfolio = get_live_portfolio()
-value = portfolio["cash"] + portfolio["shares"] * portfolio["last_price"]
+# Ensure symbols is a list
+symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
+for sym in symbols:
+    portfolio = get_live_portfolio(sym)
+    value = portfolio["cash"] + portfolio["shares"] * portfolio["last_price"]
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Cash ($)", f"{portfolio['cash']:.2f}")
-col2.metric("Shares", f"{portfolio['shares']:.2f}")
-col3.metric("Portfolio Value ($)", f"{value:.2f}")
+    st.subheader(f"Portfolio Summary: {sym}")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Cash ($)", f"{portfolio['cash']:.2f}")
+    col2.metric("Shares", f"{portfolio['shares']:.2f}")
+    col3.metric("Portfolio Value ($)", f"{value:.2f}")
 
 # Trade Log
 st.header("Trade Log")
