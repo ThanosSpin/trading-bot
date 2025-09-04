@@ -1,22 +1,36 @@
-# portfolio.py
-import json
 import os
+import json
 import csv
-import pytz
-from config import TIMEZONE, SYMBOL, INITIAL_CAPITAL, PORTFOLIO_PATH, \
-    USE_LIVE_TRADING, API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
 from datetime import datetime
+import pytz
 import matplotlib.pyplot as plt
-import alpaca_trade_api as tradeapi
+from config import PORTFOLIO_PATH, TIMEZONE
+from broker import api
 
-TRADE_LOG_PATH = "data/trade_log.csv"
+# ----------------------------
+# Portfolio file helpers
+# ----------------------------
+def _portfolio_file(symbol):
+    folder = os.path.dirname(PORTFOLIO_PATH)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"portfolio_{symbol}.json")
 
-# Alpaca API setup
-api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL)
+def _trade_log_file(symbol):
+    folder = os.path.dirname(PORTFOLIO_PATH)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"trades_{symbol}.csv")
+
+def _performance_chart_file(symbol):
+    folder = os.path.dirname(PORTFOLIO_PATH)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"portfolio_{symbol}_performance.png")
 
 
-def get_live_portfolio(symbol=SYMBOL):
-    """Fetch live portfolio state from Alpaca account for given symbol"""
+# ----------------------------
+# Portfolio state
+# ----------------------------
+def get_live_portfolio(symbol):
+    """Fetch live portfolio state from Alpaca account for given symbol."""
     account = api.get_account()
     positions = api.list_positions()
 
@@ -29,37 +43,37 @@ def get_live_portfolio(symbol=SYMBOL):
             shares = float(position.qty)
             last_price = float(position.current_price)
 
-    return {
-        "cash": cash,
-        "shares": shares,
-        "last_price": last_price
-    }
-
-
-def load_portfolio(symbol=SYMBOL):
-    return get_live_portfolio(symbol)
+    return {"cash": cash, "shares": shares, "last_price": last_price}
 
 
 def save_portfolio(portfolio, symbol):
-    """
-    Save portfolio state to a JSON file specific to a symbol.
-    """
-    os.makedirs(PORTFOLIO_PATH, exist_ok=True)
-    file_path = os.path.join(PORTFOLIO_PATH, f"portfolio_{symbol}.json")
+    file_path = _portfolio_file(symbol)
     with open(file_path, "w") as f:
         json.dump(portfolio, f, indent=4)
+    print(f"💾 Portfolio saved: {file_path}")
+
+
+def load_portfolio(symbol):
+    file_path = _portfolio_file(symbol)
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            return json.load(f)
+    return {"cash": 10000, "shares": 0, "last_price": 0.0}
 
 
 def portfolio_value(portfolio):
     return float(portfolio["cash"]) + float(portfolio["shares"]) * float(portfolio["last_price"])
 
 
+# ----------------------------
+# Trade logging
+# ----------------------------
 def log_trade(symbol, action, price, portfolio):
-    os.makedirs(os.path.dirname(TRADE_LOG_PATH), exist_ok=True)
-    file_exists = os.path.isfile(TRADE_LOG_PATH)
+    log_path = _trade_log_file(symbol)
+    file_exists = os.path.isfile(log_path)
     value = portfolio_value(portfolio)
 
-    with open(TRADE_LOG_PATH, 'a', newline='') as f:
+    with open(log_path, "a", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(["timestamp", "symbol", "action", "price", "value"])
@@ -69,53 +83,48 @@ def log_trade(symbol, action, price, portfolio):
             symbol,
             action,
             f"{float(price):.2f}" if price is not None else "N/A",
-            f"{float(value):.2f}" if value is not None else "N/A"
+            f"{float(value):.2f}" if value is not None else "N/A",
         ])
 
-    plot_portfolio_performance()
+    plot_portfolio_performance(symbol)
 
 
-def update_portfolio(action, price, portfolio, symbol=SYMBOL):
-    # Always refresh live portfolio from Alpaca
+def update_portfolio(action, price, portfolio, symbol):
+    # Always refresh from Alpaca before logging
     portfolio = get_live_portfolio(symbol)
     log_trade(symbol, action, price, portfolio)
+    save_portfolio(portfolio, symbol)
     return portfolio
 
 
-def plot_portfolio_performance():
-    if not os.path.exists(TRADE_LOG_PATH):
-        print("No trade log found to plot performance.")
+# ----------------------------
+# Performance plotting
+# ----------------------------
+def plot_portfolio_performance(symbol):
+    log_path = _trade_log_file(symbol)
+    if not os.path.exists(log_path):
+        print(f"No trade log found for {symbol} to plot performance.")
         return
 
-    timestamps = []
-    values = []
-
+    timestamps, values = [], []
     local_tz = pytz.timezone(TIMEZONE)
 
-    with open(TRADE_LOG_PATH, 'r') as f:
+    with open(log_path, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            # Convert UTC timestamp to local timezone
             utc_time = datetime.fromisoformat(row["timestamp"])
             local_time = utc_time.replace(tzinfo=pytz.utc).astimezone(local_tz)
             timestamps.append(local_time)
             values.append(float(row["value"]))
 
     plt.figure(figsize=(10, 5))
-    plt.plot(timestamps, values, marker='o')
-    plt.title("Portfolio Value Over Time")
+    plt.plot(timestamps, values, marker="o")
+    plt.title(f"Portfolio Value Over Time ({symbol})")
     plt.xlabel("Time")
     plt.ylabel("Value ($)")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("data/portfolio_performance.png")
+    chart_path = _performance_chart_file(symbol)
+    plt.savefig(chart_path)
     plt.close()
-
-
-if __name__ == "__main__":
-    TEST = True
-    if TEST:
-        p = load_portfolio()
-        print("Portfolio snapshot:", p)
-        print("Portfolio Value: $", portfolio_value(p))
-    plot_portfolio_performance()
+    print(f"📊 Saved portfolio performance chart: {chart_path}")

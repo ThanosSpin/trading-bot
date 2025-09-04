@@ -24,12 +24,15 @@ def process_symbol(symbol):
     model = load_model(symbol)
     if model is None:
         print(f"[ERROR] No model found for {symbol}. Skipping.")
+        print(f"[DEBUG] Failed to load model for {symbol}. Check if model file exists.")
         return
 
     # Make prediction
     prob_up = predict_next(df_recent, model)
     if prob_up is None:
         print(f"[INFO] Skipping trade decision for {symbol} due to invalid prediction.")
+        print(f"[DEBUG] df_recent last rows:\n{df_recent.tail()}")
+        print(f"[DEBUG] Columns available: {df_recent.columns.tolist()}")
         return
 
     # Decide trade action
@@ -40,9 +43,13 @@ def process_symbol(symbol):
     # Load portfolio and latest price
     portfolio = load_portfolio(symbol)
     price = fetch_latest_price(symbol)
+    if price is None:
+        print(f"[WARN] Could not fetch latest price for {symbol}. Skipping trade.")
+        print(f"[DEBUG] Current portfolio: {portfolio}")
+        return
 
     # Execute trade if valid
-    if action in ["buy", "sell"] and quantity > 0 and price:
+    if action in ["buy", "sell"] and quantity > 0:
         execute_trade(action, quantity, symbol)
         portfolio = update_portfolio(action, price, portfolio, symbol)
         save_portfolio(portfolio, symbol)
