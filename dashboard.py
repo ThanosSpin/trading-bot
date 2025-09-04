@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import os
 import pytz
 from config import PORTFOLIO_PATH
-from portfolio import get_live_portfolio, _trade_log_file  # ✅ Use live data
+from portfolio import get_live_portfolio, _trade_log_file, _performance_chart_file
 from config import TIMEZONE ,SYMBOL
 
 def load_trade_log(symbol):
@@ -14,6 +14,7 @@ def load_trade_log(symbol):
         df = pd.read_csv(log_path, parse_dates=["timestamp"])
         local_tz = pytz.timezone(TIMEZONE)
         df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert(local_tz)
+        df["timestamp"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
         return df
     return pd.DataFrame(columns=["timestamp", "action", "price", "value"])
 
@@ -21,6 +22,7 @@ def load_trade_log(symbol):
 st.set_page_config(page_title="Trading Bot Dashboard", layout="wide")
 st.title("📊 Trading Bot Dashboard")
 
+# Ensure SYMBOL is a list
 symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
 
 for sym in symbols:
@@ -37,23 +39,12 @@ for sym in symbols:
     # Trade Log
     st.subheader(f"Trade Log: {sym}")
     log = load_trade_log(sym)
-    if not log.empty:
-        log_display = log.copy()
-        log_display["timestamp"] = log_display["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
-        st.dataframe(log_display.sort_values("timestamp", ascending=False), use_container_width=True)
-    else:
-        st.info(f"No trades logged for {sym} yet.")
+    st.dataframe(log.sort_values("timestamp", ascending=False), use_container_width=True)
 
-    # Dynamic Portfolio Performance Plot
+    # Portfolio Performance Plot
+    plot_path = _performance_chart_file(sym)
     st.subheader(f"Portfolio Performance: {sym}")
-    if not log.empty:
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(log["timestamp"], log["value"], marker="o")
-        ax.set_title(f"Portfolio Value Over Time ({sym})")
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Value ($)")
-        ax.grid(True)
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
+    if os.path.exists(plot_path):
+        st.image(plot_path, use_container_width=True)
     else:
-        st.info(f"No trades logged for {sym} yet to plot performance.")
+        st.info(f"Run a trade for {sym} to generate portfolio plot.")
