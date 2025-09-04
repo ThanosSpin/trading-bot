@@ -90,8 +90,18 @@ def log_trade(symbol, action, price, portfolio):
 
 
 def update_portfolio(action, price, portfolio, symbol):
-    # Always refresh from Alpaca before logging
-    portfolio = get_live_portfolio(symbol)
+    """
+    Update portfolio and log trades. Prints debug info if live data not available.
+    """
+    try:
+        # Try refreshing from Alpaca
+        portfolio_live = get_live_portfolio(symbol)
+        portfolio = portfolio_live if portfolio_live else portfolio
+    except Exception as e:
+        print(f"[DEBUG] Could not fetch live portfolio for {symbol}: {e}")
+        print(f"[DEBUG] Using local portfolio: {portfolio}")
+
+    # Log trade and save portfolio
     log_trade(symbol, action, price, portfolio)
     save_portfolio(portfolio, symbol)
     return portfolio
@@ -103,7 +113,7 @@ def update_portfolio(action, price, portfolio, symbol):
 def plot_portfolio_performance(symbol):
     log_path = _trade_log_file(symbol)
     if not os.path.exists(log_path):
-        print(f"No trade log found for {symbol} to plot performance.")
+        print(f"[INFO] No trade log found for {symbol} to plot performance.")
         return
 
     timestamps, values = [], []
@@ -112,10 +122,17 @@ def plot_portfolio_performance(symbol):
     with open(log_path, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            utc_time = datetime.fromisoformat(row["timestamp"])
-            local_time = utc_time.replace(tzinfo=pytz.utc).astimezone(local_tz)
-            timestamps.append(local_time)
-            values.append(float(row["value"]))
+            try:
+                utc_time = datetime.fromisoformat(row["timestamp"])
+                local_time = utc_time.replace(tzinfo=pytz.utc).astimezone(local_tz)
+                timestamps.append(local_time)
+                values.append(float(row["value"]))
+            except Exception as e:
+                print(f"[WARN] Skipping invalid row in trade log: {row}, Error: {e}")
+
+    if not timestamps:
+        print(f"[INFO] No valid trade data for {symbol} to plot.")
+        return
 
     plt.figure(figsize=(10, 5))
     plt.plot(timestamps, values, marker="o")
