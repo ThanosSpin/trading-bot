@@ -1,6 +1,7 @@
 import os
 import json
 import csv
+import pandas as pd
 from datetime import datetime
 import pytz
 import matplotlib.pyplot as plt
@@ -121,32 +122,22 @@ def plot_portfolio_performance(symbol):
         print(f"No trade log found for {symbol} to plot performance.")
         return
 
-    timestamps, values = [], []
+    df = pd.read_csv(log_path, parse_dates=["timestamp"])
     local_tz = pytz.timezone(TIMEZONE)
+    df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert(local_tz)
+    df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M")
 
-    with open(log_path, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            utc_time = datetime.fromisoformat(row["timestamp"])
-            local_time = utc_time.replace(tzinfo=pytz.utc).astimezone(local_tz)
-            timestamps.append(local_time)
-            values.append(float(row["value"]))
-
-    plt.figure(figsize=(12, 6))
-    plt.plot(timestamps, values, marker="o")
-    plt.title(f"Portfolio Value Over Time ({symbol})")
-    plt.xlabel("Time")
-    plt.ylabel("Value ($)")
+    plt.figure(figsize=(10, 5))
+    ax = plt.gca()
+    ax.plot(df["timestamp_str"], df["value"], marker="o")
+    ax.set_title(f"Portfolio Value Over Time ({symbol})")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Value ($)")
+    ax.yaxis.set_major_formatter(mtick.StrMethodFormatter('${x:,.2f}'))  # Dollar formatting
+    plt.xticks(rotation=45)
     plt.grid(True)
-
-    # Format y-axis as dollars
-    plt.gca().yaxis.set_major_formatter(mticker.StrMethodFormatter('${x:,.2f}'))
-
-    # Format x-axis as dates nicely
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
-    plt.gcf().autofmt_xdate(rotation=45)  # rotate for readability
-
     plt.tight_layout()
+
     chart_path = _performance_chart_file(symbol)
     plt.savefig(chart_path)
     plt.close()
