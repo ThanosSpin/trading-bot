@@ -6,7 +6,7 @@ from datetime import datetime
 import pytz
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import matplotlib.ticker as mticker
+import matplotlib.ticker as mtick
 from config import PORTFOLIO_PATH, TIMEZONE
 from broker import api
 
