@@ -40,10 +40,14 @@ def load_portfolio(symbol=SYMBOL):
     return get_live_portfolio(symbol)
 
 
-def save_portfolio(portfolio):
-    os.makedirs(os.path.dirname(PORTFOLIO_PATH), exist_ok=True)
-    with open(PORTFOLIO_PATH, 'w') as f:
-        json.dump(portfolio, f, indent=2)
+def save_portfolio(portfolio, symbol):
+    """
+    Save portfolio state to a JSON file specific to a symbol.
+    """
+    os.makedirs(PORTFOLIO_PATH, exist_ok=True)
+    file_path = os.path.join(PORTFOLIO_PATH, f"portfolio_{symbol}.json")
+    with open(file_path, "w") as f:
+        json.dump(portfolio, f, indent=4)
 
 
 def portfolio_value(portfolio):
