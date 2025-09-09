@@ -20,7 +20,15 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 # Trading config
 SYMBOL = "NVDA"  # symbol
 INITIAL_CAPITAL = 0
-THRESHOLD = 0.05
+
+# --- Trading thresholds ---
+BUY_THRESHOLD = 0.65    # require strong confidence to buy
+SELL_THRESHOLD = 0.35   # require strong confidence to sell
+
+# --- Risk management ---
+STOP_LOSS = 0.95        # sell if price falls 5% below last buy price
+TAKE_PROFIT = 1.1      # sell if price rises 5% above last buy price
+RISK_FRACTION = 0.5     # default: invest or sell 50%
 
 # Model path management
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
