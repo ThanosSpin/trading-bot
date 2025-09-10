@@ -94,15 +94,22 @@ def log_trade(symbol, action, price, portfolio):
 
 def update_portfolio(action, price, portfolio, symbol):
     """
-    Update portfolio and log trades. Prints debug info if live data not available.
+    Update portfolio and log trades.
+    - Refresh cash and shares from Alpaca.
+    - Keep last_price as the entry price (only updated on BUY).
     """
     try:
-        # Try refreshing from Alpaca
+        # Refresh cash and shares from Alpaca
         portfolio_live = get_live_portfolio(symbol)
-        portfolio = portfolio_live if portfolio_live else portfolio
+        portfolio["cash"] = portfolio_live.get("cash", portfolio["cash"])
+        portfolio["shares"] = portfolio_live.get("shares", portfolio["shares"])
     except Exception as e:
         print(f"[DEBUG] Could not fetch live portfolio for {symbol}: {e}")
         print(f"[DEBUG] Using local portfolio: {portfolio}")
+
+    # ✅ Only update entry price if it was a BUY
+    if action == "buy" and price is not None:
+        portfolio["last_price"] = price
 
     # Log trade and save portfolio
     log_trade(symbol, action, price, portfolio)
