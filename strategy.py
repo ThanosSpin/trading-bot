@@ -10,6 +10,14 @@ from portfolio import load_portfolio, portfolio_value
 from data_loader import fetch_latest_price
 
 def should_trade(symbol, prob_up, total_symbols=1):
+    """
+    Decide trade action and quantity based on model probability, portfolio, and risk management.
+    - Requires higher confidence for buy/sell.
+    - Includes stop-loss and take-profit rules.
+    - Allocation:
+        - If one symbol: trade with all available cash.
+        - If multiple symbols: max allocation = RISK_FRACTION of portfolio per symbol.
+    """
     portfolio = load_portfolio(symbol)
     shares = portfolio.get("shares", 0)
     cash = portfolio.get("cash", 0)
