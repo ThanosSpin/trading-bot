@@ -46,17 +46,21 @@ def should_trade(symbol, prob_up, total_symbols=1):
     # --- Confidence-based trading ---
     if prob_up >= BUY_THRESHOLD:
         affordable_shares = int(cash // price)
-        target_shares = int(max_invest // price)
-        quantity = min(
-            affordable_shares,
-            target_shares if total_symbols > 1 else affordable_shares,
-        )
-        if quantity > 0:
+
+        # scale by confidence
+        confidence = (prob_up - BUY_THRESHOLD) / (1 - BUY_THRESHOLD)
+        confidence = max(0, min(confidence, 1))
+
+        target_shares = int((max_invest * confidence) // price)
+
+        # enforce min lot size of 5
+        quantity = min(affordable_shares, target_shares)
+        if quantity >= 5:
             return ("buy", quantity)
 
     elif prob_up <= SELL_THRESHOLD and shares > 0:
-        # Default: sell RISK_FRACTION of holdings (or at least 1)
-        sell_shares = max(1, int(shares * RISK_FRACTION))
+        # sell fraction, enforce at least 5
+        sell_shares = max(5, int(shares * RISK_FRACTION))
         return ("sell", min(sell_shares, shares))
 
     return ("hold", 0)
