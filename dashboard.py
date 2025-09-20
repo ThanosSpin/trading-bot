@@ -9,7 +9,7 @@ import matplotlib.ticker as mtick
 import pytz
 
 from config import PORTFOLIO_PATH, TIMEZONE, SYMBOL
-from portfolio import get_live_portfolio, _trade_log_file
+from portfolio import get_live_portfolio, _trade_log_file, sync_trades_from_alpaca
 
 # Ensure base data folder exists
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +40,9 @@ for sym in symbols:
 # ---------------------------
 st.header("Trade Logs & Portfolio Performance")
 for sym in symbols:
+     # ✅ Sync Alpaca trades before displaying
+    sync_trades_from_alpaca(sym)
+    
     trade_log_path = _trade_log_file(sym)
     st.subheader(f"{sym} Trades & Portfolio")
 
