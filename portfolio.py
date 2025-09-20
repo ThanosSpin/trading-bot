@@ -149,3 +149,56 @@ def plot_portfolio_performance(symbol):
     plt.savefig(chart_path)
     plt.close()
     print(f"📊 Saved portfolio performance chart: {chart_path}")
+
+
+# ----------------------------
+# Sync trades from Alpacca
+# ----------------------------    
+def sync_trades_from_alpaca(symbol):
+    """
+    Fetch trade history for the given symbol from Alpaca
+    and merge it into the local trades CSV log.
+    Ensures portfolio 'value' reflects actual Alpaca equity.
+    """
+    log_path = _trade_log_file(symbol)
+    existing = pd.DataFrame()
+
+    if os.path.exists(log_path):
+        existing = pd.read_csv(log_path, parse_dates=["timestamp"])
+
+    # Fetch order history from Alpaca
+    orders = api.list_orders(status="all", symbols=[symbol], limit=1000)
+    rows = []
+    for order in orders:
+        if order.filled_at is None:
+            continue
+        filled_time = pd.to_datetime(order.filled_at)
+
+        # Get current account equity at this moment
+        try:
+            account = api.get_account()
+            equity = float(account.equity)
+        except Exception:
+            equity = None
+
+        rows.append({
+            "timestamp": filled_time,
+            "symbol": order.symbol,
+            "action": order.side,
+            "price": float(order.filled_avg_price or 0),
+            "value": equity,
+        })
+
+    new_df = pd.DataFrame(rows)
+
+    # Merge with existing
+    if not new_df.empty:
+        if not existing.empty:
+            combined = pd.concat([existing, new_df])
+            combined = combined.drop_duplicates(subset=["timestamp", "action"]).sort_values("timestamp")
+        else:
+            combined = new_df
+        combined.to_csv(log_path, index=False)
+        print(f"✅ Synced {len(combined)} trades for {symbol} into {log_path}")
+    else:
+        print(f"ℹ️ No new trades fetched for {symbol}")
