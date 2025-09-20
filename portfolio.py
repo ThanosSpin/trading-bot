@@ -161,44 +161,39 @@ def sync_trades_from_alpaca(symbol):
     Ensures portfolio 'value' reflects actual Alpaca equity.
     """
     log_path = _trade_log_file(symbol)
-    existing = pd.DataFrame()
+    existing = None
 
     if os.path.exists(log_path):
         existing = pd.read_csv(log_path, parse_dates=["timestamp"])
 
-    # Fetch order history from Alpaca
-    orders = api.list_orders(status="all", symbols=[symbol], limit=1000)
+    # Fetch trades from Alpaca
+    trades = api.list_orders(status="all", symbols=[symbol], limit=100)
+
     rows = []
-    for order in orders:
-        if order.filled_at is None:
-            continue
-        filled_time = pd.to_datetime(order.filled_at)
+    for trade in trades:
+        trade_time = trade.submitted_at
 
-        # Get current account equity at this moment
-        try:
-            account = api.get_account()
-            equity = float(account.equity)
-        except Exception:
-            equity = None
-
-        rows.append({
-            "timestamp": filled_time,
-            "symbol": order.symbol,
-            "action": order.side,
-            "price": float(order.filled_avg_price or 0),
-            "value": equity,
-        })
-
-    new_df = pd.DataFrame(rows)
-
-    # Merge with existing
-    if not new_df.empty:
-        if not existing.empty:
-            combined = pd.concat([existing, new_df])
-            combined = combined.drop_duplicates(subset=["timestamp", "action"]).sort_values("timestamp")
+        # ✅ normalize to UTC
+        if trade_time.tzinfo is None:
+            trade_time = trade_time.replace(tzinfo=pytz.UTC)
         else:
-            combined = new_df
-        combined.to_csv(log_path, index=False)
-        print(f"✅ Synced {len(combined)} trades for {symbol} into {log_path}")
+            trade_time = trade_time.astimezone(pytz.UTC)
+
+        rows.append([
+            trade_time.isoformat(),
+            trade.symbol,
+            trade.side,
+            f"{float(trade.limit_price or trade.filled_avg_price or 0):.2f}",
+            ""  # leave value blank, will be recalculated
+        ])
+
+    df_new = pd.DataFrame(rows, columns=["timestamp", "symbol", "action", "price", "value"])
+
+    if existing is not None:
+        # ✅ Merge without duplicating
+        df = pd.concat([existing, df_new]).drop_duplicates(subset=["timestamp", "symbol", "action"])
     else:
-        print(f"ℹ️ No new trades fetched for {symbol}")
+        df = df_new
+
+    df.to_csv(log_path, index=False)
+    print(f"[SYNC] Trade log updated for {symbol}: {log_path}")

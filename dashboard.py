@@ -49,6 +49,7 @@ for sym in symbols:
     if os.path.exists(trade_log_path):
         # Read trade log once
         df = pd.read_csv(trade_log_path, parse_dates=["timestamp"])
+        # ✅ Always localize to UTC first, then convert to your configured timezone
         local_tz = pytz.timezone(TIMEZONE)
         df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert(local_tz)
         df["timestamp_str"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M")
