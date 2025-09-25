@@ -137,3 +137,43 @@ def get_daily_portfolio_history(symbol):
     df_daily["date"] = pd.to_datetime(df_daily["date"])
     df_daily["value"] = df_daily["value"].astype(float)
     return df_daily.sort_values("date").reset_index(drop=True)
+
+# ----------------------------
+# Portfolio value helper
+# ----------------------------
+def portfolio_value(portfolio: dict) -> float:
+    """
+    Calculate total portfolio value (cash + shares * last_price).
+    Expects a dict with keys: 'cash', 'shares', 'last_price'.
+    """
+    return float(portfolio.get("cash", 0.0)) + float(portfolio.get("shares", 0.0)) * float(portfolio.get("last_price", 0.0))
+
+
+# ----------------------------
+# Update portfolio after a trade
+# ----------------------------
+def update_portfolio(action, price, portfolio, symbol):
+    """
+    Update the portfolio state after a trade, log it, and return the new portfolio.
+    This keeps backward compatibility with main.py.
+    """
+    action = action.lower()
+    price = float(price)
+
+    if action == "buy":
+        portfolio["shares"] += 1  # assumes quantity=1 per trade
+        portfolio["cash"] -= price
+    elif action == "sell":
+        portfolio["shares"] -= 1
+        portfolio["cash"] += price
+
+    # update last price
+    portfolio["last_price"] = price
+
+    # log the trade
+    log_trade(symbol, action, price, portfolio)
+
+    # persist portfolio JSON
+    save_portfolio(portfolio, symbol)
+
+    return portfolio
