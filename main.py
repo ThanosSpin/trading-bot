@@ -36,8 +36,7 @@ def process_symbol(symbol):
         return
 
     # Decide trade action
-    total_symbols = len(SYMBOL) if isinstance(SYMBOL, list) else 1
-    action, quantity = should_trade(symbol, prob_up, total_symbols=total_symbols)
+    action, quantity = should_trade(symbol, prob_up)
     print(f"{symbol} → Prediction: {prob_up:.2f}, Action: {action.upper()} {quantity}")
 
     # Load portfolio and latest price

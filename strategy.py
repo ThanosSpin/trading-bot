@@ -6,15 +6,16 @@ from config import (
     STOP_LOSS,
     TAKE_PROFIT,
     RISK_FRACTION,
+    SYMBOL,
 )
-from portfolio import load_portfolio, portfolio_value
+from portfolio import load_portfolio, portfolio_value, get_live_portfolio
 from data_loader import fetch_latest_price
 
 
-def should_trade(symbol, prob_up, total_symbols=1):
+def should_trade(symbol, prob_up):
     """
     Decide trade action and quantity based on model probability, portfolio, and risk management.
-    Includes cash/buying power safeguard.
+    Dynamically figures out how many symbols are being traded.
     """
     portfolio = load_portfolio(symbol)
     shares = float(portfolio.get("shares", 0))
@@ -26,6 +27,10 @@ def should_trade(symbol, prob_up, total_symbols=1):
         return ("hold", 0)
 
     value = portfolio_value(portfolio)
+
+    # Determine how many symbols are being traded
+    symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
+    total_symbols = len(symbols)
 
     # Allocation rule
     if total_symbols <= 1:
@@ -50,8 +55,7 @@ def should_trade(symbol, prob_up, total_symbols=1):
             affordable_shares,
             target_shares if total_symbols > 1 else affordable_shares,
         )
-
-        # Safeguard: don’t allow 0 or insufficient cash trades
+        
         if quantity > 0 and (quantity * price) <= cash:
             print(f"[DEBUG] Confidence BUY for {symbol}: prob_up={prob_up:.2f}, quantity={quantity}, cash={cash:.2f}, price={price:.2f}")
             return ("buy", quantity)
