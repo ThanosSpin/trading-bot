@@ -1,4 +1,3 @@
-
 # strategy.py
 from config import (
     BUY_THRESHOLD,
@@ -8,19 +7,20 @@ from config import (
     RISK_FRACTION,
     SYMBOL,
 )
-from portfolio import load_portfolio, portfolio_value, get_live_portfolio
+from portfolio import portfolio_value, get_live_portfolio
 from data_loader import fetch_latest_price
 
 
 def should_trade(symbol, prob_up):
     """
     Decide trade action and quantity based on model probability, portfolio, and risk management.
-    Dynamically figures out how many symbols are being traded.
+    Uses live Alpaca portfolio to ensure accurate share count.
     """
-    portfolio = load_portfolio(symbol)
+    # Fetch live portfolio from Alpaca
+    portfolio = get_live_portfolio(symbol)
     shares = float(portfolio.get("shares", 0))
     cash = float(portfolio.get("cash", 0))
-    last_price = float(portfolio.get("last_price", 0))  # stored in portfolio.json
+    last_price = float(portfolio.get("last_price", 0))
     price = fetch_latest_price(symbol)
 
     if price is None or price <= 0:
@@ -28,13 +28,13 @@ def should_trade(symbol, prob_up):
 
     value = portfolio_value(portfolio)
 
-    # Determine how many symbols are being traded
+    # Determine total symbols being traded
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
     total_symbols = len(symbols)
 
     # Allocation rule
     if total_symbols <= 1:
-        max_invest = cash  # one symbol → use all available cash
+        max_invest = cash  # single symbol → use all available cash
     else:
         max_invest = (value * RISK_FRACTION) / total_symbols
 
@@ -55,7 +55,7 @@ def should_trade(symbol, prob_up):
             affordable_shares,
             target_shares if total_symbols > 1 else affordable_shares,
         )
-        
+
         if quantity > 0 and (quantity * price) <= cash:
             print(f"[DEBUG] Confidence BUY for {symbol}: prob_up={prob_up:.2f}, quantity={quantity}, cash={cash:.2f}, price={price:.2f}")
             return ("buy", quantity)
