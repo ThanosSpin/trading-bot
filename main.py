@@ -56,13 +56,20 @@ def process_symbol(symbol):
 
     # Execute trade if valid
     if action in ["buy", "sell"] and quantity > 0:
-        execute_trade(action, quantity, symbol)
-        portfolio = update_portfolio(action, price, portfolio, symbol)
-        save_portfolio(portfolio, symbol)
-        print(f"✅ Updated Portfolio for {symbol}: Cash=${portfolio['cash']:.2f}, Shares={portfolio['shares']}, Value=${portfolio_value(portfolio):.2f}")
-    else:
-        print(f"[INFO] No action taken for {symbol}. Portfolio: Cash=${cash:.2f}, Shares={shares}, Value=${value:.2f}")
+        filled_qty, filled_price = execute_trade(action, quantity, symbol)
 
+        if filled_qty and filled_price is not None:
+            # use the actual filled values to update portfolio
+            portfolio = update_portfolio(action, filled_price, portfolio, symbol, quantity=filled_qty)
+            save_portfolio(portfolio, symbol)
+            print(f"✅ Updated Portfolio for {symbol}: Cash=${portfolio['cash']:.2f}, Shares={portfolio['shares']}, Value=${portfolio_value(portfolio):.2f}")
+        elif filled_qty and filled_price is None:
+            # For simulation we may have filled_qty and no precise price
+            portfolio = update_portfolio(action, price, portfolio, symbol, quantity=filled_qty)
+            save_portfolio(portfolio, symbol)
+            print(f"✅ (Sim) Updated Portfolio for {symbol}: Cash=${portfolio['cash']:.2f}, Shares={portfolio['shares']}, Value=${portfolio_value(portfolio):.2f}")
+        else:
+            print(f"[ERROR] Trade not filled for {symbol}. No portfolio update performed.")
 
 def main():
     if not is_market_open():
