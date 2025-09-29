@@ -35,12 +35,19 @@ def process_symbol(symbol):
         print(f"[DEBUG] Columns available: {df_recent.columns.tolist()}")
         return
 
+    # Load portfolio before making a trade
+    portfolio = load_portfolio(symbol)
+    cash = float(portfolio.get("cash", 0))
+    shares = float(portfolio.get("shares", 0))
+    value = portfolio_value(portfolio)
+
+    print(f"[INFO] Current Portfolio for {symbol}: Cash=${cash:.2f}, Shares={shares}, Value=${value:.2f}")
+
     # Decide trade action
     action, quantity = should_trade(symbol, prob_up)
     print(f"{symbol} → Prediction: {prob_up:.2f}, Action: {action.upper()} {quantity}")
 
-    # Load portfolio and latest price
-    portfolio = load_portfolio(symbol)
+    # Fetch latest market price
     price = fetch_latest_price(symbol)
     if price is None:
         print(f"[WARN] Could not fetch latest price for {symbol}. Skipping trade.")
@@ -52,9 +59,9 @@ def process_symbol(symbol):
         execute_trade(action, quantity, symbol)
         portfolio = update_portfolio(action, price, portfolio, symbol)
         save_portfolio(portfolio, symbol)
-        print(f"✅ Updated Portfolio Value for {symbol}: ${portfolio_value(portfolio):.2f}")
+        print(f"✅ Updated Portfolio for {symbol}: Cash=${portfolio['cash']:.2f}, Shares={portfolio['shares']}, Value=${portfolio_value(portfolio):.2f}")
     else:
-        print(f"[INFO] No action taken for {symbol}.")
+        print(f"[INFO] No action taken for {symbol}. Portfolio: Cash=${cash:.2f}, Shares={shares}, Value=${value:.2f}")
 
 
 def main():
