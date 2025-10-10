@@ -4,10 +4,10 @@ import alpaca_trade_api as tradeapi
 from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, USE_LIVE_TRADING
 from market import is_market_open, is_trading_day
 from data_loader import fetch_latest_price  # for simulation price
-from config import SYMBOL  # optional usage
 
 # Initialize Alpaca API
 api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')
+
 
 def execute_trade(action, quantity, symbol):
     """
@@ -33,7 +33,26 @@ def execute_trade(action, quantity, symbol):
         return quantity, float(sim_price) if sim_price is not None else None
 
     try:
-        # Submit live market order
+        # ✅ Check account first
+        account = api.get_account()
+
+        # --- PDT protection ---
+        if getattr(account, "pattern_day_trader", False):
+            print(f"[WARN] PDT restriction active — skipping trade for {symbol}.")
+            print(f"[DEBUG] Day trades in last 5 days: {getattr(account, 'daytrade_count', 'N/A')}")
+            return 0.0, None
+
+        # --- Check for sufficient buying power ---
+        buying_power = float(account.buying_power)
+        if action == "buy":
+            latest_price = float(api.get_latest_trade(symbol).price)
+            estimated_cost = latest_price * quantity
+            if estimated_cost > buying_power:
+                print(f"[WARN] Insufficient buying power to buy {quantity} {symbol}. "
+                      f"Need ${estimated_cost:.2f}, have ${buying_power:.2f}.")
+                return 0.0, None
+
+        # --- Submit live market order ---
         order = api.submit_order(
             symbol=symbol,
             qty=quantity,
@@ -42,19 +61,16 @@ def execute_trade(action, quantity, symbol):
             time_in_force='gtc'
         )
         print(f"[LIVE] {action.upper()} order submitted for {symbol}: ID={order.id}, status={order.status}")
-        # short wait then fetch updated order
         time.sleep(2)
         order_result = api.get_order(order.id)
         print(f"[LIVE] Order status for {symbol}: {order_result.status}")
 
-        # If filled, return actual filled quantity and average price
         if getattr(order_result, "filled_qty", None) and float(order_result.filled_qty) > 0:
             filled_qty = float(order_result.filled_qty)
             filled_price = float(order_result.filled_avg_price) if getattr(order_result, "filled_avg_price", None) else None
             print(f"[LIVE] Order filled: {filled_qty} @ {filled_price}")
             return filled_qty, filled_price
         else:
-            # Could be pending/partial/other
             print(f"[LIVE] Order not fully filled immediately: filled_qty={getattr(order_result, 'filled_qty', None)}")
             return 0.0, None
 
