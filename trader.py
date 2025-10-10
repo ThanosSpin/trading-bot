@@ -75,5 +75,11 @@ def execute_trade(action, quantity, symbol):
             return 0.0, None
 
     except Exception as e:
-        print(f"[ERROR] Failed to execute trade for {symbol}: {e}")
-        return 0.0, None
+        error_msg = str(e)
+        if "pattern day trading" in error_msg.lower():
+            print(f"[WARN] Trade blocked by Pattern Day Trading rule for {symbol}.")
+            print("[INFO] Skipping this trade to comply with PDT restrictions.")
+            return 0.0, None
+        else:
+            print(f"[ERROR] Failed to execute trade for {symbol}: {e}")
+            return 0.0, None
