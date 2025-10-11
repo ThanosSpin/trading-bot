@@ -1,6 +1,7 @@
 import os
 import streamlit as st
 import pandas as pd
+import time
 import matplotlib
 matplotlib.use("Agg")  # Safe for headless VM
 import matplotlib.pyplot as plt
@@ -8,12 +9,20 @@ import matplotlib.ticker as mtick
 import matplotlib.dates as mdates
 import pytz
 
+from streamlit_autorefresh import st_autorefresh
+
 from config import TIMEZONE, SYMBOL
 from portfolio import _trade_log_file, get_daily_portfolio_history
+from trader import get_pdt_status
 
 # Streamlit setup
 st.set_page_config(page_title="Trading Bot Dashboard", layout="wide")
 st.title("📊 Trading Bot Dashboard")
+
+# --- Auto-refresh every 60 seconds ---
+REFRESH_INTERVAL = 60  # seconds
+st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="global_refresh")
+st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL} seconds to stay live.")
 
 # Ensure SYMBOL is a list
 symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
@@ -40,6 +49,32 @@ for sym in symbols:
 
     except Exception as e:
         st.warning(f"Could not fetch live portfolio for {sym}: {e}")
+
+    # ---------------------------
+    # PDT Status Section
+    # ---------------------------
+    st.subheader("📊 PDT Account Status")
+
+    pdt_info = get_pdt_status()
+    placeholder = st.empty()
+
+    if pdt_info:
+        pdt_status_text = (
+            f"Equity: ${pdt_info['equity']:.2f} | "
+            f"Day Trades (5d): {pdt_info['daytrade_count']} | "
+            f"Remaining: {pdt_info['remaining']} | "
+            f"{'⚠️ PDT FLAGGED' if pdt_info['is_pdt'] else '✅ Not PDT'}"
+        )
+
+        # Color feedback
+        if pdt_info["is_pdt"]:
+            placeholder.error(pdt_status_text)
+        elif isinstance(pdt_info["remaining"], int) and pdt_info["remaining"] <= 1:
+            placeholder.warning(pdt_status_text)
+        else:
+            placeholder.success(pdt_status_text)
+    else:
+        placeholder.info("Unable to fetch PDT account status.")
 
 # ---------------------------
 # Trade Logs & Daily Portfolio Performance

@@ -93,3 +93,4 @@ yarl
 yfinance==0.2.58
 zipp==3.18.1
 xgboost
+streamlit-autorefresh

@@ -3,7 +3,7 @@ from data_loader import fetch_historical_data, fetch_latest_price
 from model_xgb import load_model, predict_next
 from strategy import should_trade
 from portfolio import load_portfolio, update_portfolio, save_portfolio, portfolio_value, get_live_portfolio
-from trader import execute_trade, is_market_open
+from trader import execute_trade, is_market_open, get_pdt_status
 from config import SYMBOL  # This can now be a list of symbols
 
 # Prediction settings: use last 6 months for prediction
@@ -64,6 +64,18 @@ def main():
     if not is_market_open():
         print("⏳ Market is closed. Skipping all trades.")
         return
+    
+    # --- PDT Status Check ---
+    pdt_info = get_pdt_status()
+    if pdt_info:
+        print("\n📊 PDT Account Status:")
+        print(f"   Equity: ${pdt_info['equity']:.2f}")
+        print(f"   Day Trades (5-day window): {pdt_info['daytrade_count']}")
+        print(f"   Remaining Day Trades: {pdt_info['remaining']}")
+        if pdt_info["is_pdt"]:
+            print("   ⚠️  Account marked as Pattern Day Trader.")
+        else:
+            print("   ✅  Account not marked as PDT.\n")
 
     # Handle single or multiple symbols
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
