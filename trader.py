@@ -89,7 +89,7 @@ def get_pdt_status():
         equity = float(account.equity or 0)
         is_pdt = account.pattern_day_trader
 
-        remaining = max(0, 3 - daytrade_count) if equity < 25000 else "Unlimited"
+        remaining = max(0, 4 - daytrade_count) if equity < 25000 else "Unlimited"
         return {
             "daytrade_count": daytrade_count,
             "remaining": remaining,

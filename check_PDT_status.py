@@ -48,7 +48,7 @@ def check_pdt_status():
     print(f"Estimated Day Trades (5d): {est}")
 
     if float(acc.equity) < 25000:
-        if acc.daytrade_count >= 3 or est >= 3:
+        if acc.daytrade_count >= 4 or est >= 4:
             print("\n⚠️ PDT risk: One more round-trip trade could trigger restriction!")
         else:
             print("\n✅ Safe: You still have at least one day-trade slot available.")
