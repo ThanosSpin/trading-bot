@@ -16,10 +16,16 @@ if not API_KEY or not API_SECRET or not BASE_URL:
 # Create single shared API instance
 api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
 
-# Test connection
-try:
-    account = api.get_account()
-    print(f"✅ Connected to Alpaca! Account equity: ${account.equity}")
-except Exception as e:
-    print(f"❌ Failed to connect to Alpaca API: {e}")
-    raise
+
+def test_connection():
+    """
+    Explicitly test connection to Alpaca API and print account equity.
+    Call this function when you want to see the log.
+    """
+    try:
+        account = api.get_account()
+        print(f"✅ Connected to Alpaca! Account equity: ${account.equity}")
+        return account
+    except Exception as e:
+        print(f"❌ Failed to connect to Alpaca API: {e}")
+        raise

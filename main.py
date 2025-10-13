@@ -5,6 +5,7 @@ from strategy import should_trade
 from portfolio import load_portfolio, update_portfolio, save_portfolio, portfolio_value, get_live_portfolio
 from trader import execute_trade, is_market_open, get_pdt_status
 from config import SYMBOL  # This can now be a list of symbols
+from broker import test_connection  # ✅ optional Alpaca connection test
 
 # Prediction settings: use last 6 months for prediction
 PREDICTION_PERIOD = "6mo"
@@ -61,6 +62,10 @@ def process_symbol(symbol):
         print(f"[INFO] No action taken for {symbol}.")
 
 def main():
+    # ✅ Optional: Test Alpaca connection (set to True to show log)
+    SHOW_CONNECTION_LOG = False
+    if SHOW_CONNECTION_LOG:
+        test_connection()
     if not is_market_open():
         print("⏳ Market is closed. Skipping all trades.")
         return
@@ -76,6 +81,7 @@ def main():
             print("   ⚠️  Account marked as Pattern Day Trader.")
         else:
             print("   ✅  Account not marked as PDT.\n")
+        print("-" * 40)
 
     # Handle single or multiple symbols
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
