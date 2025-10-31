@@ -33,7 +33,25 @@ def process_symbol(symbol):
         print(f"[INFO] Skipping trade decision for {symbol} due to invalid prediction.")
         return
 
-    # Decide trade action
+    # --- Fetch latest and last prices for transparency ---
+    from config import STOP_LOSS, TAKE_PROFIT  # dynamically read thresholds
+
+    price = fetch_latest_price(symbol)
+    try:
+        portfolio = get_live_portfolio(symbol)
+        last_price = float(portfolio.get("last_price", 0.0)) if portfolio else 0.0
+    except Exception:
+        portfolio = load_portfolio(symbol)
+        last_price = float(portfolio.get("last_price", 0.0)) if portfolio else 0.0
+
+    if price and last_price > 0:
+        stop_loss_trigger = last_price * STOP_LOSS
+        take_profit_trigger = last_price * TAKE_PROFIT
+        print(f"[INFO] {symbol} last_price={last_price:.2f}, latest_price={price:.2f}")
+        print(f"[INFO] Stop-Loss ≤ {stop_loss_trigger:.2f} ({STOP_LOSS:.2f}x), "
+            f"Take-Profit ≥ {take_profit_trigger:.2f} ({TAKE_PROFIT:.2f}x)")
+
+    # --- Decide trade action ---
     action, quantity = should_trade(symbol, prob_up)
     print(f"{symbol} → Prediction: {prob_up:.2f}, Action: {action.upper()} {quantity}")
 
