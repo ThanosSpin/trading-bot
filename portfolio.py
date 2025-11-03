@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime
 import pytz
 from config import PORTFOLIO_PATH, TIMEZONE
-from broker import api
+from broker import api_market
 
 # ----------------------------
 # File helpers
@@ -28,8 +28,8 @@ def _daily_portfolio_file(symbol):
 # ----------------------------
 def get_live_portfolio(symbol):
     """Fetch live portfolio state from Alpaca account for a given symbol."""
-    account = api.get_account()
-    positions = api.list_positions()
+    account = api_market.get_account()
+    positions = api_market.list_positions()
     cash = float(account.cash)
     shares = 0.0
     last_price = 0.0
@@ -134,7 +134,7 @@ def sync_trades_from_alpaca(symbol):
     Reconstructs cash/shares as a ledger using the filled_qty & filled_avg_price.
     """
     try:
-        trades = api.list_orders(status="filled", symbols=[symbol], limit=1000, nested=True)
+        trades = api_market.list_orders(status="filled", symbols=[symbol], limit=1000, nested=True)
         if not trades:
             return
         trades.sort(key=lambda t: t.filled_at)
