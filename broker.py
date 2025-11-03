@@ -9,45 +9,42 @@ load_dotenv()
 # --------------------------
 # API Keys
 # --------------------------
-API_KEY = os.getenv("ALPACA_API_KEY")                # General account API key
-API_SECRET = os.getenv("ALPACA_SECRET_KEY")          # General account secret
-BASE_URL = os.getenv("ALPACA_BASE_URL")             # e.g., https://paper-api.alpaca.markets
+API_KEY = os.getenv("ALPACA_API_KEY")
+API_SECRET = os.getenv("ALPACA_SECRET_KEY")
+BASE_URL = os.getenv("ALPACA_BASE_URL")
 
-API_MARKET_KEY = os.getenv("ALPACA_MARKET_API_KEY")       # Market/trading key
+API_MARKET_KEY = os.getenv("ALPACA_MARKET_API_KEY")
 API_MARKET_SECRET = os.getenv("ALPACA_MARKET_SECRET_KEY")
-MARKET_BASE_URL = os.getenv("ALPACA_MARKET_BASE_URL")     # Live trading base URL
+MARKET_BASE_URL = os.getenv("ALPACA_MARKET_BASE_URL")
 
 # --------------------------
-# Validate keys
+# Validate Keys
 # --------------------------
 if not (API_KEY and API_SECRET and BASE_URL):
     raise ValueError("Alpaca general API key/secret/base_url not set in environment")
 
 if not (API_MARKET_KEY and API_MARKET_SECRET and MARKET_BASE_URL):
-    raise ValueError("Alpaca market/trading API key/secret/base_url not set in environment")
+    raise ValueError("Alpaca market API key/secret/base_url not set in environment")
 
 # --------------------------
-# Create REST instances
+# REST Clients
 # --------------------------
-# General account API (can be used for documents, etc.)
 api_general = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
-
-# Market/trading API (for orders, portfolio, etc.)
 api_market = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')
 
 # --------------------------
-# Test connections
+# Optional Test When Run Directly
 # --------------------------
-try:
-    account = api_general.get_account()
-    print(f"✅ Connected to Alpaca simulating account! Equity: ${account.equity}")
-except Exception as e:
-    print(f"❌ Failed to connect to Alpaca general API: {e}")
-    raise
+def test_connection():
+    """Manual test: returns True if Market API reachable."""
+    try:
+        account = api_market.get_account()
+        print(f"✅ Alpaca connection OK! Equity: ${account.equity}")
+        return True
+    except Exception as e:
+        print(f"❌ Alpaca connection failed: {e}")
+        return False
 
-try:
-    market_account = api_market.get_account()
-    print(f"✅ Connected to Alpaca trading account! Equity: ${market_account.equity}")
-except Exception as e:
-    print(f"❌ Failed to connect to Alpaca market API: {e}")
-    raise
+
+if __name__ == "__main__":
+    test_connection()
