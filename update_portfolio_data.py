@@ -3,7 +3,7 @@ import csv
 import pandas as pd
 import pytz
 from datetime import timedelta
-from broker import api
+from broker import api_market
 from portfolio import _trade_log_file, PORTFOLIO_PATH
 from config import SYMBOL, TIMEZONE  # Read symbols and timezone from config
 import time
@@ -17,7 +17,7 @@ def safe_get_bars(symbol, timeframe, start, end, max_retries=3):
     """
     for attempt in range(max_retries):
         try:
-            bars = api.get_bars(symbol, timeframe, start=start, end=end)
+            bars = api_market.get_bars(symbol, timeframe, start=start, end=end)
             if bars:
                 return bars
         except Exception as e:
@@ -30,7 +30,7 @@ def safe_get_bars(symbol, timeframe, start, end, max_retries=3):
 # -----------------------------
 def fetch_filled_trades(symbol):
     """Fetch all filled trades for a symbol from Alpaca and sort by execution time"""
-    trades = api.list_orders(status="filled", symbols=[symbol], limit=1000, nested=True)
+    trades = api_market.list_orders(status="filled", symbols=[symbol], limit=1000, nested=True)
     trades.sort(key=lambda t: t.filled_at)
     return trades
 
