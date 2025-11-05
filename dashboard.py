@@ -107,10 +107,11 @@ for sym in symbols:
             st.info(f"No daily portfolio data for {sym}.")
             continue
 
-        df_daily["date"] = pd.to_datetime(df_daily["date"])
-        # Localize if not already
-        if df_daily["date"].dt.tz is None:
-            df_daily["date"] = df_daily["date"].dt.tz_localize(local_tz)
+        local_tz = pytz.timezone(TIMEZONE)
+
+        # ✅ Clean fix: always convert to UTC first, then to local timezone
+        df_daily["date"] = pd.to_datetime(df_daily["date"], utc=True)
+        df_daily["date"] = df_daily["date"].dt.tz_convert(local_tz)
 
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(df_daily["date"], df_daily["value"], marker="o", linestyle="-")

@@ -206,6 +206,7 @@ def get_daily_portfolio_history(symbol):
     if not os.path.exists(daily_path):
         return pd.DataFrame(columns=["date", "value"])
     df_daily = pd.read_csv(daily_path)
-    df_daily["date"] = pd.to_datetime(df_daily["date"])
+    # ✅ Always convert to UTC first to avoid mixed timezone issues
+    df_daily["date"] = pd.to_datetime(df_daily["date"], utc=True)
     df_daily["value"] = df_daily["value"].astype(float)
     return df_daily.sort_values("date").reset_index(drop=True)
