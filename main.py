@@ -1,10 +1,11 @@
-# main.py (updated to coordinate multi-symbol signals before deciding allocations)
+# main.py
 from data_loader import fetch_historical_data, fetch_latest_price
 from model_xgb import load_model, predict_next
 from strategy import should_trade
-from portfolio import load_portfolio, update_portfolio, save_portfolio, portfolio_value, get_live_portfolio
+from portfolio import PortfolioManager
 from trader import execute_trade, is_market_open, get_pdt_status
-from config import SYMBOL  # SYMBOL can be a string or list
+from config import SYMBOL  # Can be string or list
+from config import BUY_THRESHOLD, SELL_THRESHOLD
 
 PREDICTION_PERIOD = "6mo"
 PREDICTION_INTERVAL = "1d"
@@ -12,10 +13,9 @@ PREDICTION_INTERVAL = "1d"
 
 def process_all_symbols(symbols):
     """
-    For multi-symbol support: compute probabilities for all symbols first,
-    decide which symbols are BUY candidates, then call should_trade with
-    concurrent_buys so allocation rules can behave as you requested.
+    Multi-symbol orchestration using PortfolioManager directly.
     """
+
     # Step 1: gather predictions
     probs = {}
     models = {}
@@ -42,29 +42,20 @@ def process_all_symbols(symbols):
         print("[INFO] No valid predictions available.")
         return
 
-    # Step 2: determine buy candidates (based on BUY_THRESHOLD in strategy via should_trade)
-    # We'll do a cheap pre-filter: consider candidate a buy if prob_up >= BUY_THRESHOLD
-    # Import BUY_THRESHOLD dynamically to avoid circular import issues
-    from config import BUY_THRESHOLD, SELL_THRESHOLD
-
+    # Step 2: determine buy/sell candidates
     buy_candidates = [s for s, p in probs.items() if p >= BUY_THRESHOLD]
     sell_candidates = [s for s, p in probs.items() if p <= SELL_THRESHOLD]
 
     total_symbols = len(symbols)
     concurrent_buys = len(buy_candidates)
 
-    # Step 3: run should_trade for each symbol with the concurrent_buys info
+    # Step 3: process each symbol
     for sym, prob_up in probs.items():
+        pm = PortfolioManager(sym)  # Direct class usage
         action, quantity = should_trade(sym, prob_up, total_symbols=total_symbols, concurrent_buys=concurrent_buys)
-        print(f"{sym} → Prediction: {prob_up:.2f}, Action: {action.upper()} {quantity}")
 
-        # Show current live portfolio for debugging
-        try:
-            live = get_live_portfolio(sym)
-            print(f"[INFO] Current Portfolio for {sym}: Cash=${live['cash']:.2f}, Shares={live['shares']}, Value=${live['cash'] + live['shares']*live['last_price']:.2f}")
-        except Exception as e:
-            print(f"[WARN] Could not fetch live portfolio for {sym}: {e}")
-            live = load_portfolio(sym)
+        print(f"{sym} → Prediction: {prob_up:.2f}, Action: {action.upper()} {quantity}")
+        print(f"[INFO] Current Portfolio for {sym}: Cash=${pm.data['cash']:.2f}, Shares={pm.data['shares']}, Value=${pm.value():.2f}")
 
         # Fetch latest price
         price = fetch_latest_price(sym)
@@ -76,14 +67,8 @@ def process_all_symbols(symbols):
         if action in ["buy", "sell"] and quantity > 0:
             filled_qty, filled_price = execute_trade(action, quantity, sym)
             if filled_qty and filled_price:
-                # update_portfolio keeps backward compatibility: it expects action, price, portfolio, symbol
-                # We pass the live/local portfolio we used before
-                # Note: update_portfolio may assume qty=1 per trade in your code; if you're trading different qtys,
-                # you may need to extend update_portfolio to accept qty and update cash/shares appropriately.
-                portfolio = load_portfolio(sym)
-                portfolio = update_portfolio(action, filled_price, portfolio, sym)
-                save_portfolio(portfolio, sym)
-                print(f"✅ Updated Portfolio Value for {sym}: ${portfolio_value(portfolio):.2f}")
+                pm.update(action, filled_price, filled_qty)
+                print(f"✅ Updated Portfolio Value for {sym}: ${pm.value():.2f}")
             else:
                 print(f"[WARN] Order for {sym} did not fill immediately (or was blocked).")
         else:
