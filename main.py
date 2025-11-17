@@ -1,4 +1,3 @@
-# main.py
 import time
 from data_loader import fetch_historical_data, fetch_latest_price
 from model_xgb import load_model, predict_next
@@ -44,17 +43,22 @@ def get_predictions(symbols):
 def execute_decisions(decisions):
     """
     decisions = {
-        "NVDA": ("sell", 10),
-        "AAPL": ("buy", 12)
+        "AAPL": {"action": "buy", "qty": 3, "explain": "..."},
+        "NVDA": {"action": "sell", "qty": 1, "explain": "..."}
     }
     """
 
-    for sym, (action, qty) in decisions.items():
+    for sym, decision in decisions.items():
+
+        action = decision.get("action", "hold")
+        qty = decision.get("qty", 0)
+        explain = decision.get("explain", "")
         pm = PortfolioManager(sym)
         price = fetch_latest_price(sym)
 
         print(f"\n--- {sym} Decision ---")
         print(f"Action: {action.upper()} | Qty: {qty} | Price: {price}")
+        print(f"Reason: {explain}")
 
         if price is None:
             print(f"[WARN] No price for {sym}, skipping.")
@@ -73,7 +77,7 @@ def execute_decisions(decisions):
             continue
 
         # Update local portfolio tracking
-        pm.refresh_live()  # Sync fresh balance before applying local update
+        pm.refresh_live()  # Sync fresh balance before local update
         pm._apply(action, filled_price, filled_qty)
 
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
@@ -95,8 +99,8 @@ def process_all_symbols(symbols):
 
     # Print summary
     print("\n================== DECISIONS ==================")
-    for sym, (action, qty) in decisions.items():
-        print(f"{sym}: {action.upper()} {qty}")
+    for sym, d in decisions.items():
+        print(f"{sym}: {d['action'].upper()} {d['qty']} | {d['explain']}")
     print("================================================\n")
 
     # Step 3: Execute trades
