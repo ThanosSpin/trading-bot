@@ -378,13 +378,14 @@ for sym in symbols:
             st.info("Not enough closed trades to compute analytics yet.")
 
 # -------------------------------------------------
-# TOTAL DAILY PORTFOLIO PERFORMANCE
+# TOTAL DAILY PORTFOLIO PERFORMANCE + METRICS
 # -------------------------------------------------
 st.header("📈 Total Portfolio Performance (All Symbols Combined)")
 daily_path = get_daily_portfolio_file()
 
 if os.path.exists(daily_path):
     df_daily = pd.read_csv(daily_path)
+
     if df_daily.empty:
         st.warning("Daily portfolio is empty.")
     else:
@@ -392,6 +393,39 @@ if os.path.exists(daily_path):
         df_daily = df_daily.dropna(subset=["date"])
         df_daily["date"] = df_daily["date"].dt.tz_convert(tz)
 
+        df_daily = df_daily.sort_values("date")
+
+        # -----------------------------------
+        # Metrics
+        # -----------------------------------
+        V0 = df_daily["value"].iloc[0]
+        VT = df_daily["value"].iloc[-1]
+
+        days = (df_daily["date"].iloc[-1] - df_daily["date"].iloc[0]).days
+        days = max(days, 1)  # prevent divide by zero
+
+        cumulative_return = (VT / V0) - 1
+        annualized_return = (VT / V0) ** (365 / days) - 1
+
+        # Daily returns
+        df_daily["return"] = df_daily["value"].pct_change()
+        daily_volatility = df_daily["return"].std()
+
+        sharpe = (
+            (annualized_return - 0.00) / (daily_volatility * (365 ** 0.5))
+            if daily_volatility and daily_volatility > 0
+            else float("nan")
+        )
+
+        # Display metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Cumulative Return", f"{cumulative_return*100:.2f}%")
+        m2.metric("Annualized Return", f"{annualized_return*100:.2f}%")
+        m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+
+        # -----------------------------------
+        # Chart
+        # -----------------------------------
         fig, ax = plt.subplots(figsize=(11, 4))
         ax.plot(df_daily["date"], df_daily["value"], marker="o")
         ax.set_title("Total Portfolio Value Over Time")
@@ -404,5 +438,6 @@ if os.path.exists(daily_path):
         ax.grid(True)
         plt.tight_layout()
         st.pyplot(fig)
+
 else:
     st.info("No daily portfolio data found. Run update_portfolio_data.py first.")
