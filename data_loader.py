@@ -2,6 +2,9 @@
 import yfinance as yf
 import pandas as pd
 from typing import Optional
+from broker import api_market
+import pytz
+from datetime import datetime, timedelta
 
 
 def fetch_historical_data(
@@ -77,39 +80,56 @@ def fetch_latest_price(symbol: str) -> Optional[float]:
         return None
 
 
-def fetch_intraday_history(
-    symbol: str,
-    lookback_minutes: int = 60,
-    interval: str = "1m",
-) -> Optional[pd.DataFrame]:
-    """
-    Fetch intraday bars for the last `lookback_minutes` (approximate).
+def fetch_intraday_history(symbol, lookback_minutes=120, interval="1m"):
+    """Wrapper using Alpaca intraday bars."""
+    return fetch_intraday_history_alpaca(symbol, lookback_minutes)
 
-    Implementation detail:
-    - yfinance requires at least period='1d' for intraday.
-    - We download a small recent period (e.g. '2d') and then trim by timestamp.
-    """
+# ----------------------------------------------------------
+# Alpaca Intraday Bars (1m) — replaces yfinance intraday
+# ----------------------------------------------------------
+def fetch_intraday_history_alpaca(symbol: str, lookback_minutes: int = 120):
+
+    ny = pytz.timezone("America/New_York")
+
+    now = datetime.now(ny)
+    start = now - timedelta(minutes=lookback_minutes + 30)   # extra padding
+    end = now
+
     try:
-        period = "2d"
-        df = yf.download(
+        bars = api_market.get_bars(
             symbol,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=True,
+            timeframe="1Min",
+            start=start.isoformat(),
+            end=end.isoformat(),
+            adjustment="raw"
         )
-        if df is None or df.empty:
-            print(f"[WARN] Intraday DataFrame is empty for {symbol}.")
+
+        if not bars:
+            print(f"[WARN] Alpaca returned no intraday bars for {symbol}.")
             return None
 
-        df = df.sort_index()
+        # Convert to DataFrame
+        df = pd.DataFrame([{
+            "timestamp": b.t,
+            "Open": float(b.o),
+            "High": float(b.h),
+            "Low": float(b.l),
+            "Close": float(b.c),
+            "Volume": int(b.v),
+        } for b in bars])
 
-        # approximate trim by row count instead of timezone math
-        if lookback_minutes > 0 and len(df) > lookback_minutes:
-            df = df.tail(lookback_minutes)
+        if df.empty:
+            print(f"[WARN] Intraday DF empty for {symbol}.")
+            return None
+
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df = df.set_index("timestamp").sort_index()
+
+        # Trim exactly to lookback window
+        df = df.last(f"{lookback_minutes}T")
 
         return df
 
     except Exception as e:
-        print(f"[ERROR] fetch_intraday_history {symbol}: {e}")
+        print(f"[ERROR] Alpaca intraday fetch failed for {symbol}: {e}")
         return None
