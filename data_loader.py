@@ -1,64 +1,43 @@
 # data_loader.py
-import yfinance as yf
 import pandas as pd
-from typing import Optional
-from broker import api_market
 import pytz
 from datetime import datetime, timedelta
+from typing import Optional
+import yfinance as yf
+
+# Alpaca API
+from broker import api_market
 
 
-def fetch_historical_data(
-    symbol: str,
-    years: Optional[int] = None,
-    period: Optional[str] = None,
-    interval: str = "1d",
-) -> Optional[pd.DataFrame]:
-    """
-    Fetch historical price data for a given symbol.
+# ============================================================
+# DAILY (Yahoo) — still OK for training and daily signals
+# ============================================================
+def fetch_historical_data(symbol: str, years: Optional[int] = None,
+                          period: Optional[str] = None,
+                          interval: str = "1d") -> Optional[pd.DataFrame]:
 
-    Parameters:
-        symbol (str): Stock symbol.
-        years (int, optional): Number of years of historical data (used for training).
-        period (str, optional): Yahoo Finance period string (e.g., '6mo', '1y', '60d')
-                                used for prediction or intraday training.
-        interval (str): Data interval ('1d', '1h', '15m', '1m', etc.)
-
-    Returns:
-        pd.DataFrame or None
-    """
     try:
-        if period is not None:
-            # e.g. period="6mo" for predictions, "60d" for intraday training
-            df = yf.download(
-                symbol,
-                period=period,
-                interval=interval,
-                progress=False,
-                auto_adjust=True,
-            )
-        elif years is not None:
-            # e.g. years=2 → period="2y" for daily training
-            df = yf.download(
-                symbol,
-                period=f"{years}y",
-                interval=interval,
-                progress=False,
-                auto_adjust=True,
-            )
+        if period:
+            df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
+        elif years:
+            df = yf.download(symbol, period=f"{years}y", interval=interval, progress=False, auto_adjust=True)
         else:
             raise ValueError("Either 'years' or 'period' must be provided.")
 
         if df is None or df.empty:
-            print(f"[WARN] DataFrame is empty or missing required columns for {symbol}.")
+            print(f"[WARN] Empty daily data for {symbol}")
             return None
 
         return df
 
     except Exception as e:
-        print(f"[ERROR] Failed to fetch historical data for {symbol}: {e}")
+        print(f"[ERROR] Daily data fetch failed for {symbol}: {e}")
         return None
 
 
+# ============================================================
+# LATEST PRICE (Yahoo fallback)
+# ============================================================
 def fetch_latest_price(symbol: str) -> Optional[float]:
     """
     Fetch the most recent price for a given stock symbol.
@@ -73,29 +52,32 @@ def fetch_latest_price(symbol: str) -> Optional[float]:
             auto_adjust=True,
         )
         if not data.empty:
-            return float(data["Close"].iloc[-1].item())
+            last_close = data["Close"].iloc[-1]
+
+            # Fix FutureWarning: if pandas returns a Series, extract first element
+            if isinstance(last_close, pd.Series):
+                last_close = last_close.iloc[0]
+
+            return float(last_close)
+
         return None
+
     except Exception as e:
         print(f"[ERROR] fetch_latest_price {symbol}: {e}")
         return None
 
 
-def fetch_intraday_history(symbol, lookback_minutes=120, interval="1m"):
-    """Wrapper using Alpaca intraday bars."""
-    return fetch_intraday_history_alpaca(symbol, lookback_minutes)
-
-# ----------------------------------------------------------
-# Alpaca Intraday Bars (1m) — replaces yfinance intraday
-# ----------------------------------------------------------
-def fetch_intraday_history_alpaca(symbol: str, lookback_minutes: int = 120):
-
-    ny = pytz.timezone("America/New_York")
-
-    now = datetime.now(ny)
-    start = now - timedelta(minutes=lookback_minutes + 30)   # extra padding
-    end = now
-
+# ============================================================
+# **REPLACED** INTRADAY — ALPACA MARKET DATA v2
+# ============================================================
+def fetch_intraday_history_alpaca(symbol: str, lookback_minutes: int = 120) -> Optional[pd.DataFrame]:
     try:
+        ny = pytz.timezone("America/New_York")
+        now = datetime.now(ny)
+
+        start = now - timedelta(minutes=lookback_minutes + 30)
+        end = now
+
         bars = api_market.get_bars(
             symbol,
             timeframe="1Min",
@@ -105,10 +87,9 @@ def fetch_intraday_history_alpaca(symbol: str, lookback_minutes: int = 120):
         )
 
         if not bars:
-            print(f"[WARN] Alpaca returned no intraday bars for {symbol}.")
+            print(f"[WARN] Alpaca returned NO bars for {symbol}")
             return None
 
-        # Convert to DataFrame
         df = pd.DataFrame([{
             "timestamp": b.t,
             "Open": float(b.o),
@@ -119,7 +100,7 @@ def fetch_intraday_history_alpaca(symbol: str, lookback_minutes: int = 120):
         } for b in bars])
 
         if df.empty:
-            print(f"[WARN] Intraday DF empty for {symbol}.")
+            print(f"[WARN] Empty Alpaca intraday DF for {symbol}")
             return None
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -133,3 +114,10 @@ def fetch_intraday_history_alpaca(symbol: str, lookback_minutes: int = 120):
     except Exception as e:
         print(f"[ERROR] Alpaca intraday fetch failed for {symbol}: {e}")
         return None
+
+
+# ============================================================
+# Wrapper (compute_signals calls this)
+# ============================================================
+def fetch_intraday_history(symbol: str, lookback_minutes: int = 120, interval: str = "1m"):
+    return fetch_intraday_history_alpaca(symbol, lookback_minutes)
