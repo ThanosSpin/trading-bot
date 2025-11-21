@@ -10,6 +10,7 @@ import matplotlib.ticker as mtick
 import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
 from market import debug_market
+from typing import Optional
 
 from config import TIMEZONE, SYMBOL
 from portfolio import (
@@ -106,7 +107,9 @@ tz = pytz.timezone(TIMEZONE)
 # -------------------------------------------------
 # Small helper: safely get Close series from yfinance DF
 # -------------------------------------------------
-def _get_close_series(df: pd.DataFrame) -> pd.Series | None:
+from typing import Optional
+
+def _get_close_series(df: pd.DataFrame) -> Optional[pd.Series]:
     """Return a 1D 'Close' price series from normal or MultiIndex yfinance DataFrame."""
     if df is None or df.empty:
         return None
