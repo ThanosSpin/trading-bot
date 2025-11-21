@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
+from market import debug_market
 
 from config import TIMEZONE, SYMBOL
 from portfolio import (
@@ -25,6 +26,72 @@ from data_loader import fetch_historical_data, fetch_intraday_history
 # -------------------------------------------------
 st.set_page_config(page_title="Trading Bot Dashboard", layout="wide")
 st.title("📊 Trading Bot Dashboard")
+
+# -------------------------------------------------
+# MARKET STATUS BOX (Big + Color Coded)
+# -------------------------------------------------
+st.header("🕒 Market Status")
+
+# Fetch detailed diagnostics
+m = debug_market(return_dict=True)
+
+alpaca_flag = m.get("alpaca_is_open")
+within_hours = m.get("within_hours")
+is_day = m.get("is_trading_day")
+open_time = m.get("market_open")
+close_time = m.get("market_close")
+ny_now = m.get("ny_time")
+decision = m.get("decision")
+
+# Build visual message
+if not is_day:
+    status_color = "red"
+    status_text = "❌ Market Closed — Not a Trading Day"
+elif alpaca_flag and within_hours:
+    status_color = "green"
+    status_text = "✅ Market OPEN"
+elif not alpaca_flag and within_hours:
+    status_color = "yellow"
+    status_text = "⚠️ Market Should Be OPEN — Alpaca Clock Reports CLOSED"
+elif alpaca_flag and not within_hours:
+    status_color = "yellow"
+    status_text = "⚠️ Alpaca Says OPEN — But Market Hours Window is CLOSED"
+else:
+    status_color = "red"
+    status_text = "❌ Market CLOSED"
+
+# Draw Streamlit Box
+st.markdown(
+    f"""
+    <div style="
+        padding: 20px;
+        border-radius: 12px;
+        background-color: {status_color};
+        color: white;
+        font-size: 22px;
+        font-weight: bold;
+        text-align: center;
+        margin-bottom: 20px;
+    ">
+        {status_text}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Detailed breakdown
+st.subheader("Market Diagnostics")
+c1, c2, c3 = st.columns(3)
+c1.metric("NY Time", ny_now)
+c2.metric("Market Opens", open_time)
+c3.metric("Market Closes", close_time)
+
+c4, c5, c6 = st.columns(3)
+c4.metric("Trading Day", "Yes" if is_day else "No")
+c5.metric("Within Hours", "Yes" if within_hours else "No")
+c6.metric("Alpaca Clock", "OPEN" if alpaca_flag else "CLOSED")
+
+st.caption("🔍 Decision = what main.py will use for trading.")
 
 # Auto-refresh
 REFRESH_INTERVAL = 60

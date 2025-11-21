@@ -1,12 +1,14 @@
 # main.py
 import time
 from data_loader import fetch_historical_data, fetch_latest_price
-from market import is_market_open
+from market import is_market_open, debug_market
 from model_xgb import compute_signals
 from strategy import compute_strategy_decisions
 from portfolio import PortfolioManager
 from trader import execute_trade, get_pdt_status
 from config import SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT
+from market import is_market_open, is_trading_day
+import datetime, pytz
 
 
 # ===============================================================
@@ -119,6 +121,10 @@ def process_all_symbols(symbols):
 # ===============================================================
 def main():
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
+
+    # Always show market diagnostics first
+    print("\n🔧 Running market diagnostics...")
+    debug_market()
 
     # Optional market-hours guard
     if not is_market_open():
