@@ -8,8 +8,10 @@ from portfolio import PortfolioManager
 from trader import execute_trade, get_pdt_status
 from config import SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT
 from market import is_market_open, is_trading_day
-import datetime, pytz
+import os
 
+os.environ["TZ"] = "America/New_York"
+time.tzset()
 
 # ===============================================================
 # Fetch Predictions for All Symbols (USING compute_signals)
