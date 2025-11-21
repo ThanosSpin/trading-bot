@@ -17,6 +17,8 @@ from portfolio import (
     get_live_portfolio
 )
 from trader import get_pdt_status
+from model_xgb import compute_signals
+from data_loader import fetch_historical_data, fetch_intraday_history
 
 # -------------------------------------------------
 # Streamlit setup
@@ -32,6 +34,42 @@ st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL} seconds.")
 # Normalize SYMBOL into list
 symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
 tz = pytz.timezone(TIMEZONE)
+
+
+# -------------------------------------------------
+# Small helper: safely get Close series from yfinance DF
+# -------------------------------------------------
+def _get_close_series(df: pd.DataFrame) -> pd.Series | None:
+    """Return a 1D 'Close' price series from normal or MultiIndex yfinance DataFrame."""
+    if df is None or df.empty:
+        return None
+
+    # Direct column
+    if "Close" in df.columns:
+        s = df["Close"]
+        if isinstance(s, pd.DataFrame):
+            return s.iloc[:, 0]
+        return s
+
+    # MultiIndex: use first-level "Close"
+    if isinstance(df.columns, pd.MultiIndex):
+        try:
+            s = df["Close"]  # sub-dataframe with all close columns
+            if isinstance(s, pd.DataFrame):
+                return s.iloc[:, 0]
+        except KeyError:
+            pass
+
+    # Fallback: first numeric column
+    for col in df.columns:
+        s = df[col]
+        if pd.api.types.is_numeric_dtype(s):
+            if isinstance(s, pd.DataFrame):
+                return s.iloc[:, 0]
+            return s
+
+    return None
+
 
 # -------------------------------------------------
 # PORTFOLIO SUMMARY (per symbol live from Alpaca)
@@ -76,6 +114,114 @@ else:
     st.info("Unable to fetch PDT status.")
 
 # -------------------------------------------------
+# MODEL SIGNALS (Daily + Intraday) + PRICE CHARTS
+# -------------------------------------------------
+st.header("📡 Model Signals & Price Charts")
+
+for sym in symbols:
+    st.subheader(f"Signals for {sym}")
+
+    # -------------------------------
+    # Compute signals
+    # -------------------------------
+    try:
+        sig = compute_signals(
+            sym,
+            lookback_minutes=300,   # richer intraday window
+            intraday_weight=0.65,
+            resample_to="5min",
+        )
+    except Exception as e:
+        st.warning(f"{sym}: error computing signals — {e}")
+        continue
+
+    if not sig or sig.get("final_prob") is None:
+        st.info(f"{sym}: No valid prediction available.")
+        continue
+
+    daily_p = sig.get("daily_prob")
+    intra_p = sig.get("intraday_prob")
+    final_p = sig.get("final_prob")
+
+    # If compute_signals has adaptive weighting, use that;
+    # otherwise fall back to the base 0.65 you passed in.
+    weight = sig.get("intraday_weight", 0.65)
+    allow_intraday = sig.get("allow_intraday", True)  # kept for compatibility / future use
+
+    # -------------------------------
+    # Summary metrics
+    # -------------------------------
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Final prob_up", f"{final_p:.3f}")
+    col2.metric("Daily model", f"{daily_p:.3f}" if daily_p is not None else "N/A")
+
+    intra_label = "Intraday model"
+    if not allow_intraday:
+        intra_label += " (market closed)"
+    elif intra_p is not None:
+        intra_label += " (active)"
+
+    col3.metric(intra_label, f"{intra_p:.3f}" if intra_p is not None else "N/A")
+    col4.metric("Intraday weight", f"{weight:.2f}")
+
+    st.progress(max(0.0, min(final_p, 1.0)))  # visual blending bar
+
+    # -------------------------------
+    # Price charts: Daily + Intraday
+    # -------------------------------
+    c_price1, c_price2 = st.columns(2)
+
+    # Daily price (6 months)
+    with c_price1:
+        try:
+            df_daily = fetch_historical_data(sym, period="6mo", interval="1d")
+            if df_daily is not None and not df_daily.empty:
+                close_series = _get_close_series(df_daily)
+                if close_series is not None:
+                    fig, ax = plt.subplots(figsize=(5, 3))
+                    ax.plot(close_series.index, close_series.values, marker="o", linewidth=1)
+                    ax.set_title(f"{sym} Daily Close (6M)")
+                    ax.set_xlabel("Date")
+                    ax.set_ylabel("Price")
+                    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+                    plt.xticks(rotation=45)
+                    ax.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                else:
+                    st.caption(f"{sym}: could not resolve daily Close series.")
+            else:
+                st.caption(f"{sym}: no daily data available.")
+        except Exception as e:
+            st.caption(f"{sym}: daily chart error — {e}")
+
+    # Intraday price (last 300 bars @1m, resampled as-is)
+    with c_price2:
+        try:
+            df_intra = fetch_intraday_history(sym, lookback_minutes=300, interval="1m")
+            if df_intra is not None and not df_intra.empty:
+                close_series = _get_close_series(df_intra)
+                if close_series is not None:
+                    fig, ax = plt.subplots(figsize=(5, 3))
+                    ax.plot(close_series.index, close_series.values, linewidth=1)
+                    ax.set_title(f"{sym} Intraday Close (last ~{len(close_series)} min)")
+                    ax.set_xlabel("Time")
+                    ax.set_ylabel("Price")
+                    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                    plt.xticks(rotation=45)
+                    ax.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                else:
+                    st.caption(f"{sym}: could not resolve intraday Close series.")
+            else:
+                st.caption(f"{sym}: no intraday data available.")
+        except Exception as e:
+            st.caption(f"{sym}: intraday chart error — {e}")
+
+# -------------------------------------------------
 # TRADE LOGS & TRADE ANALYTICS
 # -------------------------------------------------
 st.header("Trade Logs & Analytics")
@@ -95,16 +241,39 @@ for sym in symbols:
     st.dataframe(df_trades.sort_values("timestamp_local", ascending=False), use_container_width=True)
 
     # ---------------------------
+    # Equity / value over time chart for this symbol
+    # ---------------------------
+    if "value" in df_trades.columns:
+        try:
+            df_plot = df_trades.sort_values("timestamp_local").copy()
+
+            # NEW: collapse to date-only on x-axis (keeps all points, but shown as dates)
+            df_plot["date_only"] = df_plot["timestamp_local"].dt.normalize()
+
+            fig, ax = plt.subplots(figsize=(7, 3))
+            ax.plot(df_plot["date_only"], df_plot["value"], marker="o", linewidth=1)
+            ax.set_title(f"{sym} Portfolio Value Over Time (per-trade)")
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Value ($)")
+            ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.2f}"))
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+            plt.xticks(rotation=45)
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            st.pyplot(fig)
+        except Exception as e:
+            st.caption(f"{sym}: could not plot per-symbol value chart — {e}")
+
+    # ---------------------------
     # Trade Analytics
     # ---------------------------
     if not df_trades.empty:
-        # Compute PnL per trade
         df_trades["trade_value"] = df_trades["qty"] * df_trades["price"]
         df_trades["pnl"] = df_trades.apply(
             lambda row: -row["trade_value"] if row["action"].lower() == "buy" else row["trade_value"], axis=1
         )
 
-        # Closed trade cycles (flat → flat)
         df_trades = df_trades.sort_values("timestamp")
         df_trades["shares_after"] = df_trades["shares"]
 

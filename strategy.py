@@ -1,4 +1,3 @@
-# strategy.py
 from typing import Dict, List
 from config import BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, TAKE_PROFIT, RISK_FRACTION
 from portfolio import PortfolioManager
@@ -13,28 +12,61 @@ def make_decision(action: str, qty: int, explain: str):
 
 
 # ---------------------------------------------------------
-# Per-symbol trading logic (with STOP/TP)
+# Evaluate STOP-LOSS / TAKE-PROFIT (universal)
+# ---------------------------------------------------------
+def check_stop_tp(symbol, price, pm):
+    shares = pm.data.get("shares", 0.0)
+    if shares <= 0:
+        return None
+
+    # Use weighted average price if present
+    entry_price = pm.data.get("avg_price", pm.data.get("last_price", 0))
+
+    if entry_price <= 0:
+        return None
+
+    # STOP-LOSS
+    if price <= entry_price * STOP_LOSS:
+        return make_decision(
+            "sell",
+            int(shares),
+            f"{symbol}: STOP-LOSS hit {price:.2f} <= {STOP_LOSS*100:.1f}% of entry {entry_price:.2f}"
+        )
+
+    # TAKE-PROFIT
+    if price >= entry_price * TAKE_PROFIT:
+        return make_decision(
+            "sell",
+            int(shares),
+            f"{symbol}: TAKE-PROFIT hit {price:.2f} >= {TAKE_PROFIT*100:.1f}% of entry {entry_price:.2f}"
+        )
+
+    return None
+
+
+# ---------------------------------------------------------
+# Per-symbol trading logic (baseline)
 # ---------------------------------------------------------
 def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                  concurrent_buys: int = 1, available_cash: float = None):
+
     pm = PortfolioManager(symbol)
     try:
         pm.refresh_live()
-    except Exception:
+    except:
         pass
 
     shares = float(pm.data.get("shares", 0.0))
     cash = float(pm.data.get("cash", 0.0))
-    last_price = float(pm.data.get("last_price", 0.0))
     price = fetch_latest_price(symbol)
 
     if price is None or price <= 0:
-        return make_decision("hold", 0, f"{symbol}: no valid market price.")
+        return make_decision("hold", 0, f"{symbol}: no valid price.")
 
     if available_cash is not None:
         cash = float(available_cash)
 
-    # allocation
+    # Allocation logic
     if total_symbols == 1:
         max_invest = cash
     elif total_symbols == 2:
@@ -44,213 +76,190 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
     explain = f"{symbol}: prob_up={prob_up:.3f}. "
 
-    # STOP LOSS / TAKE PROFIT
-    if shares > 0 and last_price > 0:
-        if price <= last_price * STOP_LOSS:
-            return make_decision("sell", int(shares),
-                                 explain + f"STOP-LOSS hit ({price:.2f} <= {STOP_LOSS*100:.1f}% of {last_price:.2f}).")
-        if price >= last_price * TAKE_PROFIT:
-            return make_decision("sell", int(shares),
-                                 explain + f"TAKE-PROFIT hit ({price:.2f} >= {TAKE_PROFIT*100:.1f}% of {last_price:.2f}).")
-
+    # ---------------------------
     # BUY
+    # ---------------------------
     if prob_up >= BUY_THRESHOLD:
         affordable = int(cash // price)
         target = int(max_invest // price)
         qty = min(affordable, target)
+
         if qty > 0:
             return make_decision("buy", qty,
-                                 explain + f"BUY signal (≥{BUY_THRESHOLD}). cash={cash:.2f}, price={price:.2f}, qty={qty}.")
-        return make_decision("hold", 0, explain + "BUY signal detected but insufficient cash.")
+                                 explain + f"BUY (≥{BUY_THRESHOLD}). qty={qty}")
+        return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
 
+    # ---------------------------
     # SELL
+    # ---------------------------
     if prob_up <= SELL_THRESHOLD and shares > 0:
         return make_decision("sell", int(shares),
-                             explain + f"SELL signal (≤{SELL_THRESHOLD}). Selling all {int(shares)} shares.")
+                             explain + f"SELL (≤{SELL_THRESHOLD}). Clearing position.")
 
+    # HOLD
     return make_decision("hold", 0, explain + "Within thresholds → HOLD.")
 
 
 # ---------------------------------------------------------
-# NVDA-priority coordinator (full patch)
+# NVDA-priority coordinator
 # ---------------------------------------------------------
-def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str] = None) -> Dict[str, Dict]:
+def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str] = None):
+
     if symbols is None:
         symbols = list(predictions.keys())
 
     symbols = [s.upper() for s in symbols]
     preds = {k.upper(): v for k, v in predictions.items()}
 
-    # default hold decisions
+    # Default decisions
     decisions = {s: make_decision("hold", 0, f"{s}: default HOLD") for s in symbols}
 
-    # If NVDA not traded → normal logic
-    if "NVDA" not in symbols:
-        concurrent_buys = sum(1 for s in symbols if preds.get(s, 0) >= BUY_THRESHOLD)
-        for s in symbols:
-            decisions[s] = should_trade(s, preds.get(s, 0),
-                                        total_symbols=len(symbols),
-                                        concurrent_buys=concurrent_buys)
-        return decisions
-
-    # Load live portfolio state
+    # Fetch live state
     pms = {}
-    for s in symbols:
-        pm = PortfolioManager(s)
+    prices = {}
+    for sym in symbols:
+        pm = PortfolioManager(sym)
         try:
             pm.refresh_live()
-        except Exception:
+        except:
             pass
-        pms[s] = pm
+        pms[sym] = pm
+        prices[sym] = fetch_latest_price(sym) or 0.0
 
-    def live_shares(sym): return float(pms[sym].data.get("shares", 0.0))
-    def live_cash(sym): return float(pms[sym].data.get("cash", 0.0))
-    def last_buy_price(sym): return float(pms[sym].data.get("last_price", 0.0))
+    # First pass — ALWAYS apply STOP-LOSS / TAKE-PROFIT
+    sl_tp_decisions = {}
+    for sym in symbols:
+        price = prices.get(sym, 0)
+        if price > 0:
+            sltp = check_stop_tp(sym, price, pms[sym])
+            if sltp:
+                sl_tp_decisions[sym] = sltp
 
-    prices = {s: fetch_latest_price(s) or 0.0 for s in symbols}
+    # If STOP/TP triggered for any symbol, apply ONLY these
+    if sl_tp_decisions:
+        for sym in symbols:
+            if sym in sl_tp_decisions:
+                decisions[sym] = sl_tp_decisions[sym]
+            else:
+                decisions[sym] = make_decision("hold", 0, f"{sym}: HOLD during SL/TP event.")
+        return decisions
 
-    # Base NVDA decision (respects STOP/TP)
-    nvda_prob = preds.get("NVDA", 0.0)
-    nvda_base = should_trade("NVDA", nvda_prob,
-                             total_symbols=len(symbols),
-                             concurrent_buys=sum(1 for s in symbols if preds.get(s, 0) >= BUY_THRESHOLD))
+    # ---------------------------------------------------------
+    # GLOBAL SELL — corrected logic
+    # ---------------------------------------------------------
+    valid_preds = [preds[s] for s in symbols if s in preds]
+
+    if valid_preds and all(p <= SELL_THRESHOLD for p in valid_preds):
+        for sym in symbols:
+            shares = pms[sym].data.get("shares", 0)
+            if shares > 0:
+                decisions[sym] = make_decision("sell", int(shares),
+                                               f"{sym}: Global SELL — liquidating.")
+            else:
+                decisions[sym] = make_decision("hold", 0, f"{sym}: Global SELL — no position.")
+        return decisions
+
+    # ---------------------------------------------------------
+    # If NVDA not traded → regular logic
+    # ---------------------------------------------------------
+    if "NVDA" not in symbols:
+        concurrent_buys = sum(1 for s in symbols if preds.get(s, 0) >= BUY_THRESHOLD)
+        for sym in symbols:
+            decisions[sym] = should_trade(sym, preds.get(sym, 0),
+                                          total_symbols=len(symbols),
+                                          concurrent_buys=concurrent_buys)
+        return decisions
+
+    # ---------------------------------------------------------
+    # NVDA PRIORITY LOGIC
+    # ---------------------------------------------------------
+    def live_shares(sym): return float(pms[sym].data.get("shares", 0))
+    def entry_price(sym): return float(pms[sym].data.get("avg_price",
+                                 pms[sym].data.get("last_price", 0)))
+
+    nvda_prob = preds.get("NVDA", 0)
+    concurrent_buys = sum(1 for s in symbols if preds.get(s, 0) >= BUY_THRESHOLD)
+    nvda_base = should_trade("NVDA", nvda_prob, len(symbols), concurrent_buys)
     nvda_action = nvda_base["action"]
 
-    # =========================================================
+    # ---------------------------------------------------------
     # NVDA BUY PRIORITY
-    # =========================================================
+    # ---------------------------------------------------------
     if nvda_action == "buy":
-        nvda_price = prices.get("NVDA", 0.0)
+        # Use real global cash
+        global_cash = float(pms[symbols[0]].data.get("cash", 0))
+        nvda_price = prices["NVDA"]
+
         if nvda_price <= 0:
-            concurrent_buys = sum(1 for s in symbols if preds.get(s, 0) >= BUY_THRESHOLD)
-            for s in symbols:
-                decisions[s] = should_trade(s, preds.get(s, 0),
-                                            total_symbols=len(symbols),
-                                            concurrent_buys=concurrent_buys)
-            return decisions
+            return decisions  # bad price
 
-        sim_cash = live_cash("NVDA")
+        sim_cash = global_cash
 
-        # Apply STOP/TP sells first
-        for s in symbols:
-            if s == "NVDA":
+        # NVDA BUY → liquidate other positions if needed
+        for sym in symbols:
+            if sym == "NVDA":
                 continue
-            s_shares = live_shares(s)
-            s_price = prices.get(s, 0.0)
-            s_last = last_buy_price(s)
 
-            if s_shares > 0 and s_price > 0 and s_last > 0:
-                if s_price <= s_last * STOP_LOSS:
-                    sim_cash += s_shares * s_price
-                    decisions[s] = make_decision("sell", int(s_shares),
-                                                 f"{s}: STOP-LOSS sell executed under NVDA priority.")
-                    continue
-                if s_price >= s_last * TAKE_PROFIT:
-                    sim_cash += s_shares * s_price
-                    decisions[s] = make_decision("sell", int(s_shares),
-                                                 f"{s}: TAKE-PROFIT sell executed under NVDA priority.")
-                    continue
+            sh = live_shares(sym)
+            pr = prices[sym]
 
-            if decisions[s]["action"] == "hold":
-                decisions[s] = make_decision("hold", 0, f"{s}: held under NVDA priority.")
+            if sh > 0 and pr > 0:
+                sim_cash += sh * pr
+                decisions[sym] = make_decision("sell", int(sh),
+                                               f"{sym}: Sold to fund NVDA priority buy.")
 
-        # Compute max NVDA shares affordable
-        max_nvda_shares = int(sim_cash // nvda_price)
+        max_shares = int(sim_cash // nvda_price)
 
-        if max_nvda_shares >= 1:
-            decisions["NVDA"] = make_decision("buy", max_nvda_shares,
-                                              f"NVDA BUY priority — cash+SL/TP proceeds ${sim_cash:.2f}; qty={max_nvda_shares}.")
-            return decisions
-
-        # Sell other symbols in ascending probability order until NVDA can buy **all possible shares**
-        sellables = []
-        for s in symbols:
-            if s == "NVDA":
-                continue
-            s_shares = live_shares(s)
-            s_price = prices.get(s, 0.0)
-            if s_shares > 0 and s_price > 0:
-                sellables.append({
-                    "symbol": s,
-                    "shares": s_shares,
-                    "price": s_price,
-                    "value": s_shares * s_price,
-                    "prob": preds.get(s, 0.0),
-                })
-
-        sellables.sort(key=lambda x: (x["prob"], -x["value"]))
-
-        for item in sellables:
-            sim_cash += item["value"]
-            decisions[item["symbol"]] = make_decision("sell", int(item["shares"]),
-                                                      f"{item['symbol']}: sold to fund NVDA buy (${item['value']:.2f}).")
-
-            max_nvda_shares = int(sim_cash // nvda_price)
-            if max_nvda_shares >= 1:
-                break
-
-        # Final NVDA allocation
-        max_nvda_shares = int(sim_cash // nvda_price)
-        if max_nvda_shares >= 1:
-            decisions["NVDA"] = make_decision("buy", max_nvda_shares,
-                                              f"NVDA BUY priority — liquidated positions to raise ${sim_cash:.2f}; qty={max_nvda_shares}.")
+        if max_shares >= 1:
+            decisions["NVDA"] = make_decision(
+                "buy",
+                max_shares,
+                f"NVDA BUY priority — capital ${sim_cash:.2f}, qty={max_shares}"
+            )
         else:
-            decisions["NVDA"] = make_decision("hold", 0,
-                                              f"NVDA BUY priority but insufficient capital even after selective sells (${sim_cash:.2f}).")
+            decisions["NVDA"] = make_decision(
+                "hold",
+                0,
+                "NVDA BUY priority but insufficient capital."
+            )
+
         return decisions
 
-    # =========================================================
-    # NVDA SELL — rotate into strongest other BUY candidate
-    # =========================================================
+    # ---------------------------------------------------------
+    # NVDA SELL PRIORITY — rotate into strongest BUY
+    # ---------------------------------------------------------
     if nvda_action == "sell":
-        nvda_sh = live_shares("NVDA")
-        nvda_price = prices.get("NVDA", 0.0)
-        if nvda_sh > 0:
-            decisions["NVDA"] = make_decision("sell", int(nvda_sh), "NVDA SELL signal — selling NVDA.")
+        sh = live_shares("NVDA")
+        pr = prices["NVDA"]
+
+        if sh > 0:
+            decisions["NVDA"] = make_decision("sell", int(sh), "NVDA SELL signal.")
         else:
-            decisions["NVDA"] = make_decision("hold", 0, "NVDA SELL signal but no holdings.")
+            decisions["NVDA"] = make_decision("hold", 0, "NVDA SELL but no position.")
 
+        # Rotate into strongest BUY alternative
         buyers = [s for s in symbols if s != "NVDA" and preds.get(s, 0) >= BUY_THRESHOLD]
+
         if buyers:
-            strongest = max(buyers, key=lambda s: preds.get(s, 0))
-            sim_cash = live_cash("NVDA") + nvda_sh * nvda_price
-            tgt_price = prices.get(strongest, 0.0)
-            qty = int(sim_cash // tgt_price) if tgt_price > 0 else 0
-            if qty > 0:
-                decisions[strongest] = make_decision("buy", qty,
-                                                    f"{strongest}: BUY after NVDA sell. Capital=${sim_cash:.2f}, qty={qty}.")
-            else:
-                decisions[strongest] = make_decision("hold", 0,
-                                                    f"{strongest}: BUY candidate but insufficient funds (${sim_cash:.2f}).")
+            strongest = max(buyers, key=lambda x: preds.get(x, 0))
+            sim_cash = float(pms[symbols[0]].data.get("cash", 0)) + sh * pr
+            tgt_price = prices[strongest]
+            qty = int(sim_cash // tgt_price)
 
-        for s in symbols:
-            if s not in decisions:
-                decisions[s] = should_trade(s, preds.get(s, 0),
-                                            total_symbols=len(symbols),
-                                            concurrent_buys=sum(1 for x in symbols if preds.get(x, 0) >= BUY_THRESHOLD))
+            if qty >= 1:
+                decisions[strongest] = make_decision(
+                    "buy", qty,
+                    f"{strongest}: Rotated from NVDA sell, qty={qty}"
+                )
+
         return decisions
 
-    # =========================================================
-    # Global SELL
-    # =========================================================
-    if all(preds.get(s, 1) <= SELL_THRESHOLD for s in symbols):
-        for s in symbols:
-            sh = live_shares(s)
-            if sh > 0:
-                decisions[s] = make_decision("sell", int(sh), f"{s}: Global SELL — liquidating.")
-            else:
-                decisions[s] = make_decision("hold", 0, f"{s}: Global SELL — no position.")
-        return decisions
-
-    # =========================================================
-    # NVDA HOLD → normal per-symbol decisions
-    # =========================================================
-    concurrent_buys = sum(1 for s in symbols if preds.get(s, 0) >= BUY_THRESHOLD)
-    for s in symbols:
-        decisions[s] = should_trade(
-            s, preds.get(s, 0),
-            total_symbols=len(symbols),
-            concurrent_buys=concurrent_buys
-        )
+    # ---------------------------------------------------------
+    # NVDA HOLD — normal trading for all symbols
+    # ---------------------------------------------------------
+    for sym in symbols:
+        decisions[sym] = should_trade(sym, preds.get(sym, 0),
+                                      total_symbols=len(symbols),
+                                      concurrent_buys=concurrent_buys)
 
     return decisions

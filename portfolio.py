@@ -5,24 +5,35 @@ import csv
 import pandas as pd
 from datetime import datetime
 import pytz
+
 from config import PORTFOLIO_PATH, TIMEZONE
 from broker import api_market
+
 
 # ============================================================
 # File helpers
 # ============================================================
 
 def get_portfolio_file(symbol):
-    os.makedirs(os.path.dirname(PORTFOLIO_PATH), exist_ok=True)
-    return os.path.join(os.path.dirname(PORTFOLIO_PATH), f"portfolio_{symbol}.json")
+    """Returns path to portfolio_<symbol>.json inside the same folder as PORTFOLIO_PATH."""
+    base = os.path.dirname(PORTFOLIO_PATH)
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, f"portfolio_{symbol}.json")
+
 
 def get_trade_log_file(symbol):
-    os.makedirs(os.path.dirname(PORTFOLIO_PATH), exist_ok=True)
-    return os.path.join(os.path.dirname(PORTFOLIO_PATH), f"trades_{symbol}.csv")
+    """Returns path to trades_<symbol>.csv inside the same folder as PORTFOLIO_PATH."""
+    base = os.path.dirname(PORTFOLIO_PATH)
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, f"trades_{symbol}.csv")
+
 
 def get_daily_portfolio_file():
-    os.makedirs(os.path.dirname(PORTFOLIO_PATH), exist_ok=True)
-    return os.path.join(os.path.dirname(PORTFOLIO_PATH), f"daily_portfolio.csv")
+    """Returns path to daily_portfolio.csv inside the same folder as PORTFOLIO_PATH."""
+    base = os.path.dirname(PORTFOLIO_PATH)
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "daily_portfolio.csv")
+
 
 # ============================================================
 # Live Portfolio
@@ -30,9 +41,12 @@ def get_daily_portfolio_file():
 
 def get_live_portfolio(symbol):
     """Fetch live Alpaca portfolio for a symbol."""
-    account = api_market.get_account()
-    positions = api_market.list_positions()
-    cash = float(account.cash)
+    try:
+        account = api_market.get_account()
+        positions = api_market.list_positions()
+        cash = float(account.cash)
+    except Exception:
+        return {"cash": 0.0, "shares": 0.0, "last_price": 0.0}
 
     shares = 0.0
     last_price = 0.0
@@ -43,6 +57,7 @@ def get_live_portfolio(symbol):
             last_price = float(p.current_price)
 
     return {"cash": cash, "shares": shares, "last_price": last_price}
+
 
 # ============================================================
 # PortfolioManager Class
@@ -62,10 +77,15 @@ class PortfolioManager:
         """Load JSON portfolio; fallback to live if missing."""
         if os.path.exists(self.file):
             with open(self.file, "r") as f:
-                data = json.load(f)
-        else:
-            live = get_live_portfolio(self.symbol)
-            data = {"cash": live["cash"], "shares": 0.0, "last_price": 0.0}
+                return json.load(f)
+
+        # If no local file → create initial state
+        live = get_live_portfolio(self.symbol)
+        data = {
+            "cash": live["cash"],
+            "shares": live.get("shares", 0.0),
+            "last_price": live.get("last_price", 0.0),
+        }
 
         return data
 
@@ -79,18 +99,21 @@ class PortfolioManager:
 
     def refresh_live(self):
         """Refresh LIVE Alpaca values (cash & shares)."""
-        live = get_live_portfolio(self.symbol)
-        self.data["cash"] = live["cash"]
-        self.data["shares"] = live["shares"]
-        self.data["last_price"] = live["last_price"]
-        self.save()
+        try:
+            live = get_live_portfolio(self.symbol)
+            self.data["cash"] = live["cash"]
+            self.data["shares"] = live["shares"]
+            self.data["last_price"] = live["last_price"]
+            self.save()
+        except Exception:
+            pass
 
     # ------------------------
     # Logging
     # ------------------------
 
     def log(self, action, price, qty):
-        """Write to trades_<symbol>.csv"""
+        """Write trade entry into trades_<symbol>.csv."""
         log_path = get_trade_log_file(self.symbol)
         file_exists = os.path.isfile(log_path)
         timestamp = datetime.utcnow().isoformat()
@@ -98,11 +121,13 @@ class PortfolioManager:
         value = self.value()
 
         with open(log_path, "a", newline="") as f:
-            w = csv.writer(f)
+            writer = csv.writer(f)
             if not file_exists:
-                w.writerow(["timestamp", "symbol", "action", "qty",
-                            "price", "cash", "shares", "value"])
-            w.writerow([
+                writer.writerow([
+                    "timestamp", "symbol", "action", "qty",
+                    "price", "cash", "shares", "value"
+                ])
+            writer.writerow([
                 timestamp,
                 self.symbol,
                 action,
@@ -110,7 +135,7 @@ class PortfolioManager:
                 f"{float(price):.2f}" if price is not None else "N/A",
                 f"{self.data['cash']:.2f}",
                 f"{self.data['shares']:.8g}",
-                f"{value:.2f}"
+                f"{value:.2f}",
             ])
 
     # ------------------------
@@ -127,6 +152,7 @@ class PortfolioManager:
             self.data["cash"] -= qty * price
 
         elif action == "sell":
+            qty = min(qty, self.data["shares"])  # safety
             self.data["shares"] -= qty
             self.data["cash"] += qty * price
 
@@ -141,17 +167,15 @@ class PortfolioManager:
         self._apply("buy", price, qty)
 
     def sell(self, qty, price):
-        qty = min(qty, self.data["shares"])  # safety
+        qty = min(qty, self.data["shares"])
         self._apply("sell", price, qty)
 
     def sell_all(self, price):
-        """Sell all shares of this symbol."""
         shares = self.data["shares"]
         if shares > 0:
             self._apply("sell", price, shares)
 
     def buy_full(self, price):
-        """Use ALL cash to buy this symbol."""
         price = float(price)
         qty = self.data["cash"] / price
         if qty > 0:
@@ -162,9 +186,10 @@ class PortfolioManager:
     # ------------------------
 
     def value(self):
-        return float(self.data.get("cash", 0)) + float(self.data.get("shares", 0)) * float(
-            self.data.get("last_price", 0)
-        )
+        return float(self.data.get("cash", 0)) + \
+               float(self.data.get("shares", 0)) * \
+               float(self.data.get("last_price", 0))
+
 
 # ============================================================
 # Daily portfolio aggregation
@@ -173,6 +198,7 @@ class PortfolioManager:
 def save_daily_portfolio_csv(trades_list, initial_cash=1000.0):
     """
     trades_list: list of all trades from all symbols in chronological order
+    Saves daily aggregated portfolio value.
     """
     tz = pytz.timezone(TIMEZONE)
     cash = initial_cash
@@ -207,6 +233,7 @@ def save_daily_portfolio_csv(trades_list, initial_cash=1000.0):
         {"date": pd.Timestamp(d).tz_localize(tz), "value": v}
         for d, v in daily_values.items()
     ])
+
     df_daily.sort_values("date", inplace=True)
     df_daily.to_csv(get_daily_portfolio_file(), index=False)
 

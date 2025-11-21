@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+# Base data folder
+DATA_DIR = "data"
+
 # API keys
 API_KEY = os.getenv("ALPACA_API_KEY")
 API_SECRET = os.getenv("ALPACA_SECRET_KEY")
@@ -18,8 +21,13 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # Use App Password
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 # Trading config
-SYMBOL = "NVDA"  # symbol
+SYMBOL = ["NVDA", "AAPL"]  # symbol
 INITIAL_CAPITAL = 0
+
+# --------------------
+# Model blending weights
+# --------------------
+INTRADAY_WEIGHT = 0.65   # default intraday dominance
 
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.65    # require strong confidence to buy
@@ -43,5 +51,5 @@ PORTFOLIO_PATH = "data/portfolio.json"
 LOG_FILE = "logs/trading_bot.log"
 
 # Other configs
-USE_LIVE_TRADING = False  # Switch to True to go live
+USE_LIVE_TRADING = True  # Switch to True to go live
 TIMEZONE = "US/Eastern"

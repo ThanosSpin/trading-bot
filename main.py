@@ -1,44 +1,53 @@
+# main.py
 import time
 from data_loader import fetch_historical_data, fetch_latest_price
-from model_xgb import load_model, predict_next
+from market import is_market_open
+from model_xgb import compute_signals
 from strategy import compute_strategy_decisions
 from portfolio import PortfolioManager
-from trader import execute_trade, is_market_open, get_pdt_status
-from config import SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD
-
-PREDICTION_PERIOD = "6mo"
-PREDICTION_INTERVAL = "1d"
+from trader import execute_trade, get_pdt_status
+from config import SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT
 
 
 # ===============================================================
-# Fetch Predictions for All Symbols
+# Fetch Predictions for All Symbols (USING compute_signals)
 # ===============================================================
-def get_predictions(symbols):
+def get_predictions(symbols, debug=True):
     predictions = {}
 
     for sym in symbols:
-        df_recent = fetch_historical_data(sym, period=PREDICTION_PERIOD, interval=PREDICTION_INTERVAL)
-        if df_recent is None or df_recent.empty:
-            print(f"[WARN] No recent data for {sym}, skipping.")
-            continue
+        print(f"\n🔍 Fetching signals for {sym}...")
 
-        model = load_model(sym)
-        if model is None:
-            print(f"[ERROR] No model found for {sym}, skipping.")
-            continue
+        sig = compute_signals(
+            sym,
+            lookback_minutes=60,
+            intraday_weight=INTRADAY_WEIGHT,
+            resample_to="5min",
+        )
 
-        prob_up = predict_next(df_recent, model)
-        if prob_up is None:
+        if debug:
+            print(f"\n[DEBUG] {sym} Signals Summary")
+            print("------------------------------------")
+            print(f"Daily rows:         {sig.get('daily_rows')}")
+            print(f"Intraday rows:      {sig.get('intraday_rows')}  "
+                  f"(before trim: {sig.get('intraday_before')})")
+            print(f"Daily prob:         {sig.get('daily_prob')}")
+            print(f"Intraday prob:      {sig.get('intraday_prob')}")
+            print(f"Final combined prob:{sig.get('final_prob')}")
+            print("------------------------------------\n")
+
+        final_prob = sig.get("final_prob")
+        if final_prob is None:
             print(f"[WARN] Invalid prediction for {sym}, skipping.")
             continue
 
-        predictions[sym] = prob_up
+        predictions[sym] = final_prob
 
     return predictions
 
 
 # ===============================================================
-# Execute the Computed Decisions
+# Execute decisions (clean & safe)
 # ===============================================================
 def execute_decisions(decisions):
     """
@@ -64,43 +73,41 @@ def execute_decisions(decisions):
             print(f"[WARN] No price for {sym}, skipping.")
             continue
 
-        # Skip HOLD
         if action == "hold" or qty <= 0:
-            print("[INFO] Action: HOLD")
+            print("[INFO] HOLD — No trade executed.")
             continue
 
-        # Execute order via Alpaca
+        # Execute trade (LIVE or SIM depending on config)
         filled_qty, filled_price = execute_trade(action, qty, sym)
 
         if not filled_qty:
-            print(f"[WARN] {sym} trade not filled.")
+            print(f"[WARN] {sym} trade NOT filled.")
             continue
 
-        # Update local portfolio tracking
-        pm.refresh_live()  # Sync fresh balance before local update
+        # Sync portfolio and apply changes
+        pm.refresh_live()
         pm._apply(action, filled_price, filled_qty)
 
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
 
 # ===============================================================
-# Main Orchestration Logic
+# Orchestrator
 # ===============================================================
 def process_all_symbols(symbols):
-    # Step 1: Get predictions
-    predictions = get_predictions(symbols)
+    # Step 1: Predictions
+    predictions = get_predictions(symbols, debug=True)
 
     if not predictions:
-        print("[INFO] No valid predictions available.")
+        print("[INFO] No valid predictions available. Stopping.")
         return
 
-    # Step 2: Compute strategy decisions
+    # Step 2: Strategy logic
     decisions = compute_strategy_decisions(predictions)
 
-    # Print summary
     print("\n================== DECISIONS ==================")
     for sym, d in decisions.items():
-        print(f"{sym}: {d['action'].upper()} {d['qty']} | {d['explain']}")
+        print(f"{sym}: {d['action'].upper()} {d['qty']} — {d['explain']}")
     print("================================================\n")
 
     # Step 3: Execute trades
@@ -108,16 +115,17 @@ def process_all_symbols(symbols):
 
 
 # ===============================================================
-# Program Entry Point
+# Entry Point
 # ===============================================================
 def main():
+    symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
+
+    # Optional market-hours guard
     if not is_market_open():
         print("⏳ Market is closed. Exiting.")
         return
 
-    symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
-
-    # Print PDT status
+    # PDT Display
     try:
         pdt = get_pdt_status()
         if pdt:
@@ -125,8 +133,9 @@ def main():
             print(f"Equity: ${pdt['equity']:.2f}")
             print(f"Day Trades (5-day): {pdt['daytrade_count']}")
             print(f"Remaining: {pdt['remaining']}")
+            print(f"Flagged: {pdt['is_pdt']}")
             print("--------------------------------------")
-    except:
+    except Exception:
         pass
 
     process_all_symbols(symbols)
