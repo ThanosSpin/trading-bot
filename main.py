@@ -24,7 +24,7 @@ def get_predictions(symbols, debug=True):
 
         sig = compute_signals(
             sym,
-            lookback_minutes=300,
+            lookback_minutes=900,
             intraday_weight=INTRADAY_WEIGHT,
             resample_to="5min",
         )
