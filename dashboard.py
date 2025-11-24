@@ -43,7 +43,6 @@ is_day = m.get("is_trading_day")
 open_time = m.get("market_open")
 close_time = m.get("market_close")
 ny_now = m.get("ny_time")
-decision = m.get("decision")
 
 # Build visual message
 if not is_day:
@@ -104,72 +103,43 @@ st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL} seconds.")
 symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
 tz = pytz.timezone(TIMEZONE)
 
-
 # -------------------------------------------------
-# Small helper: safely get Close series from yfinance / Alpaca DF
+# Helper: safely extract Close column
 # -------------------------------------------------
 def _get_close_series(df: pd.DataFrame) -> Optional[pd.Series]:
-    """Return a 1D 'Close' price series from normal or MultiIndex DataFrame."""
     if df is None or df.empty:
         return None
-
-    # Direct column
     if "Close" in df.columns:
         s = df["Close"]
-        if isinstance(s, pd.DataFrame):
-            return s.iloc[:, 0]
-        return s
-
-    # MultiIndex: use first-level "Close"
+        return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
     if isinstance(df.columns, pd.MultiIndex):
         try:
-            s = df["Close"]  # sub-dataframe with all close columns
-            if isinstance(s, pd.DataFrame):
-                return s.iloc[:, 0]
+            s = df["Close"]
+            return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
         except KeyError:
             pass
-
-    # Fallback: first numeric column
     for col in df.columns:
-        s = df[col]
-        if pd.api.types.is_numeric_dtype(s):
-            if isinstance(s, pd.DataFrame):
-                return s.iloc[:, 0]
-            return s
-
+        if pd.api.types.is_numeric_dtype(df[col]):
+            s = df[col]
+            return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
     return None
 
-
 # -------------------------------------------------
-# Helper: load model metrics from saved .pkl
+# Helper: load model info
 # -------------------------------------------------
 def load_model_info(symbol: str, mode: str) -> Optional[dict]:
-    """
-    Load saved model info (metrics + trained_at) from models/{symbol}_{mode}_xgb.pkl
-    Returns:
-        {
-          "metrics": {...},
-          "trained_at": str or None
-        }
-    or None if missing / error.
-    """
     path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
     if not os.path.exists(path):
         return None
-
     try:
         data = joblib.load(path)
     except Exception as e:
         st.caption(f"{symbol} {mode} model load error — {e}")
         return None
-
-    metrics = data.get("metrics", {}) or {}
-    trained_at = data.get("trained_at")
-    return {"metrics": metrics, "trained_at": trained_at}
-
+    return {"metrics": data.get("metrics", {}), "trained_at": data.get("trained_at")}
 
 # -------------------------------------------------
-# PORTFOLIO SUMMARY (per symbol live from Alpaca)
+# PORTFOLIO SUMMARY
 # -------------------------------------------------
 st.header("Portfolio Summary")
 for sym in symbols:
@@ -211,23 +181,14 @@ else:
     st.info("Unable to fetch PDT status.")
 
 # -------------------------------------------------
-# MODEL SIGNALS (Daily + Intraday) + PRICE CHARTS
+# MODEL SIGNALS
 # -------------------------------------------------
 st.header("📡 Model Signals & Price Charts")
 
 for sym in symbols:
     st.subheader(f"Signals for {sym}")
-
-    # -------------------------------
-    # Compute signals
-    # -------------------------------
     try:
-        sig = compute_signals(
-            sym,
-            lookback_minutes=300,   # richer intraday window
-            intraday_weight=0.65,
-            resample_to="5min",
-        )
+        sig = compute_signals(sym, lookback_minutes=300, intraday_weight=0.65, resample_to="5min")
     except Exception as e:
         st.warning(f"{sym}: error computing signals — {e}")
         continue
@@ -239,37 +200,19 @@ for sym in symbols:
     daily_p = sig.get("daily_prob")
     intra_p = sig.get("intraday_prob")
     final_p = sig.get("final_prob")
-
-    # If compute_signals has adaptive weighting, use that;
-    # otherwise fall back to the base 0.65 you passed in.
     weight = sig.get("intraday_weight", 0.65)
-    allow_intraday = sig.get("allow_intraday", True)
 
-    # -------------------------------
-    # Summary metrics
-    # -------------------------------
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Final prob_up", f"{final_p:.3f}")
     col2.metric("Daily model", f"{daily_p:.3f}" if daily_p is not None else "N/A")
-
-    intra_label = "Intraday model"
-    if not allow_intraday:
-        intra_label += " (market closed)"
-    elif intra_p is not None:
-        intra_label += " (active)"
-
-    col3.metric(intra_label, f"{intra_p:.3f}" if intra_p is not None else "N/A")
+    col3.metric("Intraday model", f"{intra_p:.3f}" if intra_p is not None else "N/A")
     col4.metric("Intraday weight", f"{weight:.2f}")
+    st.progress(max(0.0, min(final_p, 1.0)))
 
-    st.progress(max(0.0, min(final_p, 1.0)))  # visual blending bar
-
-    # -------------------------------
-    # MODEL VALIDATION STATS
-    # -------------------------------
-        # -------------------------------
-    # MODEL VALIDATION STATS + FRESHNESS CHECK
-    # -------------------------------
-    with st.expander(f"{sym} Model Validation (Backtest Metrics)", expanded=False):
+    # -------------------------------------------------
+    # MODEL VALIDATION + FRESHNESS
+    # -------------------------------------------------
+    with st.expander(f"📘 {sym} Model Validation & Freshness"):
 
         info_daily = load_model_info(sym, "daily")
         info_intra = load_model_info(sym, "intraday")
@@ -278,170 +221,186 @@ for sym in symbols:
 
         def show_model_block(container, label, info):
             container.markdown(f"### **{label} Model**")
-
             if not info:
-                container.caption("No saved model or metrics found.")
+                container.caption("No saved model found.")
                 return None
 
             metrics = info.get("metrics", {})
-            trained_at = info.get("trained_at", None)
-            container.caption(f"Trained at: `{trained_at}`")
+            trained_at = info.get("trained_at")
 
-            # -------------------------
-            # FRESHNESS CHECK
-            # -------------------------
+            if trained_at:
+                container.caption(f"Trained at: `{trained_at}`")
+
             age_days = None
-            freshness_status = "unknown"
-
             if trained_at:
                 try:
                     t = pd.to_datetime(trained_at)
                     age_days = (pd.Timestamp.utcnow() - t).days
-
                     if age_days > 90:
-                        freshness_status = "❌ **STALE — Retrain ASAP (>90 days)**"
+                        status = "❌ **STALE — Retrain ASAP (>90 days)**"
                         color = "red"
                     elif age_days > 30:
-                        freshness_status = "⚠️ **Old — Retrain Recommended (>30 days)**"
+                        status = "⚠️ **Aging — Retrain Recommended (>30 days)**"
                         color = "orange"
                     else:
-                        freshness_status = "✅ Model Fresh"
+                        status = "🟢 Fresh ✓"
                         color = "green"
 
                     container.markdown(
                         f"""
                         <div style="
-                            padding:8px;
+                            padding:10px;
                             border-radius:8px;
                             background-color:{color};
                             color:white;
                             font-weight:bold;">
-                            {freshness_status}
-                            (Age: {age_days} days)
+                            {status} (Age: {age_days} days)
                         </div>
                         """,
-                        unsafe_allow_html=True,
+                        unsafe_allow_html=True
                     )
-                except Exception:
+                except:
                     pass
 
-            # -------------------------
-            # METRICS LIST
-            # -------------------------
             for key in ["accuracy", "logloss", "roc_auc", "precision", "recall", "f1"]:
-                val = metrics.get(key)
-                container.write(f"- {key}: `{val}`")
+                container.write(f"- **{key}**: `{metrics.get(key)}`")
 
             cm = metrics.get("confusion_matrix")
             if cm:
-                container.write(f"- Confusion Matrix: `{cm}`")
+                container.write(f"- **Confusion Matrix**: `{cm}`")
 
-            return {
-                "accuracy": metrics.get("accuracy"),
-                "logloss": metrics.get("logloss"),
-                "age": age_days,
-            }
+            return {"accuracy": metrics.get("accuracy"), "logloss": metrics.get("logloss"), "age": age_days}
 
-        # Render Daily + Intraday
         daily_stats = show_model_block(c_md1, "Daily", info_daily)
         intra_stats = show_model_block(c_md2, "Intraday", info_intra)
 
-        # Store for global comparison (append into session if needed)
         if "model_compare" not in st.session_state:
             st.session_state["model_compare"] = {}
+        st.session_state["model_compare"][sym] = {"daily": daily_stats, "intraday": intra_stats}
 
-        st.session_state["model_compare"][sym] = {
-            "daily": daily_stats,
-            "intraday": intra_stats,
-        }
+# -------------------------------------------------
+# GLOBAL MODEL COMPARISON — NOW HIDE/SHOW
+# -------------------------------------------------
+st.header("📊 Model Comparison Across Symbols")
 
-    # -------------------------------
-    # Price charts: Daily + Intraday
-    # -------------------------------
-    c_price1, c_price2 = st.columns(2)
+show_compare = st.checkbox("Show model comparison charts", value=False)
 
-    # Daily price (6 months)
-    with c_price1:
-        try:
-            df_daily = fetch_historical_data(sym, period="6mo", interval="1d")
-            if df_daily is not None and not df_daily.empty:
-                close_series = _get_close_series(df_daily)
-                if close_series is not None:
-                    fig, ax = plt.subplots(figsize=(5, 3))
-                    ax.plot(close_series.index, close_series.values, marker="o", linewidth=1)
-                    ax.set_title(f"{sym} Daily Close (6M)")
-                    ax.set_xlabel("Date")
-                    ax.set_ylabel("Price")
-                    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-                    plt.xticks(rotation=45)
-                    ax.grid(True, alpha=0.3)
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                else:
-                    st.caption(f"{sym}: could not resolve daily Close series.")
-            else:
-                st.caption(f"{sym}: no daily data available.")
-        except Exception as e:
-            st.caption(f"{sym}: daily chart error — {e}")
+model_compare = st.session_state.get("model_compare", {})
 
-    # Intraday price (last 300 bars @1m, resampled as-is)
-    with c_price2:
-        try:
-            df_intra = fetch_intraday_history(sym, lookback_minutes=300, interval="1m")
-            if df_intra is not None and not df_intra.empty:
-                close_series = _get_close_series(df_intra)
-                if close_series is not None:
-                    fig, ax = plt.subplots(figsize=(5, 3))
-                    ax.plot(close_series.index, close_series.values, linewidth=1)
-                    ax.set_title(f"{sym} Intraday Close (last ~{len(close_series)} min)")
-                    ax.set_xlabel("Time")
-                    ax.set_ylabel("Price")
-                    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-                    plt.xticks(rotation=45)
-                    ax.grid(True, alpha=0.3)
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                else:
-                    st.caption(f"{sym}: could not resolve intraday Close series.")
-            else:
-                st.caption(f"{sym}: no intraday data available.")
-        except Exception as e:
-            st.caption(f"{sym}: intraday chart error — {e}")
+if show_compare and model_compare:
+
+    chart_data = []
+    for sym, vals in model_compare.items():
+        d = vals.get("daily")
+        i = vals.get("intraday")
+        if d:
+            chart_data.append([sym, "Daily", d["accuracy"], d["logloss"]])
+        if i:
+            chart_data.append([sym, "Intraday", i["accuracy"], i["logloss"]])
+
+    df_chart = pd.DataFrame(chart_data, columns=["Symbol", "Mode", "Accuracy", "Logloss"])
+
+    colA, colB = st.columns(2)
+
+    # Accuracy Chart
+    with colA:
+        st.subheader("Accuracy Comparison")
+        fig, ax = plt.subplots(figsize=(5, 3))
+        for mode in ["Daily", "Intraday"]:
+            sub = df_chart[df_chart["Mode"] == mode]
+            ax.bar(sub["Symbol"] + " (" + mode + ")", sub["Accuracy"])
+        ax.set_ylim(0, 1)
+        ax.set_ylabel("Accuracy")
+        ax.set_xticklabels(sub["Symbol"], rotation=45)
+        ax.grid(True, alpha=0.2)
+        st.pyplot(fig)
+
+    # Logloss Chart
+    with colB:
+        st.subheader("Logloss Comparison")
+        fig, ax = plt.subplots(figsize=(5, 3))
+        for mode in ["Daily", "Intraday"]:
+            sub = df_chart[df_chart["Mode"] == mode]
+            ax.bar(sub["Symbol"] + " (" + mode + ")", sub["Logloss"])
+        ax.set_ylabel("Logloss")
+        ax.set_xticklabels(sub["Symbol"], rotation=45)
+        ax.grid(True, alpha=0.2)
+        st.pyplot(fig)
+
+    # Price charts…
+    for sym in symbols:
+        st.subheader(f"📈 Price Charts for {sym}")
+
+        col_price1, col_price2 = st.columns(2)
+
+        with col_price1:
+            try:
+                df_daily = fetch_historical_data(sym, period="6mo", interval="1d")
+                if df_daily is not None and not df_daily.empty:
+                    s = _get_close_series(df_daily)
+                    if s is not None:
+                        fig, ax = plt.subplots(figsize=(5, 3))
+                        ax.plot(s.index, s.values, marker="o", linewidth=1)
+                        ax.set_title(f"{sym} Daily Close (6 months)")
+                        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+                        plt.xticks(rotation=45)
+                        st.pyplot(fig)
+                    else:
+                        st.caption("Daily Close column missing.")
+            except Exception as e:
+                st.error(f"Daily chart error: {e}")
+
+        with col_price2:
+            try:
+                df_intra = fetch_intraday_history(sym, lookback_minutes=300)
+                if df_intra is not None and not df_intra.empty:
+                    s = _get_close_series(df_intra)
+                    if s is not None:
+                        fig, ax = plt.subplots(figsize=(5, 3))
+                        ax.plot(s.index, s.values, linewidth=1)
+                        ax.set_title(f"{sym} Intraday Close")
+                        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                        plt.xticks(rotation=45)
+                        st.pyplot(fig)
+                    else:
+                        st.caption("Intraday Close column missing.")
+            except Exception as e:
+                st.error(f"Intraday chart error: {e}")
 
 # -------------------------------------------------
 # TRADE LOGS & TRADE ANALYTICS
 # -------------------------------------------------
-st.header("Trade Logs & Analytics")
-for sym in symbols:
-    st.subheader(f"Trades for {sym}")
-    trade_path = get_trade_log_file(sym)
+st.header("💼 Trade Logs & Analytics")
 
-    if not os.path.exists(trade_path):
+for sym in symbols:
+    st.subheader(f"🔎 Trades for {sym}")
+    path = get_trade_log_file(sym)
+
+    if not os.path.exists(path):
         st.info(f"No trade log found for {sym}.")
         continue
 
-    df_trades = pd.read_csv(trade_path)
-    df_trades["timestamp"] = pd.to_datetime(df_trades["timestamp"], utc=True, errors="coerce")
-    df_trades = df_trades.dropna(subset=["timestamp"])
-    df_trades["timestamp_local"] = df_trades["timestamp"].dt.tz_convert(tz)
-    df_trades["timestamp_str"] = df_trades["timestamp_local"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    st.dataframe(df_trades.sort_values("timestamp_local", ascending=False), use_container_width=True)
+    df = pd.read_csv(path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    df["local_time"] = df["timestamp"].dt.tz_convert(tz)
+    df["local_str"] = df["local_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # ---------------------------
-    # Equity / value over time chart for this symbol
-    # ---------------------------
-    if "value" in df_trades.columns:
+    st.dataframe(df.sort_values("local_time", ascending=False), use_container_width=True)
+
+    # ----------------------------------
+    # VALUE OVER TIME PER SYMBOL
+    # ----------------------------------
+    if "value" in df.columns:
         try:
-            df_plot = df_trades.sort_values("timestamp_local").copy()
-
-            # collapse to date-only on x-axis
-            df_plot["date_only"] = df_plot["timestamp_local"].dt.normalize()
+            dfp = df.sort_values("local_time").copy()
+            dfp["date_only"] = dfp["local_time"].dt.normalize()
 
             fig, ax = plt.subplots(figsize=(7, 3))
-            ax.plot(df_plot["date_only"], df_plot["value"], marker="o", linewidth=1)
-            ax.set_title(f"{sym} Portfolio Value Over Time (per-trade)")
+            ax.plot(dfp["date_only"], dfp["value"], marker="o", linewidth=1)
+            ax.set_title(f"{sym} Portfolio Value (per trade)")
             ax.set_xlabel("Date")
             ax.set_ylabel("Value ($)")
             ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.2f}"))
@@ -452,27 +411,28 @@ for sym in symbols:
             plt.tight_layout()
             st.pyplot(fig)
         except Exception as e:
-            st.caption(f"{sym}: could not plot per-symbol value chart — {e}")
+            st.warning(f"Could not plot value chart: {e}")
 
-    # ---------------------------
-    # Trade Analytics
-    # ---------------------------
-    if not df_trades.empty:
-        df_trades["trade_value"] = df_trades["qty"] * df_trades["price"]
-        df_trades["pnl"] = df_trades.apply(
-            lambda row: -row["trade_value"] if row["action"].lower() == "buy" else row["trade_value"], axis=1
+    # ----------------------------------
+    # TRADE ANALYTICS
+    # ----------------------------------
+    if not df.empty:
+        df["trade_value"] = df["qty"] * df["price"]
+        df["pnl"] = df.apply(
+            lambda r: -r["trade_value"] if r["action"].lower() == "buy" else r["trade_value"],
+            axis=1
         )
 
-        df_trades = df_trades.sort_values("timestamp")
-        df_trades["shares_after"] = df_trades["shares"]
+        df = df.sort_values("timestamp")
 
-        cycle_pnls = []
+        df["shares_after"] = df["shares"]
         cycle_rows = []
-        prev_shares = 0
+        cycle_pnls = []
+        prev = 0
 
-        for _, r in df_trades.iterrows():
+        for _, r in df.iterrows():
             cycle_rows.append(r)
-            if r["shares_after"] == prev_shares and len(cycle_rows) >= 2:
+            if r["shares_after"] == prev and len(cycle_rows) >= 2:
                 pnl = sum(x["pnl"] for x in cycle_rows)
                 cycle_pnls.append(pnl)
                 cycle_rows = []
@@ -486,67 +446,61 @@ for sym in symbols:
             avg_loss = s[s < 0].mean() if (s < 0).any() else 0
             largest_win = s.max()
             largest_loss = s.min()
-            profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else float("inf")
+            profit_factor = gross_profit / gross_loss if gross_loss != 0 else float("inf")
 
-            colA, colB, colC, colD = st.columns(4)
-            colA.metric("Win Rate", f"{win_rate:.1f}%")
-            colB.metric("Profit Factor", f"{profit_factor:.2f}")
-            colC.metric("Avg Win / Loss", f"{avg_win:.2f} / {avg_loss:.2f}")
-            colD.metric("Largest Win / Loss", f"{largest_win:.2f} / {largest_loss:.2f}")
+            cA, cB, cC, cD = st.columns(4)
+            cA.metric("Win Rate", f"{win_rate:.1f}%")
+            cB.metric("Profit Factor", f"{profit_factor:.2f}")
+            cC.metric("Avg Win / Loss", f"{avg_win:.2f} / {avg_loss:.2f}")
+            cD.metric("Largest Win / Loss", f"{largest_win:.2f} / {largest_loss:.2f}")
         else:
-            st.info("Not enough closed trades to compute analytics yet.")
+            st.info("Not enough closed trades to compute analytics.")
 
 # -------------------------------------------------
-# TOTAL DAILY PORTFOLIO PERFORMANCE + METRICS
+# TOTAL DAILY PORTFOLIO PERFORMANCE
 # -------------------------------------------------
 st.header("📈 Total Portfolio Performance (All Symbols Combined)")
-daily_path = get_daily_portfolio_file()
 
-if os.path.exists(daily_path):
-    df_daily = pd.read_csv(daily_path)
+path = get_daily_portfolio_file()
 
-    if df_daily.empty:
+if os.path.exists(path):
+    df = pd.read_csv(path)
+
+    if df.empty:
         st.warning("Daily portfolio is empty.")
     else:
-        df_daily["date"] = pd.to_datetime(df_daily["date"], utc=True, errors="coerce")
-        df_daily = df_daily.dropna(subset=["date"])
-        df_daily["date"] = df_daily["date"].dt.tz_convert(tz)
+        df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert(tz)
+        df = df.sort_values("date")
 
-        df_daily = df_daily.sort_values("date")
-
-        # -----------------------------------
+        # ----------------------
         # Metrics
-        # -----------------------------------
-        V0 = df_daily["value"].iloc[0]
-        VT = df_daily["value"].iloc[-1]
+        # ----------------------
+        V0 = df["value"].iloc[0]
+        VT = df["value"].iloc[-1]
 
-        days = (df_daily["date"].iloc[-1] - df_daily["date"].iloc[0]).days
-        days = max(days, 1)  # prevent divide by zero
+        days = max((df["date"].iloc[-1] - df["date"].iloc[0]).days, 1)
 
-        cumulative_return = (VT / V0) - 1
+        cumulative_return = VT / V0 - 1
         annualized_return = (VT / V0) ** (365 / days) - 1
 
-        # Daily returns
-        df_daily["return"] = df_daily["value"].pct_change()
-        daily_volatility = df_daily["return"].std()
+        df["ret"] = df["value"].pct_change()
+        daily_vol = df["ret"].std()
 
         sharpe = (
-            (annualized_return - 0.00) / (daily_volatility * (365 ** 0.5))
-            if daily_volatility and daily_volatility > 0
-            else float("nan")
+            (annualized_return - 0) / (daily_vol * (365 ** 0.5))
+            if daily_vol and daily_vol > 0 else float("nan")
         )
 
-        # Display metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Cumulative Return", f"{cumulative_return*100:.2f}%")
-        m2.metric("Annualized Return", f"{annualized_return*100:.2f}%")
-        m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Cumulative Return", f"{cumulative_return*100:.2f}%")
+        c2.metric("Annualized Return", f"{annualized_return*100:.2f}%")
+        c3.metric("Sharpe Ratio", f"{sharpe:.2f}")
 
-        # -----------------------------------
-        # Chart
-        # -----------------------------------
+        # ----------------------
+        # Value Chart
+        # ----------------------
         fig, ax = plt.subplots(figsize=(11, 4))
-        ax.plot(df_daily["date"], df_daily["value"], marker="o")
+        ax.plot(df["date"], df["value"], marker="o")
         ax.set_title("Total Portfolio Value Over Time")
         ax.set_xlabel("Date")
         ax.set_ylabel("Value ($)")
@@ -557,6 +511,5 @@ if os.path.exists(daily_path):
         ax.grid(True)
         plt.tight_layout()
         st.pyplot(fig)
-
 else:
-    st.info("No daily portfolio data found. Run update_portfolio_data.py first.")
+    st.info("No daily portfolio file found. Run update_portfolio_data.py.")

@@ -1,96 +1,28 @@
-# features.py
+# ================================================================
+# advanced_features.py
+# Complete High-Signal Feature Engineering for Daily/Intraday ML
+# ================================================================
+
 import pandas as pd
 import numpy as np
 
-# ============================================================================
-# MULTIINDEX → FLAT OHLCV COLUMN CLEANER
-# ============================================================================
-def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Fully flattens yfinance MultiIndex columns.
-    Extracts correct OHLCV names regardless of structure.
-    Resulting columns will always be: Open, High, Low, Close, Volume
-    """
-    df = df.copy()
-
-    if isinstance(df.columns, pd.MultiIndex):
-        new_cols = []
-        for col in df.columns:
-            # col is a tuple like ("Price","Open") or ("Price","Close")
-            chosen = None
-            for part in col:
-                if str(part).lower() in ["open", "high", "low", "close", "volume"]:
-                    chosen = part
-                    break
-            if chosen is None:
-                chosen = col[-1]  # fallback
-            new_cols.append(str(chosen).capitalize())
-
-        df.columns = new_cols
-    else:
-        # Normalize to capitalized OHLCV names
-        df.columns = [str(c).capitalize() for c in df.columns]
-
-    rename_map = {
-        "Adj close": "Close",
-        "Adjclose": "Close",
-        "Close*": "Close",
-    }
-    df.rename(columns=rename_map, inplace=True)
-
-    return df
-
-
-# ============================================================================
-# FORCE ALL OHLCV TO 1D FLOAT SERIES
-# ============================================================================
-def _fix_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ensure we have numeric 1D Open/High/Low/Close/Volume columns.
-    """
-    df = df.copy()
-    df = _clean_columns(df)
-
-    required_cols = ["Open", "High", "Low", "Close", "Volume"]
-    for col in required_cols:
-        if col not in df.columns:
-            raise ValueError(f"[FATAL] Missing required column: {col}")
-
-        s = df[col]
-
-        # If somehow a DataFrame, collapse to first column
-        if isinstance(s, pd.DataFrame):
-            s = s.iloc[:, 0]
-
-        vals = np.asarray(s)
-        if vals.ndim > 1:
-            s = pd.Series(vals.ravel(), index=df.index)
-
-        df[col] = pd.to_numeric(s, errors="coerce")
-
-    return df
-
-
-# ============================================================================
-# ADVANCED INDICATOR HELPERS (from advanced_features.py)
-# ============================================================================
-def ema(series: pd.Series, span: int) -> pd.Series:
+# ------------------------------------------------------------
+# Helper Indicators
+# ------------------------------------------------------------
+def ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
-
-def sma(series: pd.Series, length: int) -> pd.Series:
+def sma(series, length):
     return series.rolling(length).mean()
 
-
-def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+def rsi(series, length=14):
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(length).mean()
     loss = -delta.clip(upper=0).rolling(length).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-
-def macd(close: pd.Series):
+def macd(close):
     fast = ema(close, 12)
     slow = ema(close, 26)
     macd_line = fast - slow
@@ -98,53 +30,44 @@ def macd(close: pd.Series):
     hist = macd_line - signal
     return macd_line, signal, hist
 
-
-def stoch(df: pd.DataFrame, k: int = 14, d: int = 3):
+def stoch(df, k=14, d=3):
     low_min = df["Low"].rolling(k).min()
     high_max = df["High"].rolling(k).max()
     percent_k = (df["Close"] - low_min) / (high_max - low_min) * 100
     percent_d = percent_k.rolling(d).mean()
     return percent_k, percent_d
 
-
-def bollinger(close: pd.Series, length: int = 20, num_std: int = 2):
+def bollinger(close, length=20, num_std=2):
     mid = close.rolling(length).mean()
     std = close.rolling(length).std()
     upper = mid + num_std * std
     lower = mid - num_std * std
     return mid, upper, lower
 
-
-def atr(df: pd.DataFrame, length: int = 14):
+def atr(df, length=14):
     high_low = df["High"] - df["Low"]
     high_close = (df["High"] - df["Close"].shift()).abs()
     low_close = (df["Low"] - df["Close"].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.rolling(length).mean()
 
-
-def obv(df: pd.DataFrame) -> pd.Series:
-    """On-Balance Volume."""
+def obv(df):
+    """On-balance volume"""
     direction = np.sign(df["Close"].diff()).fillna(0)
     return (direction * df["Volume"]).cumsum()
 
 
-# ============================================================================
-# TIME-OF-DAY FEATURES (INTRADAY)
-# ============================================================================
-def add_intraday_time_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add cyclic time-of-day features for intraday data.
-    Safe to call on daily; will no-op if index is not DatetimeIndex.
-    """
+# ------------------------------------------------------------
+# Time-of-day features for intraday TFs
+# ------------------------------------------------------------
+def add_intraday_time_features(df):
     if not isinstance(df.index, pd.DatetimeIndex):
         return df
 
-    df = df.copy()
     df["hour"] = df.index.hour
     df["minute"] = df.index.minute
 
-    # Cyclical encoding
+    # Encode time cyclically: (for 1m/5m data)
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     df["minute_sin"] = np.sin(2 * np.pi * df["minute"] / 60)
@@ -153,21 +76,19 @@ def add_intraday_time_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ============================================================================
-# ADVANCED FEATURE BUILDER
-# ============================================================================
+# ------------------------------------------------------------
+# Main Feature Builder
+# ------------------------------------------------------------
 def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds 40+ engineered features.
     Safe for both Daily and Intraday datasets.
-
-    Assumes df already has cleaned numeric OHLCV columns:
-    Open, High, Low, Close, Volume
     """
+
     df = df.copy()
 
     # =====================================================
-    # Price Normalizations & Returns
+    # Price Normalizations
     # =====================================================
     df["return_1"] = df["Close"].pct_change()
     df["return_5"] = df["Close"].pct_change(5)
@@ -208,7 +129,7 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     df["macd_hist"] = macd_hist
 
     # =====================================================
-    # Stochastic Oscillator
+    # Stochastic
     # =====================================================
     stoch_k, stoch_d = stoch(df)
     df["stoch_k"] = stoch_k
@@ -224,7 +145,7 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     df["bb_width"] = (upper - lower) / mid
 
     # =====================================================
-    # ATR + Volatility Clusters
+    # ATR + Volatility
     # =====================================================
     df["atr"] = atr(df)
     df["vol_5"] = df["return_1"].rolling(5).std()
@@ -243,46 +164,13 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
         df[f"lag_ret_{lag}"] = df["return_1"].shift(lag)
 
     # =====================================================
-    # Intraday time encodings
+    # Intraday encodings (only if intraday index)
     # =====================================================
     df = add_intraday_time_features(df)
 
     # =====================================================
-    # Clean infinities / NaNs and drop initial warm-up rows
+    # Drop NaN-heavy first rows
     # =====================================================
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
 
     return df
-
-
-# ============================================================================
-# BASE FEATURE ENTRY POINT
-# ============================================================================
-def _build_base_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Base entry point for both daily & intraday feature sets.
-    1) Clean & normalize OHLCV
-    2) Add advanced features
-    """
-    df = _fix_ohlcv(df)
-    df = add_advanced_features(df)
-    return df
-
-
-# ============================================================================
-# PUBLIC FUNCTIONS (used by model_xgb)
-# ============================================================================
-def build_daily_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build full advanced feature set for daily data.
-    """
-    return _build_base_features(df)
-
-
-def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build full advanced feature set for intraday data.
-    Uses same core features as daily, plus extra time-of-day encodings.
-    """
-    return _build_base_features(df)
