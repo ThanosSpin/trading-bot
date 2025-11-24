@@ -96,7 +96,7 @@ st.caption("🔍 Decision = what main.py will use for trading.")
 
 # Auto-refresh
 REFRESH_INTERVAL = 60
-st_autorefresh(interval=REFRESH_INTERVAL * 5, key="global_refresh")
+st_autorefresh(interval=REFRESH_INTERVAL * 100, key="global_refresh")
 st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL} seconds.")
 
 # Normalize SYMBOL into list
