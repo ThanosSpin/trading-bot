@@ -95,9 +95,10 @@ c6.metric("Alpaca Clock", "OPEN" if alpaca_flag else "CLOSED")
 st.caption("🔍 Decision = what main.py will use for trading.")
 
 # Auto-refresh
-REFRESH_INTERVAL = 60
-st_autorefresh(interval=REFRESH_INTERVAL * 100, key="global_refresh")
-st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL} seconds.")
+# Refresh full dashboard (and therefore prob_up) every 10 minutes
+REFRESH_INTERVAL = 600  # seconds
+st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="global_refresh")
+st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL // 60} minutes.")
 
 # Normalize SYMBOL into list
 symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]

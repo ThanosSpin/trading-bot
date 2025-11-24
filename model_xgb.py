@@ -200,16 +200,20 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
 # =====================================================================
 # COMPLEX SIGNAL CALCULATOR (DAILY + INTRADAY) WITH ADAPTIVE WEIGHTING
 # =====================================================================
+# =====================================================================
+# COMPLEX SIGNAL CALCULATOR (DAILY + INTRADAY) WITH ADAPTIVE LOOKBACK
+# =====================================================================
 def compute_signals(
-    symbol: str,
-    lookback_minutes: int = 60,
-    intraday_weight: float = INTRADAY_WEIGHT,
-    resample_to: str = "5min",
+    symbol,
+    lookback_minutes=60,
+    intraday_weight=INTRADAY_WEIGHT,
+    resample_to="5min",
 ):
     """
-    Combined signal generator with adaptive intraday weighting.
+    Combined signal generator with adaptive intraday weighting and
+    adaptive intraday lookback.
 
-    Returns dict:
+    Returns:
         {
           "daily_prob": float or None,
           "intraday_prob": float or None,
@@ -218,7 +222,9 @@ def compute_signals(
           "allow_intraday": bool,
           "intraday_rows": int,
           "intraday_before": int,
-          "daily_rows": int
+          "daily_rows": int,
+          "used_lookback_minutes": int,
+          "intraday_quality_score": float in [0,1]
         }
     """
 
@@ -231,10 +237,12 @@ def compute_signals(
         "intraday_rows": 0,
         "intraday_before": 0,
         "daily_rows": 0,
+        "used_lookback_minutes": lookback_minutes,
+        "intraday_quality_score": 0.0,
     }
 
     # -------------------------
-    # LOAD MODELS
+    # Load Models
     # -------------------------
     model_daily = load_model(symbol, mode="daily")
     model_intraday = load_model(symbol, mode="intraday")
@@ -249,76 +257,123 @@ def compute_signals(
             df_feat = build_daily_features(df_daily)
             results["daily_prob"] = predict_from_model(model_daily, df_feat)
     except Exception as e:
-        print(f"[ERROR] Daily prediction error for {symbol}: {e}")
+        print(f"[ERROR] Daily prediction error: {e}")
 
     # -------------------------
-    # INTRADAY SIGNAL
+    # INTRADAY SIGNAL (ADAPTIVE LOOKBACK)
     # -------------------------
-    df_intra = None
+    df_intra_resampled = None
+
     try:
-        df_intra = fetch_intraday_history(symbol, lookback_minutes=lookback_minutes)
-        if df_intra is not None and not df_intra.empty:
-            results["intraday_before"] = len(df_intra)
+        # Start from requested lookback and gradually expand
+        # if we don't get enough resampled bars.
+        candidate_lookbacks = sorted(
+            {lookback_minutes, max(lookback_minutes, 600),
+             max(lookback_minutes, 900), max(lookback_minutes, 1200)}
+        )
 
-            # Resample smoothing
-            df_intra = df_intra.resample(resample_to).last().dropna()
-            results["intraday_rows"] = len(df_intra)
+        best_len = 0
 
-            if len(df_intra) >= 20:
-                df_feat_intra = build_intraday_features(df_intra)
-                results["intraday_prob"] = predict_from_model(model_intraday, df_feat_intra)
-            else:
-                print(f"[INFO] Intraday dataset too small after resample for {symbol} ({len(df_intra)} rows).")
-                results["allow_intraday"] = False
-        else:
+        for lb in candidate_lookbacks:
+            df_raw = fetch_intraday_history(symbol, lookback_minutes=lb)
+            if df_raw is None or df_raw.empty:
+                continue
+
+            results["intraday_before"] = len(df_raw)
+            df_res = df_raw.resample(resample_to).last().dropna()
+            n_res = len(df_res)
+
+            # Keep best seen so far
+            if n_res > best_len:
+                best_len = n_res
+                df_intra_resampled = df_res
+                results["used_lookback_minutes"] = lb
+                results["intraday_rows"] = n_res
+
+            # If we already have a solid dataset, stop expanding
+            if n_res >= 80:
+                break
+
+        # If still nothing useful:
+        if df_intra_resampled is None or len(df_intra_resampled) < 20:
+            print(
+                f"[INFO] Intraday dataset too small after adaptive lookback "
+                f"(rows={0 if df_intra_resampled is None else len(df_intra_resampled)})."
+            )
             results["allow_intraday"] = False
+        else:
+            # Intraday features + prediction
+            df_feat_intra = build_intraday_features(df_intra_resampled)
+            results["intraday_prob"] = predict_from_model(model_intraday, df_feat_intra)
+
+            # quality score: 0..1 based on 120-resampled-bar target
+            results["intraday_quality_score"] = float(
+                max(0.0, min(1.0, len(df_intra_resampled) / 120.0))
+            )
 
     except Exception as e:
-        print(f"[ERROR] Intraday prediction error for {symbol}: {e}")
+        print(f"[ERROR] Intraday prediction error: {e}")
         results["allow_intraday"] = False
 
+    # Extract before combine
     dp = results["daily_prob"]
     ip = results["intraday_prob"]
 
-    # -------------------------
+    # ===============================
     # ADAPTIVE INTRADAY WEIGHT
-    # -------------------------
+    # ===============================
     weight = intraday_weight
 
-    if not results["allow_intraday"] or ip is None or df_intra is None or df_intra.empty:
+    if not results["allow_intraday"] or ip is None:
+        # Can't use intraday at all
         weight = 0.0
     else:
+        # Start from base, scale by data quality
+        q = results.get("intraday_quality_score", 1.0)
+        weight = intraday_weight * q
+
+        # Also incorporate recent intraday volatility
         try:
-            close = df_intra["Close"]
+            close = df_intra_resampled["Close"]
             returns = close.pct_change().dropna()
             vol = returns.std()
 
-            # Simple volatility-based scaling
-            if vol > 0.025:       # high vol → trust intraday more
-                weight = min(0.90, intraday_weight + 0.20)
-            elif vol < 0.008:     # calm → reduce intraday influence
-                weight = max(0.30, intraday_weight - 0.20)
-            else:                 # medium → keep base weight
-                weight = intraday_weight
+            # high vol → rely more on intraday
+            if vol > 0.025:
+                weight = min(0.90, weight + 0.20)
+            # very calm → reduce intraday influence
+            elif vol < 0.008:
+                weight = max(0.30, weight - 0.20)
+            # otherwise keep as scaled by quality
         except Exception:
-            # On any failure, just keep original weight
-            weight = intraday_weight
+            pass
 
     results["intraday_weight"] = weight
 
-    # -----------------------------
-    # FINAL COMBINED PROB
-    # -----------------------------
+    # ===============================
+    # FINAL PROBABILITY
+    # ===============================
     if dp is None and ip is None:
         results["final_prob"] = None
     elif dp is None:
         results["final_prob"] = ip
-    elif ip is None:
+    elif ip is None or weight == 0.0:
         results["final_prob"] = dp
     else:
         results["final_prob"] = float(weight * ip + (1 - weight) * dp)
 
     return results
+
+
+# =====================================================================
+# SIMPLE NEXT-STEP PREDICTOR (WRAPPER)
+# =====================================================================
+def predict_next(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT, resample_to="5min"):
+    """
+    Compatibility wrapper — returns only the final probability.
+    """
+    sig = compute_signals(symbol, lookback_minutes, intraday_weight, resample_to)
+    return sig.get("final_prob")
 
 
 # =====================================================================
