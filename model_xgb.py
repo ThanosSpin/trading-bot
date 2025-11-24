@@ -1,9 +1,11 @@
 # model_xgb.py
 import os
+from datetime import datetime
+
 import joblib
 import numpy as np
-from xgboost import XGBClassifier
 import pandas as pd
+from xgboost import XGBClassifier
 
 from features import build_daily_features, build_intraday_features
 from data_loader import fetch_historical_data, fetch_intraday_history
@@ -21,16 +23,38 @@ def sigmoid(x):
 
 
 # ---------------------------------------------------------
-# Train Model
+# TRAIN MODEL  (returns artifact dict)
 # ---------------------------------------------------------
-def train_model(df, symbol, mode="daily"):
+def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     """
     Train XGB model for a given symbol.
-    mode: "daily" or "intraday"
+
+    Returns an artifact dict:
+        {
+          "model": XGBClassifier,
+          "features": [list of feature names],
+          "metrics": {...},
+          "trained_at": ISO timestamp,
+          "symbol": str,
+          "mode": "daily" | "intraday",
+        }
     """
+
+    from sklearn.metrics import (
+        accuracy_score,
+        log_loss,
+        roc_auc_score,
+        confusion_matrix,
+        precision_score,
+        recall_score,
+        f1_score,
+    )
+
     df = df.copy()
 
-    # Build features
+    # -----------------------------
+    # FEATURE GENERATION
+    # -----------------------------
     if mode == "daily":
         df_feat = build_daily_features(df)
     elif mode == "intraday":
@@ -38,14 +62,20 @@ def train_model(df, symbol, mode="daily"):
     else:
         raise ValueError("mode must be 'daily' or 'intraday'")
 
-    # Target: next candle up/down
+    # Label: next candle up/down
     df_feat["target"] = (df_feat["Close"].shift(-1) > df_feat["Close"]).astype(int)
     df_feat.dropna(inplace=True)
 
+    if df_feat.empty:
+        raise ValueError(f"No rows left after feature engineering for {symbol} ({mode})")
+
     X = df_feat.drop(columns=["target"])
     y = df_feat["target"]
+    feature_list = list(X.columns)
 
-    # Model hyperparameters
+    # -----------------------------
+    # HYPERPARAMETERS
+    # -----------------------------
     params = {
         "eval_metric": "logloss",
         "tree_method": "hist",
@@ -60,20 +90,75 @@ def train_model(df, symbol, mode="daily"):
         params.update({"n_estimators": 500, "learning_rate": 0.035})
 
     model = XGBClassifier(**params)
-    model.fit(X, y)
 
-    save_path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
-    joblib.dump({"model": model, "features": list(X.columns)}, save_path)
-    print(f"✅ Model trained and saved: {save_path}")
+    # -----------------------------
+    # TIME-SERIES TRAIN/TEST SPLIT (80/20, no shuffle)
+    # -----------------------------
+    split_idx = int(len(X) * 0.8)
+    if split_idx <= 0 or split_idx >= len(X):
+        raise ValueError(f"Not enough data to split train/test for {symbol} ({mode})")
 
-    return model
+    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+
+    # -----------------------------
+    # TRAIN
+    # -----------------------------
+    model.fit(X_train, y_train)
+
+    # -----------------------------
+    # VALIDATION METRICS
+    # -----------------------------
+    metrics = {}
+    try:
+        y_pred_proba = model.predict_proba(X_test)[:, 1]
+        y_pred = (y_pred_proba > 0.5).astype(int)
+
+        metrics["accuracy"] = float(accuracy_score(y_test, y_pred))
+        metrics["logloss"] = float(log_loss(y_test, y_pred_proba))
+        metrics["roc_auc"] = float(roc_auc_score(y_test, y_pred_proba))
+        metrics["precision"] = float(precision_score(y_test, y_pred))
+        metrics["recall"] = float(recall_score(y_test, y_pred))
+        metrics["f1"] = float(f1_score(y_test, y_pred))
+        metrics["confusion_matrix"] = (
+            confusion_matrix(y_test, y_pred).tolist()
+        )
+    except Exception as e:
+        print(f"[WARN] Could not compute some metrics for {symbol} ({mode}): {e}")
+
+    # -----------------------------
+    # LOG RESULTS
+    # -----------------------------
+    print(f"\n📊 MODEL VALIDATION — {symbol} [{mode.upper()}]")
+    print("--------------------------------------------")
+    for k, v in metrics.items():
+        if k == "confusion_matrix":
+            print(f"{k:20}: {v}")
+        else:
+            print(f"{k:20}: {v:.4f}")
+    print("--------------------------------------------\n")
+
+    artifact = {
+        "model": model,
+        "features": feature_list,
+        "metrics": metrics,
+        "trained_at": datetime.now().isoformat(),
+        "symbol": symbol,
+        "mode": mode,
+    }
+
+    return artifact
 
 
 # ---------------------------------------------------------
-# Load
+# LOAD MODEL ARTIFACT
 # ---------------------------------------------------------
-def load_model(symbol, mode):
-    """Load (model, feature list) or None."""
+def load_model(symbol: str, mode: str):
+    """
+    Load saved model artifact:
+       {"model", "features", "metrics", "trained_at", "symbol", "mode"}
+    or return None if missing.
+    """
     path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
     if not os.path.exists(path):
         return None
@@ -86,10 +171,10 @@ def load_model(symbol, mode):
 
 
 # ---------------------------------------------------------
-# Predict from model
+# PREDICT FROM MODEL ARTIFACT
 # ---------------------------------------------------------
-def predict_from_model(model_dict, df_features):
-    """Return probability using stored feature order."""
+def predict_from_model(model_dict, df_features: pd.DataFrame):
+    """Return probability using stored feature order (or None)."""
     if model_dict is None:
         return None
 
@@ -97,9 +182,10 @@ def predict_from_model(model_dict, df_features):
         model = model_dict["model"]
         feat_cols = model_dict["features"]
 
-        # Align feature order
         missing = [c for c in feat_cols if c not in df_features.columns]
         if missing:
+            # Feature schema mismatch — safer to skip
+            print(f"[WARN] Missing features for prediction: {missing}")
             return None
 
         X = df_features[feat_cols].tail(1).values
@@ -112,18 +198,18 @@ def predict_from_model(model_dict, df_features):
 
 
 # =====================================================================
-# COMPLEX SIGNAL CALCULATOR (DAILY + INTRADAY)
+# COMPLEX SIGNAL CALCULATOR (DAILY + INTRADAY) WITH ADAPTIVE WEIGHTING
 # =====================================================================
 def compute_signals(
-    symbol,
-    lookback_minutes=60,
-    intraday_weight=INTRADAY_WEIGHT,
-    resample_to="5min",
+    symbol: str,
+    lookback_minutes: int = 60,
+    intraday_weight: float = INTRADAY_WEIGHT,
+    resample_to: str = "5min",
 ):
     """
     Combined signal generator with adaptive intraday weighting.
 
-    Returns:
+    Returns dict:
         {
           "daily_prob": float or None,
           "intraday_prob": float or None,
@@ -148,7 +234,7 @@ def compute_signals(
     }
 
     # -------------------------
-    # Load Models
+    # LOAD MODELS
     # -------------------------
     model_daily = load_model(symbol, mode="daily")
     model_intraday = load_model(symbol, mode="intraday")
@@ -163,15 +249,15 @@ def compute_signals(
             df_feat = build_daily_features(df_daily)
             results["daily_prob"] = predict_from_model(model_daily, df_feat)
     except Exception as e:
-        print(f"[ERROR] Daily prediction error: {e}")
+        print(f"[ERROR] Daily prediction error for {symbol}: {e}")
 
     # -------------------------
     # INTRADAY SIGNAL
     # -------------------------
+    df_intra = None
     try:
         df_intra = fetch_intraday_history(symbol, lookback_minutes=lookback_minutes)
         if df_intra is not None and not df_intra.empty:
-
             results["intraday_before"] = len(df_intra)
 
             # Resample smoothing
@@ -179,51 +265,50 @@ def compute_signals(
             results["intraday_rows"] = len(df_intra)
 
             if len(df_intra) >= 20:
-                df_feat = build_intraday_features(df_intra)
-                results["intraday_prob"] = predict_from_model(model_intraday, df_feat)
+                df_feat_intra = build_intraday_features(df_intra)
+                results["intraday_prob"] = predict_from_model(model_intraday, df_feat_intra)
             else:
-                print(f"[INFO] Intraday dataset too small after resample ({len(df_intra)} rows).")
+                print(f"[INFO] Intraday dataset too small after resample for {symbol} ({len(df_intra)} rows).")
                 results["allow_intraday"] = False
+        else:
+            results["allow_intraday"] = False
 
     except Exception as e:
-        print(f"[ERROR] Intraday prediction error: {e}")
+        print(f"[ERROR] Intraday prediction error for {symbol}: {e}")
         results["allow_intraday"] = False
 
-    # Extract before combine
     dp = results["daily_prob"]
     ip = results["intraday_prob"]
 
-    # ===============================
+    # -------------------------
     # ADAPTIVE INTRADAY WEIGHT
-    # ===============================
+    # -------------------------
     weight = intraday_weight
 
-    if not results["allow_intraday"] or ip is None:
-        weight = 0.0  # cannot use intraday
+    if not results["allow_intraday"] or ip is None or df_intra is None or df_intra.empty:
+        weight = 0.0
     else:
         try:
-            # Estimate volatility from intraday prices
             close = df_intra["Close"]
             returns = close.pct_change().dropna()
-
             vol = returns.std()
 
-            # adaptive scaling thresholds
-            if vol > 0.025:       # High volatility → trust intraday more
+            # Simple volatility-based scaling
+            if vol > 0.025:       # high vol → trust intraday more
                 weight = min(0.90, intraday_weight + 0.20)
-            elif vol < 0.008:     # Very calm → reduce intraday influence
+            elif vol < 0.008:     # calm → reduce intraday influence
                 weight = max(0.30, intraday_weight - 0.20)
-            else:                 # Medium volatility → slight adjustment
+            else:                 # medium → keep base weight
                 weight = intraday_weight
-
         except Exception:
-            pass
+            # On any failure, just keep original weight
+            weight = intraday_weight
 
     results["intraday_weight"] = weight
 
-    # ===============================
-    # FINAL PROBABILITY
-    # ===============================
+    # -----------------------------
+    # FINAL COMBINED PROB
+    # -----------------------------
     if dp is None and ip is None:
         results["final_prob"] = None
     elif dp is None:
@@ -235,30 +320,16 @@ def compute_signals(
 
     return results
 
-    # -----------------------------
-    # COMBINE DAILY + INTRADAY
-    # -----------------------------
-    dp = results["daily_prob"]
-    ip = results["intraday_prob"]
-
-    if dp is None and ip is None:
-        results["final_prob"] = None
-    elif dp is None:
-        results["final_prob"] = ip
-    elif ip is None:
-        results["final_prob"] = dp
-    else:
-        results["final_prob"] = float(intraday_weight * ip + (1 - intraday_weight) * dp)
-
-    if debug:
-        print(f"[DEBUG] {symbol} final_prob={results['final_prob']}")
-
-    return results
 
 # =====================================================================
 # SIMPLE NEXT-STEP PREDICTOR (WRAPPER)
 # =====================================================================
-def predict_next(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT, resample_to="5min"):
+def predict_next(
+    symbol: str,
+    lookback_minutes: int = 60,
+    intraday_weight: float = INTRADAY_WEIGHT,
+    resample_to: str = "5min",
+):
     """
     Compatibility wrapper — returns only the final probability.
     """

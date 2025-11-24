@@ -11,8 +11,9 @@ import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
 from market import debug_market
 from typing import Optional
+import joblib
 
-from config import TIMEZONE, SYMBOL
+from config import TIMEZONE, SYMBOL, MODEL_DIR
 from portfolio import (
     get_trade_log_file,
     get_daily_portfolio_file,
@@ -83,9 +84,9 @@ st.markdown(
 # Detailed breakdown
 st.subheader("Market Diagnostics")
 c1, c2, c3 = st.columns(3)
-c1.metric("NY Time", ny_now)
-c2.metric("Market Opens", open_time)
-c3.metric("Market Closes", close_time)
+c1.metric("NY Time", str(ny_now))
+c2.metric("Market Opens", str(open_time))
+c3.metric("Market Closes", str(close_time))
 
 c4, c5, c6 = st.columns(3)
 c4.metric("Trading Day", "Yes" if is_day else "No")
@@ -105,12 +106,10 @@ tz = pytz.timezone(TIMEZONE)
 
 
 # -------------------------------------------------
-# Small helper: safely get Close series from yfinance DF
+# Small helper: safely get Close series from yfinance / Alpaca DF
 # -------------------------------------------------
-from typing import Optional
-
 def _get_close_series(df: pd.DataFrame) -> Optional[pd.Series]:
-    """Return a 1D 'Close' price series from normal or MultiIndex yfinance DataFrame."""
+    """Return a 1D 'Close' price series from normal or MultiIndex DataFrame."""
     if df is None or df.empty:
         return None
 
@@ -139,6 +138,34 @@ def _get_close_series(df: pd.DataFrame) -> Optional[pd.Series]:
             return s
 
     return None
+
+
+# -------------------------------------------------
+# Helper: load model metrics from saved .pkl
+# -------------------------------------------------
+def load_model_info(symbol: str, mode: str) -> Optional[dict]:
+    """
+    Load saved model info (metrics + trained_at) from models/{symbol}_{mode}_xgb.pkl
+    Returns:
+        {
+          "metrics": {...},
+          "trained_at": str or None
+        }
+    or None if missing / error.
+    """
+    path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
+    if not os.path.exists(path):
+        return None
+
+    try:
+        data = joblib.load(path)
+    except Exception as e:
+        st.caption(f"{symbol} {mode} model load error — {e}")
+        return None
+
+    metrics = data.get("metrics", {}) or {}
+    trained_at = data.get("trained_at")
+    return {"metrics": metrics, "trained_at": trained_at}
 
 
 # -------------------------------------------------
@@ -216,7 +243,7 @@ for sym in symbols:
     # If compute_signals has adaptive weighting, use that;
     # otherwise fall back to the base 0.65 you passed in.
     weight = sig.get("intraday_weight", 0.65)
-    allow_intraday = sig.get("allow_intraday", True)  # kept for compatibility / future use
+    allow_intraday = sig.get("allow_intraday", True)
 
     # -------------------------------
     # Summary metrics
@@ -235,6 +262,98 @@ for sym in symbols:
     col4.metric("Intraday weight", f"{weight:.2f}")
 
     st.progress(max(0.0, min(final_p, 1.0)))  # visual blending bar
+
+    # -------------------------------
+    # MODEL VALIDATION STATS
+    # -------------------------------
+        # -------------------------------
+    # MODEL VALIDATION STATS + FRESHNESS CHECK
+    # -------------------------------
+    with st.expander(f"{sym} Model Validation (Backtest Metrics)", expanded=False):
+
+        info_daily = load_model_info(sym, "daily")
+        info_intra = load_model_info(sym, "intraday")
+
+        c_md1, c_md2 = st.columns(2)
+
+        def show_model_block(container, label, info):
+            container.markdown(f"### **{label} Model**")
+
+            if not info:
+                container.caption("No saved model or metrics found.")
+                return None
+
+            metrics = info.get("metrics", {})
+            trained_at = info.get("trained_at", None)
+            container.caption(f"Trained at: `{trained_at}`")
+
+            # -------------------------
+            # FRESHNESS CHECK
+            # -------------------------
+            age_days = None
+            freshness_status = "unknown"
+
+            if trained_at:
+                try:
+                    t = pd.to_datetime(trained_at)
+                    age_days = (pd.Timestamp.utcnow() - t).days
+
+                    if age_days > 90:
+                        freshness_status = "❌ **STALE — Retrain ASAP (>90 days)**"
+                        color = "red"
+                    elif age_days > 30:
+                        freshness_status = "⚠️ **Old — Retrain Recommended (>30 days)**"
+                        color = "orange"
+                    else:
+                        freshness_status = "✅ Model Fresh"
+                        color = "green"
+
+                    container.markdown(
+                        f"""
+                        <div style="
+                            padding:8px;
+                            border-radius:8px;
+                            background-color:{color};
+                            color:white;
+                            font-weight:bold;">
+                            {freshness_status}
+                            (Age: {age_days} days)
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                except Exception:
+                    pass
+
+            # -------------------------
+            # METRICS LIST
+            # -------------------------
+            for key in ["accuracy", "logloss", "roc_auc", "precision", "recall", "f1"]:
+                val = metrics.get(key)
+                container.write(f"- {key}: `{val}`")
+
+            cm = metrics.get("confusion_matrix")
+            if cm:
+                container.write(f"- Confusion Matrix: `{cm}`")
+
+            return {
+                "accuracy": metrics.get("accuracy"),
+                "logloss": metrics.get("logloss"),
+                "age": age_days,
+            }
+
+        # Render Daily + Intraday
+        daily_stats = show_model_block(c_md1, "Daily", info_daily)
+        intra_stats = show_model_block(c_md2, "Intraday", info_intra)
+
+        # Store for global comparison (append into session if needed)
+        if "model_compare" not in st.session_state:
+            st.session_state["model_compare"] = {}
+
+        st.session_state["model_compare"][sym] = {
+            "daily": daily_stats,
+            "intraday": intra_stats,
+        }
 
     # -------------------------------
     # Price charts: Daily + Intraday
@@ -317,7 +436,7 @@ for sym in symbols:
         try:
             df_plot = df_trades.sort_values("timestamp_local").copy()
 
-            # NEW: collapse to date-only on x-axis (keeps all points, but shown as dates)
+            # collapse to date-only on x-axis
             df_plot["date_only"] = df_plot["timestamp_local"].dt.normalize()
 
             fig, ax = plt.subplots(figsize=(7, 3))
