@@ -95,3 +95,4 @@ zipp==3.18.1
 xgboost
 streamlit-autorefresh
 pandas_market_calendars
+plotly

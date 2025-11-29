@@ -239,3 +239,78 @@ def save_daily_portfolio_csv(trades_list, initial_cash=1000.0):
 
     print(f"✅ Daily portfolio CSV saved: {get_daily_portfolio_file()}")
     return df_daily
+
+
+# ============================================================
+# Detect Deposits / Withdrawals from Alpaca Equity Curve
+# ============================================================
+
+def detect_capital_change(save_path="data/deposits_auto.csv", min_change=50):
+    """
+    Detects deposits or withdrawals by comparing Alpaca equity history.
+    Saves results to deposits_auto.csv for dashboard markers.
+
+    Arguments:
+    - min_change: ignore tiny noise (equity fluctuates by a few cents).
+
+    Output CSV columns:
+    date, change, type, equity
+    """
+
+    # ------------------------------
+    # 1. Fetch Alpaca equity history
+    # ------------------------------
+    try:
+        hist = api_market.get_portfolio_history(period="1A", timeframe="1D")
+        equity = pd.Series(hist.equity, index=pd.to_datetime(hist.timestamp, unit='s'))
+        equity = equity.sort_index()
+    except Exception as e:
+        print(f"[ERROR] detect_capital_change: {e}")
+        return None
+
+    if equity.empty:
+        print("[WARN] detect_capital_change: No equity history available.")
+        return None
+
+    # ------------------------------
+    # 2. Compute daily changes
+    # ------------------------------
+    df = pd.DataFrame({
+        "equity": equity,
+        "change": equity.diff()
+    })
+
+    # Ignore very small fluctuations
+    df["change_clean"] = df["change"].where(df["change"].abs() >= min_change)
+
+    # Detect deposits (>0) and withdrawals (<0)
+    df["type"] = df["change_clean"].apply(
+        lambda x: "deposit" if x and x > 0 else ("withdrawal" if x and x < 0 else None)
+    )
+
+    df = df.dropna(subset=["type"]).copy()
+
+    if df.empty:
+        print("[INFO] detect_capital_change: No deposits or withdrawals detected.")
+        return None
+
+    df.reset_index(inplace=True)
+    df.rename(columns={"index": "date"}, inplace=True)
+
+    # ------------------------------
+    # 3. Ensure data folder exists
+    # ------------------------------
+    base = os.path.dirname(save_path)
+    if base and not os.path.exists(base):
+        os.makedirs(base, exist_ok=True)
+
+    # ------------------------------
+    # 4. Save deposits/withdrawals
+    # ------------------------------
+    df_out = df[["date", "change_clean", "type", "equity"]].copy()
+    df_out.rename(columns={"change_clean": "change"}, inplace=True)
+
+    df_out.to_csv(save_path, index=False)
+    print(f"💾 Saved deposit/withdrawal history → {save_path}")
+
+    return df_out
