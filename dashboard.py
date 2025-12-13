@@ -14,7 +14,7 @@ from typing import Optional
 import joblib
 import plotly.graph_objects as go
 
-from config import TIMEZONE, SYMBOL, MODEL_DIR
+from config import TIMEZONE, SYMBOL, MODEL_DIR, SPY_SYMBOL
 from portfolio import (
     get_trade_log_file,
     get_daily_portfolio_file,
@@ -103,6 +103,30 @@ st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL // 60} minutes.")
 
 # Normalize SYMBOL into list
 symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
+symbols = [s.upper() for s in symbols]
+
+# Optional toggle to include SPY in dashboard
+include_spy = st.checkbox(f"Include {SPY_SYMBOL} in dashboard", value=False)
+
+def _has_model(sym: str) -> bool:
+    return (
+        os.path.exists(os.path.join(MODEL_DIR, f"{sym}_daily_xgb.pkl")) or
+        os.path.exists(os.path.join(MODEL_DIR, f"{sym}_intraday_xgb.pkl"))
+    )
+
+def _has_position(sym: str) -> bool:
+    try:
+        lp = get_live_portfolio(sym)
+        return float(lp.get("shares", 0.0)) > 0
+    except Exception:
+        return False
+
+spy = SPY_SYMBOL.upper()
+
+# Auto-include SPY if relevant, or via toggle
+if include_spy or spy in symbols or _has_model(spy) or _has_position(spy):
+    if spy not in symbols:
+        symbols.append(spy)
 tz = pytz.timezone(TIMEZONE)
 
 # -------------------------------------------------
