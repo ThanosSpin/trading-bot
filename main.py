@@ -6,7 +6,11 @@ from model_xgb import compute_signals
 from strategy import compute_strategy_decisions
 from portfolio import PortfolioManager
 from trader import execute_trade, get_pdt_status
-from config import SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT
+from config import (
+    SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT,
+    SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
+    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE
+)
 from market import is_market_open, is_trading_day
 import os
 
@@ -99,22 +103,64 @@ def execute_decisions(decisions):
 # Orchestrator
 # ===============================================================
 def process_all_symbols(symbols):
-    # Step 1: Predictions
-    predictions = get_predictions(symbols, debug=True)
+    symbols = symbols if isinstance(symbols, list) else [symbols]
+    symbols = [s.upper() for s in symbols]
+
+    # Base universe = configured symbols WITHOUT SPY (SPY is conditional in Option B)
+    base_symbols = [s for s in symbols if s != SPY_SYMBOL]
+
+    # ----------------------------
+    # Step 1: Predictions for stocks
+    # ----------------------------
+    predictions = get_predictions(base_symbols, debug=True)
 
     if not predictions:
         print("[INFO] No valid predictions available. Stopping.")
         return
 
-    # Step 2: Strategy logic
-    decisions = compute_strategy_decisions(predictions)
+    # ----------------------------
+    # Step 1b: Determine weakness (stocks only)
+    # ----------------------------
+    weak_list = [s for s in base_symbols if predictions.get(s, 1.0) <= WEAK_PROB_THRESHOLD]
+    weak_ratio = len(weak_list) / max(len(base_symbols), 1)
+
+    market_is_weak = weak_ratio >= WEAK_RATIO_THRESHOLD
+
+    if market_is_weak:
+        print(
+            f"[INFO] Market is WEAK by rule: "
+            f"{len(weak_list)}/{len(base_symbols)} = {weak_ratio:.2f} "
+            f"(threshold={WEAK_RATIO_THRESHOLD:.2f}). Fetching {SPY_SYMBOL}..."
+        )
+
+        spy_preds = get_predictions([SPY_SYMBOL], debug=True)
+        spy_prob = spy_preds.get(SPY_SYMBOL)
+
+        if spy_prob is not None:
+            predictions[SPY_SYMBOL] = spy_prob
+        else:
+            print(f"[WARN] Could not get valid prediction for {SPY_SYMBOL}. Skipping SPY fallback.")
+    else:
+        print(
+            f"[INFO] Market NOT weak: "
+            f"{len(weak_list)}/{len(base_symbols)} = {weak_ratio:.2f} "
+            f"(threshold={WEAK_RATIO_THRESHOLD:.2f}). Not fetching {SPY_SYMBOL}."
+        )
+
+    # ----------------------------
+    # Step 2: Strategy logic (important: pass symbols list including SPY only if predicted)
+    # ----------------------------
+    symbols_for_strategy = list(predictions.keys())
+    decisions = compute_strategy_decisions(predictions, symbols=symbols_for_strategy)
 
     print("\n================== DECISIONS ==================")
     for sym, d in decisions.items():
         print(f"{sym}: {d['action'].upper()} {d['qty']} — {d['explain']}")
     print("================================================\n")
 
+    # ----------------------------
     # Step 3: Execute trades
+    # ----------------------------
     execute_decisions(decisions)
 
 

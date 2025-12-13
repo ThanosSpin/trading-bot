@@ -33,6 +33,27 @@ INTRADAY_WEIGHT = 0.65   # default intraday dominance
 BUY_THRESHOLD = 0.65    # require strong confidence to buy
 SELL_THRESHOLD = 0.35   # require strong confidence to sell
 
+# =========================
+# SPY fallback configuration
+# =========================
+
+SPY_SYMBOL = "SPY"
+
+# Weakness definition for individual stocks:
+WEAK_PROB_THRESHOLD = 0.45
+
+# Market is weak if this fraction of your stock symbols are weak:
+WEAK_RATIO_THRESHOLD = 0.60
+
+# Only trade SPY if SPY confirms strength:
+SPY_ENTRY_THRESHOLD = 0.55
+SPY_EXIT_THRESHOLD = 0.50
+
+# If True: only trade SPY when you took NO stock trades this cycle.
+SPY_MUTUAL_EXCLUSIVE = True
+
+TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY"]  # used by retrain_model.py
+
 # --- Risk management ---
 STOP_LOSS = 0.95        # sell if price falls 5% below last buy price
 TAKE_PROFIT = 1.1      # sell if price rises 5% above last buy price
@@ -51,5 +72,5 @@ PORTFOLIO_PATH = "data/portfolio.json"
 LOG_FILE = "logs/trading_bot.log"
 
 # Other configs
-USE_LIVE_TRADING = True  # Switch to True to go live
+USE_LIVE_TRADING = False  # Switch to True to go live
 TIMEZONE = "US/Eastern"

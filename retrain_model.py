@@ -9,7 +9,7 @@ import joblib
 from data_loader import fetch_historical_data
 from model_xgb import train_model, MODEL_DIR
 from features import _clean_columns
-from config import SYMBOL
+from config import TRAIN_SYMBOLS
 
 # ---------------------------------------------------------
 # Settings
@@ -65,7 +65,7 @@ def save_model_with_backup(artifact, symbol, mode: str = "daily"):
 # Main multi-symbol retraining loop
 # ---------------------------------------------------------
 def main():
-    symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
+    symbols = TRAIN_SYMBOLS if isinstance(TRAIN_SYMBOLS, list) else [TRAIN_SYMBOLS]
     print("\n🔄 Starting model retraining...")
     print(f"📌 Symbols: {symbols}\n")
 
