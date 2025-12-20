@@ -14,6 +14,32 @@ from data_loader import fetch_latest_price
 def make_decision(action: str, qty: int, explain: str):
     return {"action": action, "qty": int(qty), "explain": explain.strip()}
 
+def _any_core_buy(decisions: Dict[str, dict], core_symbols: List[str]) -> bool:
+    """True if any core symbol has a BUY decision."""
+    return any((decisions.get(s) or {}).get("action") == "buy" for s in core_symbols)
+
+def _force_spy_exit_if_core_buy(decisions: Dict[str, dict], spy_sym: str, explain_suffix: str = ""):
+    """If core has a BUY, sell SPY if held; otherwise hold SPY."""
+    spy_pm = PortfolioManager(spy_sym)
+    try:
+        spy_pm.refresh_live()
+    except:
+        pass
+    spy_shares = float(spy_pm.data.get("shares", 0.0))
+
+    if spy_shares > 0:
+        decisions[spy_sym] = make_decision(
+            "sell",
+            int(spy_shares),
+            f"{spy_sym}: SELL (rotate into core) — core BUY opportunity detected. {explain_suffix}".strip()
+        )
+    else:
+        decisions[spy_sym] = make_decision(
+            "hold",
+            0,
+            f"{spy_sym}: HOLD — no position, core BUY opportunity detected. {explain_suffix}".strip()
+        )
+
 # ---------------------------------------------------------
 # Helper for weak market
 # ---------------------------------------------------------
@@ -156,6 +182,42 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
         pms[sym] = pm
         prices[sym] = fetch_latest_price(sym) or 0.0
 
+    # -----------------------------
+    # SPY live state helper (always available if SPY is in symbols)
+    # -----------------------------
+    spy_pm = pms.get(spy_sym)
+    if spy_pm is None:
+        spy_pm = PortfolioManager(spy_sym)
+        try:
+            spy_pm.refresh_live()
+        except:
+            pass
+        pms[spy_sym] = spy_pm
+        prices[spy_sym] = fetch_latest_price(spy_sym) or 0.0
+
+    def spy_live_shares() -> float:
+        return float(pms[spy_sym].data.get("shares", 0.0))
+
+    def spy_live_price() -> float:
+        return float(prices.get(spy_sym, 0.0) or 0.0)
+
+    def liquidate_spy_if_held(reason: str):
+        sh = spy_live_shares()
+        if sh > 0:
+            decisions[spy_sym] = make_decision(
+                "sell",
+                int(sh),
+                f"{spy_sym}: Sold to fund core opportunity. {reason}"
+            )
+            return True
+        return False
+
+    def any_core_buy(decisions_dict) -> bool:
+        for s in core_symbols:
+            if (decisions_dict.get(s) or {}).get("action") == "buy":
+                return True
+        return False
+
     # ---------------------------------------------------------
     # First pass — ALWAYS apply STOP-LOSS / TAKE-PROFIT
     # ---------------------------------------------------------
@@ -270,6 +332,17 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
 
         sim_cash = global_cash
 
+        # If SPY is held, liquidate it to fund NVDA
+        spy_sh = spy_live_shares()
+        spy_pr = spy_live_price()
+        if spy_sh > 0 and spy_pr > 0:
+            sim_cash += spy_sh * spy_pr
+            decisions[spy_sym] = make_decision(
+                "sell",
+                int(spy_sh),
+                f"{spy_sym}: Sold to fund NVDA priority buy."
+            )
+
         for sym in core_symbols:
             if sym == "NVDA":
                 continue
@@ -287,12 +360,15 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
 
         # Apply SPY last
         if spy_candidate is not None:
-            if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
-                decisions[spy_sym] = spy_candidate
+            # If NVDA/AAPL has a BUY, force SPY exit (sell if held)
+            if _any_core_buy(decisions, core_symbols):
+                _force_spy_exit_if_core_buy(decisions, spy_sym)
             else:
-                decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
-
-        return decisions
+                # otherwise keep your existing mutual-exclusive logic
+                if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
+                    decisions[spy_sym] = spy_candidate
+                else:
+                    decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
 
     # NVDA SELL PRIORITY — rotate into strongest BUY
     if nvda_action == "sell":
@@ -313,12 +389,15 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
 
         # Apply SPY last
         if spy_candidate is not None:
-            if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
-                decisions[spy_sym] = spy_candidate
+            # If NVDA/AAPL has a BUY, force SPY exit (sell if held)
+            if _any_core_buy(decisions, core_symbols):
+                _force_spy_exit_if_core_buy(decisions, spy_sym)
             else:
-                decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
-
-        return decisions
+                # otherwise keep your existing mutual-exclusive logic
+                if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
+                    decisions[spy_sym] = spy_candidate
+                else:
+                    decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
 
     # NVDA HOLD — normal trading for core symbols
     for sym in core_symbols:
@@ -327,12 +406,20 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
             total_symbols=len(core_symbols),
             concurrent_buys=concurrent_buys
         )
+    # If any core symbol wants to BUY, SPY must be SOLD (even if market not weak)
+    if any_core_buy(decisions):
+        liquidate_spy_if_held("Core BUY detected (NVDA/AAPL).")
 
-    # Apply SPY last
+   # Apply SPY last
     if spy_candidate is not None:
-        if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
-            decisions[spy_sym] = spy_candidate
+        # If NVDA/AAPL has a BUY, force SPY exit (sell if held)
+        if _any_core_buy(decisions, core_symbols):
+            _force_spy_exit_if_core_buy(decisions, spy_sym)
         else:
-            decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
+            # otherwise keep your existing mutual-exclusive logic
+            if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
+                decisions[spy_sym] = spy_candidate
+            else:
+                decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
 
     return decisions
