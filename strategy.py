@@ -2,7 +2,7 @@ from typing import Dict, List
 from config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, TAKE_PROFIT, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
-    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE
+    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION
 )
 from portfolio import PortfolioManager
 from data_loader import fetch_latest_price
@@ -258,7 +258,7 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
 
             if spy_price > 0:
                 if spy_prob >= SPY_ENTRY_THRESHOLD:
-                    qty = int((spy_cash * RISK_FRACTION) // spy_price)
+                    qty = int((spy_cash * SPY_RISK_FRACTION) // spy_price)
                     spy_candidate = make_decision(
                         "buy",
                         max(qty, 0),
