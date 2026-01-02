@@ -11,8 +11,14 @@ from data_loader import fetch_latest_price
 # ---------------------------------------------------------
 # Helper to build clean decision dicts
 # ---------------------------------------------------------
-def make_decision(action: str, qty: int, explain: str):
-    return {"action": action, "qty": int(qty), "explain": explain.strip()}
+def make_decision(action: str, qty: int, explain: str, **meta):
+    d = {"action": action, "qty": int(qty), "explain": explain.strip()}
+    d.update(meta)  # allow flags like recalc_all_in=True
+    return d
+
+def _core_buy_intent(preds: Dict[str, float], core_symbols: List[str]) -> List[str]:
+    """Symbols that WANT to buy based on prob only (ignores cash/qty)."""
+    return [s for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD]
 
 def _any_core_buy(decisions: Dict[str, dict], core_symbols: List[str]) -> bool:
     """True if any core symbol has a BUY decision."""
@@ -166,11 +172,14 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
 
     symbols = [s.upper() for s in symbols]
     preds = {k.upper(): v for k, v in predictions.items()}
+    core_symbols = [s for s in symbols if s != spy_sym]
 
     # Default decisions
     decisions = {s: make_decision("hold", 0, f"{s}: default HOLD") for s in symbols}
 
-    # Fetch live state
+    # ---------------------------------------------------------
+    # Fetch live state + prices (for stop/tp + funding calcs)
+    # ---------------------------------------------------------
     pms = {}
     prices = {}
     for sym in symbols:
@@ -182,52 +191,32 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
         pms[sym] = pm
         prices[sym] = fetch_latest_price(sym) or 0.0
 
-    # -----------------------------
-    # SPY live state helper (always available if SPY is in symbols)
-    # -----------------------------
-    spy_pm = pms.get(spy_sym)
-    if spy_pm is None:
-        spy_pm = PortfolioManager(spy_sym)
+    # Ensure SPY state exists even if not in symbols (safe)
+    if spy_sym not in pms:
+        pm = PortfolioManager(spy_sym)
         try:
-            spy_pm.refresh_live()
+            pm.refresh_live()
         except:
             pass
-        pms[spy_sym] = spy_pm
+        pms[spy_sym] = pm
         prices[spy_sym] = fetch_latest_price(spy_sym) or 0.0
 
-    def spy_live_shares() -> float:
+    def spy_shares() -> float:
         return float(pms[spy_sym].data.get("shares", 0.0))
 
-    def spy_live_price() -> float:
+    def spy_price() -> float:
         return float(prices.get(spy_sym, 0.0) or 0.0)
 
-    def liquidate_spy_if_held(reason: str):
-        sh = spy_live_shares()
-        if sh > 0:
-            decisions[spy_sym] = make_decision(
-                "sell",
-                int(sh),
-                f"{spy_sym}: Sold to fund core opportunity. {reason}"
-            )
-            return True
-        return False
-
-    def any_core_buy(decisions_dict) -> bool:
-        for s in core_symbols:
-            if (decisions_dict.get(s) or {}).get("action") == "buy":
-                return True
-        return False
-
     # ---------------------------------------------------------
-    # First pass — ALWAYS apply STOP-LOSS / TAKE-PROFIT
+    # 1) STOP-LOSS / TAKE-PROFIT always first (including SPY)
     # ---------------------------------------------------------
     sl_tp_decisions = {}
     for sym in symbols:
-        price = prices.get(sym, 0)
+        price = prices.get(sym, 0.0) or 0.0
         if price > 0:
-            sltp = check_stop_tp(sym, price, pms[sym])
-            if sltp:
-                sl_tp_decisions[sym] = sltp
+            d = check_stop_tp(sym, price, pms[sym])
+            if d:
+                sl_tp_decisions[sym] = d
 
     if sl_tp_decisions:
         for sym in symbols:
@@ -238,36 +227,30 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
         return decisions
 
     # ---------------------------------------------------------
-    # Prepare SPY candidate (apply later so mutual-excl works)
+    # 2) SPY candidate (ONLY for entering SPY on weak market)
     # ---------------------------------------------------------
     spy_candidate = None
     spy_prob = preds.get(spy_sym)
 
     if spy_prob is not None:
-        market_is_weak = _weak_market(symbols, preds)  # already excludes SPY_SYMBOL in your helper
+        market_is_weak = _weak_market(symbols, preds)  # your helper excludes SPY
         if market_is_weak:
-            spy_pm = PortfolioManager(spy_sym)
-            try:
-                spy_pm.refresh_live()
-            except:
-                pass
+            sh = spy_shares()
+            cash = float(pms[spy_sym].data.get("cash", 0.0))
+            px = spy_price()
 
-            spy_shares = float(spy_pm.data.get("shares", 0.0))
-            spy_cash = float(spy_pm.data.get("cash", 0.0))
-            spy_price = fetch_latest_price(spy_sym) or 0.0
-
-            if spy_price > 0:
+            if px > 0:
                 if spy_prob >= SPY_ENTRY_THRESHOLD:
-                    qty = int((spy_cash * SPY_RISK_FRACTION) // spy_price)
+                    qty = int((cash * SPY_RISK_FRACTION) // px)
                     spy_candidate = make_decision(
                         "buy",
                         max(qty, 0),
                         f"{spy_sym}: SPY fallback BUY — market weak and spy_prob={spy_prob:.3f} ≥ {SPY_ENTRY_THRESHOLD}"
                     )
-                elif spy_prob <= SPY_EXIT_THRESHOLD and spy_shares > 0:
+                elif spy_prob <= SPY_EXIT_THRESHOLD and sh > 0:
                     spy_candidate = make_decision(
                         "sell",
-                        int(spy_shares),
+                        int(sh),
                         f"{spy_sym}: SPY fallback SELL — spy_prob={spy_prob:.3f} ≤ {SPY_EXIT_THRESHOLD}"
                     )
                 else:
@@ -277,11 +260,9 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
                     )
 
     # ---------------------------------------------------------
-    # GLOBAL SELL — exclude SPY from this check
+    # 3) GLOBAL SELL (core only)
     # ---------------------------------------------------------
-    core_symbols = [s for s in symbols if s != spy_sym]
     valid_core_preds = [preds[s] for s in core_symbols if s in preds]
-
     if valid_core_preds and all(p <= SELL_THRESHOLD for p in valid_core_preds):
         for sym in symbols:
             sh = float(pms[sym].data.get("shares", 0.0))
@@ -292,134 +273,130 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
         return decisions
 
     # ---------------------------------------------------------
-    # If NVDA not present → regular logic (exclude SPY from concurrent buys)
+    # 4) Core strategy with NVDA priority (core only)
     # ---------------------------------------------------------
     if "NVDA" not in core_symbols:
-        concurrent_buys = sum(1 for s in core_symbols if preds.get(s, 0) >= BUY_THRESHOLD)
-
+        concurrent_buys = sum(1 for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD)
         for sym in core_symbols:
             decisions[sym] = should_trade(
-                sym, preds.get(sym, 0),
+                sym, preds.get(sym, 0.0),
                 total_symbols=len(core_symbols),
                 concurrent_buys=concurrent_buys
             )
+    else:
+        def live_shares(sym): return float(pms[sym].data.get("shares", 0.0))
 
-        # Apply SPY after regular decisions
-        if spy_candidate is not None:
-            if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
-                decisions[spy_sym] = spy_candidate
+        concurrent_buys = sum(1 for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD)
+
+        nvda_prob = preds.get("NVDA", 0.0)
+        nvda_base = should_trade("NVDA", nvda_prob, len(core_symbols), concurrent_buys)
+        nvda_action = nvda_base["action"]
+
+        # ---- NVDA BUY priority: sell other core positions (funding) + plan big buy
+        if nvda_action == "buy":
+            sim_cash = float(pms[core_symbols[0]].data.get("cash", 0.0))
+            nvda_px = float(prices.get("NVDA", 0.0) or 0.0)
+            if nvda_px <= 0:
+                return decisions
+
+            # fund with other core positions (excluding NVDA)
+            for sym in core_symbols:
+                if sym == "NVDA":
+                    continue
+                sh = live_shares(sym)
+                px = float(prices.get(sym, 0.0) or 0.0)
+                if sh > 0 and px > 0:
+                    sim_cash += sh * px
+                    decisions[sym] = make_decision("sell", int(sh), f"{sym}: Sold to fund NVDA priority buy.")
+
+            max_shares = int(sim_cash // nvda_px)
+            if max_shares >= 1:
+                decisions["NVDA"] = make_decision(
+                    "buy",
+                    max_shares,
+                    f"NVDA BUY priority — capital ${sim_cash:.2f}, qty={max_shares}"
+                )
             else:
-                decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
+                decisions["NVDA"] = make_decision("hold", 0, "NVDA BUY priority but insufficient capital.")
 
+            # NOTE: do NOT apply SPY here; final enforcement below will handle it.
+        elif nvda_action == "sell":
+            sh = live_shares("NVDA")
+            if sh > 0:
+                decisions["NVDA"] = make_decision("sell", int(sh), "NVDA SELL signal.")
+            else:
+                decisions["NVDA"] = make_decision("hold", 0, "NVDA SELL but no position.")
+
+            # rotate into strongest other BUY
+            buyers = [s for s in core_symbols if s != "NVDA" and preds.get(s, 0.0) >= BUY_THRESHOLD]
+            if buyers:
+                strongest = max(buyers, key=lambda x: preds.get(x, 0.0))
+                cash_now = float(pms[core_symbols[0]].data.get("cash", 0.0)) + sh * float(prices.get("NVDA", 0.0) or 0.0)
+                tgt_px = float(prices.get(strongest, 0.0) or 0.0)
+                qty = int(cash_now // tgt_px) if tgt_px > 0 else 0
+                if qty >= 1:
+                    decisions[strongest] = make_decision("buy", qty, f"{strongest}: Rotated from NVDA sell, qty={qty}")
+        else:
+            # NVDA HOLD -> normal core trading
+            for sym in core_symbols:
+                decisions[sym] = should_trade(
+                    sym, preds.get(sym, 0.0),
+                    total_symbols=len(core_symbols),
+                    concurrent_buys=concurrent_buys
+                )
+
+    # ---------------------------------------------------------
+    # 5) FINAL ENFORCEMENT: if NVDA/AAPL has BUY INTENT => SELL SPY + recalc flags
+    # (prob-based intent, not cash-based)
+    # ---------------------------------------------------------
+    wanted = []
+    if "NVDA" in core_symbols and preds.get("NVDA", 0.0) >= BUY_THRESHOLD:
+        wanted.append("NVDA")
+    if "AAPL" in core_symbols and preds.get("AAPL", 0.0) >= BUY_THRESHOLD:
+        wanted.append("AAPL")
+
+    if wanted:
+        sh = spy_shares()
+        if sh > 0:
+            decisions[spy_sym] = make_decision(
+                "sell",
+                int(sh),
+                f"{spy_sym}: SELL (rotate into core) — core BUY intent: {', '.join(wanted)}."
+            )
+
+        # mark priority buys for main.py to recalc AFTER sells
+        if "NVDA" in wanted:
+            decisions["NVDA"] = make_decision(
+                "buy", 1,
+                "NVDA PRIORITY BUY — recalc all-in after sells (SPY liquidation).",
+                recalc_all_in=True,
+                priority_rank=1,
+            )
+            if "AAPL" in wanted:
+                decisions["AAPL"] = make_decision(
+                    "buy", 1,
+                    "AAPL BUY intent — secondary to NVDA (after sells).",
+                    recalc_after_sells=True,
+                    priority_rank=2,
+                )
+        else:
+            decisions["AAPL"] = make_decision(
+                "buy", 1,
+                "AAPL PRIORITY BUY — recalc all-in after sells (SPY liquidation).",
+                recalc_all_in=True,
+                priority_rank=1,
+            )
+
+        # When core wants to buy, we do NOT allow SPY buy this cycle
         return decisions
 
     # ---------------------------------------------------------
-    # NVDA PRIORITY LOGIC (operate on core symbols only)
+    # 6) If no core buy intent, allow SPY candidate (entry/exit) with mutual exclusive rules
     # ---------------------------------------------------------
-    def live_shares(sym): return float(pms[sym].data.get("shares", 0.0))
-
-    nvda_prob = preds.get("NVDA", 0)
-    concurrent_buys = sum(1 for s in core_symbols if preds.get(s, 0) >= BUY_THRESHOLD)
-    nvda_base = should_trade("NVDA", nvda_prob, len(core_symbols), concurrent_buys)
-    nvda_action = nvda_base["action"]
-
-    # NVDA BUY PRIORITY
-    if nvda_action == "buy":
-        global_cash = float(pms[core_symbols[0]].data.get("cash", 0))
-        nvda_price = prices.get("NVDA", 0.0)
-        if nvda_price <= 0:
-            return decisions
-
-        sim_cash = global_cash
-
-        # If SPY is held, liquidate it to fund NVDA
-        spy_sh = spy_live_shares()
-        spy_pr = spy_live_price()
-        if spy_sh > 0 and spy_pr > 0:
-            sim_cash += spy_sh * spy_pr
-            decisions[spy_sym] = make_decision(
-                "sell",
-                int(spy_sh),
-                f"{spy_sym}: Sold to fund NVDA priority buy."
-            )
-
-        for sym in core_symbols:
-            if sym == "NVDA":
-                continue
-            sh = live_shares(sym)
-            pr = prices.get(sym, 0.0)
-            if sh > 0 and pr > 0:
-                sim_cash += sh * pr
-                decisions[sym] = make_decision("sell", int(sh), f"{sym}: Sold to fund NVDA priority buy.")
-
-        max_shares = int(sim_cash // nvda_price)
-        if max_shares >= 1:
-            decisions["NVDA"] = make_decision("buy", max_shares, f"NVDA BUY priority — capital ${sim_cash:.2f}, qty={max_shares}")
-        else:
-            decisions["NVDA"] = make_decision("hold", 0, "NVDA BUY priority but insufficient capital.")
-
-        # Apply SPY last
-        if spy_candidate is not None:
-            # If NVDA/AAPL has a BUY, force SPY exit (sell if held)
-            if _any_core_buy(decisions, core_symbols):
-                _force_spy_exit_if_core_buy(decisions, spy_sym)
-            else:
-                # otherwise keep your existing mutual-exclusive logic
-                if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
-                    decisions[spy_sym] = spy_candidate
-                else:
-                    decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
-
-    # NVDA SELL PRIORITY — rotate into strongest BUY
-    if nvda_action == "sell":
-        sh = live_shares("NVDA")
-        if sh > 0:
-            decisions["NVDA"] = make_decision("sell", int(sh), "NVDA SELL signal.")
-        else:
-            decisions["NVDA"] = make_decision("hold", 0, "NVDA SELL but no position.")
-
-        buyers = [s for s in core_symbols if s != "NVDA" and preds.get(s, 0) >= BUY_THRESHOLD]
-        if buyers:
-            strongest = max(buyers, key=lambda x: preds.get(x, 0))
-            sim_cash = float(pms[core_symbols[0]].data.get("cash", 0.0)) + sh * (prices.get("NVDA", 0.0))
-            tgt_price = prices.get(strongest, 0.0)
-            qty = int(sim_cash // tgt_price) if tgt_price > 0 else 0
-            if qty >= 1:
-                decisions[strongest] = make_decision("buy", qty, f"{strongest}: Rotated from NVDA sell, qty={qty}")
-
-        # Apply SPY last
-        if spy_candidate is not None:
-            # If NVDA/AAPL has a BUY, force SPY exit (sell if held)
-            if _any_core_buy(decisions, core_symbols):
-                _force_spy_exit_if_core_buy(decisions, spy_sym)
-            else:
-                # otherwise keep your existing mutual-exclusive logic
-                if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
-                    decisions[spy_sym] = spy_candidate
-                else:
-                    decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
-
-    # NVDA HOLD — normal trading for core symbols
-    for sym in core_symbols:
-        decisions[sym] = should_trade(
-            sym, preds.get(sym, 0),
-            total_symbols=len(core_symbols),
-            concurrent_buys=concurrent_buys
-        )
-    # If any core symbol wants to BUY, SPY must be SOLD (even if market not weak)
-    if any_core_buy(decisions):
-        liquidate_spy_if_held("Core BUY detected (NVDA/AAPL).")
-
-   # Apply SPY last
     if spy_candidate is not None:
-        # If NVDA/AAPL has a BUY, force SPY exit (sell if held)
-        if _any_core_buy(decisions, core_symbols):
-            _force_spy_exit_if_core_buy(decisions, spy_sym)
+        if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
+            decisions[spy_sym] = spy_candidate
         else:
-            # otherwise keep your existing mutual-exclusive logic
-            if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
-                decisions[spy_sym] = spy_candidate
-            else:
-                decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
+            decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
 
     return decisions

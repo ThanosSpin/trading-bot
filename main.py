@@ -60,12 +60,36 @@ def get_predictions(symbols, debug=True):
 def execute_decisions(decisions):
     """
     Execute SELLs first (to free capital), then BUYs.
-    NVDA can be forced to 'all-in' after SELLs if its decision explain contains 'all-in' or 'priority'.
+
+    Supports flags from strategy.py:
+      - recalc_all_in=True        -> recompute qty from live cash after SELLs
+      - recalc_after_sells=True   -> recompute qty using remaining cash after higher-priority buys
+      - priority_rank=int         -> lower rank executes first (1 before 2)
     """
 
-    sell_syms = [s for s, d in decisions.items() if d.get("action") == "sell" and int(d.get("qty", 0)) > 0]
-    buy_syms  = [s for s, d in decisions.items() if d.get("action") == "buy"  and int(d.get("qty", 0)) > 0]
-    hold_syms = [s for s, d in decisions.items() if d.get("action") not in ("buy", "sell") or int(d.get("qty", 0)) <= 0]
+    def _get_live_account_cash(proxy_symbol: str = "NVDA") -> float:
+        # cash is account-level; any symbol PM works, proxy_symbol is just a handle
+        try:
+            pm_cash = PortfolioManager(proxy_symbol)
+            pm_cash.refresh_live()
+            return float(pm_cash.data.get("cash", 0.0))
+        except Exception:
+            # fallback to SPY proxy
+            try:
+                pm_cash = PortfolioManager("SPY")
+                pm_cash.refresh_live()
+                return float(pm_cash.data.get("cash", 0.0))
+            except Exception:
+                return 0.0
+
+    sell_syms = [s for s, d in decisions.items()
+                if d.get("action") == "sell" and int(d.get("qty", 0)) > 0]
+
+    buy_syms = [s for s, d in decisions.items()
+               if d.get("action") == "buy" and int(d.get("qty", 0)) > 0]
+
+    hold_syms = [s for s, d in decisions.items()
+                if d.get("action") not in ("buy", "sell") or int(d.get("qty", 0)) <= 0]
 
     any_sell_filled = False
     sell_failed = set()
@@ -102,20 +126,28 @@ def execute_decisions(decisions):
         pm._apply("sell", filled_price, filled_qty)
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
-    # Refresh global cash after sells (cash is account-level, not per symbol)
-    # Using NVDA PM as a proxy to read live account cash.
-    global_cash_after_sells = None
-    try:
-        pm_cash = PortfolioManager("NVDA")
-        pm_cash.refresh_live()
-        global_cash_after_sells = float(pm_cash.data.get("cash", 0.0))
-    except Exception:
-        pass
+    # -------------------------
+    # Refresh cash after SELLs
+    # -------------------------
+    global_cash_after_sells = _get_live_account_cash(proxy_symbol="NVDA")
+    remaining_cash = global_cash_after_sells
+
+    # If strategy required SPY liquidation to fund core and it failed, we should not "all-in" core.
+    spy_required_sell = ("SPY" in decisions and decisions["SPY"].get("action") == "sell")
+    spy_sell_failed = (spy_required_sell and "SPY" in sell_failed)
 
     # -------------------------
-    # PASS 2: BUYs
+    # PASS 2: BUYs (priority order)
     # -------------------------
-    for sym in buy_syms:
+    def _buy_sort_key(sym: str):
+        d = decisions.get(sym, {})
+        # priority_rank: 1 executes before 2, etc.
+        # if missing, default to 999 so it runs after priority buys
+        return int(d.get("priority_rank", 999))
+
+    buy_syms_sorted = sorted(buy_syms, key=_buy_sort_key)
+
+    for sym in buy_syms_sorted:
         decision = decisions[sym]
         explain = (decision.get("explain", "") or "")
         price = fetch_latest_price(sym)
@@ -130,30 +162,26 @@ def execute_decisions(decisions):
 
         qty = int(decision.get("qty", 0))
 
-        # ✅ All-in logic for NVDA after sells
-        # Trigger if explanation includes 'priority' OR 'all-in'
-        want_all_in = (sym.upper() == "NVDA") and (("priority" in explain.lower()) or ("all-in" in explain.lower()))
+        # Flag-based recompute (preferred, no string matching)
+        recalc_all_in = bool(decision.get("recalc_all_in", False))
+        recalc_after_sells = bool(decision.get("recalc_after_sells", False))
 
-        if want_all_in:
-            # If strategy expected a sell-first (e.g., SPY) but it didn't fill, skip the all-in buy.
-            # (You can relax this if you prefer.)
-            if "SPY" in decisions and decisions["SPY"].get("action") == "sell" and "SPY" in sell_failed:
-                print("[INFO] NVDA all-in skipped because required SPY SELL did not fill.")
-                continue
+        # If strategy expected SPY to be sold first but it didn't fill, skip flagged buys.
+        if (recalc_all_in or recalc_after_sells) and spy_sell_failed:
+            print("[INFO] BUY skipped because required SPY SELL did not fill (cannot fund priority buy).")
+            continue
 
-            # Use global cash *after* sells
-            cash_now = global_cash_after_sells
-            if cash_now is None:
-                # fallback: read from NVDA PM again
-                try:
-                    pm_cash = PortfolioManager("NVDA")
-                    pm_cash.refresh_live()
-                    cash_now = float(pm_cash.data.get("cash", 0.0))
-                except Exception:
-                    cash_now = 0.0
+        # Recompute qty from remaining cash if flagged
+        if recalc_all_in:
+            # refresh live cash in case SELL filled changed it (and to avoid stale state)
+            remaining_cash = _get_live_account_cash(proxy_symbol=sym)
+            qty = int(remaining_cash // price)
+            print(f"[INFO] {sym} recalc_all_in: cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}")
 
-            qty = int(cash_now // price)
-            print(f"[INFO] NVDA all-in recompute: cash=${cash_now:.2f} price=${price:.2f} -> qty={qty}")
+        elif recalc_after_sells:
+            # use the cash remaining after earlier buys in this same cycle
+            qty = int(remaining_cash // price)
+            print(f"[INFO] {sym} recalc_after_sells: remaining_cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}")
 
         if qty <= 0:
             print("[INFO] BUY skipped — insufficient cash.")
@@ -169,6 +197,9 @@ def execute_decisions(decisions):
         pm.refresh_live()
         pm._apply("buy", filled_price, filled_qty)
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
+
+        # update remaining cash after successful buy
+        remaining_cash = _get_live_account_cash(proxy_symbol=sym)
 
     # -------------------------
     # PASS 3: HOLD prints
