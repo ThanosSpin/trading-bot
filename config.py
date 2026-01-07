@@ -57,7 +57,9 @@ TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY"]  # used by retrain_model.py
 
 # --- Risk management ---
 STOP_LOSS = 0.95        # sell if price falls 5% below last buy price
-TAKE_PROFIT = 1.1      # sell if price rises 5% above last buy price
+TAKE_PROFIT = None      # sell if price rises 5% above last buy price
+TRAIL_STOP = 0.96        # trailing stop vs max_price since entry (e.g., 0.97 = 3% trail)
+TRAIL_ACTIVATE = 1.05   # ✅ activate trailing only after +5% profit
 RISK_FRACTION = 0.5     # default: invest or sell 50%
 
 # Model path management
