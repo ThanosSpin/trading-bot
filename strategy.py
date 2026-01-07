@@ -1,8 +1,8 @@
 from typing import Dict, List
 from config import (
-    BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, TAKE_PROFIT, RISK_FRACTION,
-    SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
-    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION
+    BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
+    SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
+    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP
 )
 from portfolio import PortfolioManager
 from data_loader import fetch_latest_price
@@ -75,17 +75,25 @@ def _any_stock_trade(decisions: Dict[str, dict], symbols: List[str]) -> bool:
 # Evaluate STOP-LOSS / TAKE-PROFIT (universal)
 # ---------------------------------------------------------
 def check_stop_tp(symbol, price, pm):
-    shares = pm.data.get("shares", 0.0)
+    shares = float(pm.data.get("shares", 0.0))
     if shares <= 0:
         return None
 
-    # Use weighted average price if present
-    entry_price = pm.data.get("avg_price", pm.data.get("last_price", 0))
-
+    entry_price = float(pm.data.get("avg_price", pm.data.get("last_price", 0.0)) or 0.0)
     if entry_price <= 0:
         return None
 
-    # STOP-LOSS
+    # Maintain max_price while holding
+    mp = float(pm.data.get("max_price", entry_price))
+    if price > mp:
+        pm.data["max_price"] = price
+        try:
+            pm.save()
+        except:
+            pass
+        mp = price
+
+    # 1️⃣ HARD STOP-LOSS (always active)
     if price <= entry_price * STOP_LOSS:
         return make_decision(
             "sell",
@@ -93,13 +101,18 @@ def check_stop_tp(symbol, price, pm):
             f"{symbol}: STOP-LOSS hit {price:.2f} <= {STOP_LOSS*100:.1f}% of entry {entry_price:.2f}"
         )
 
-    # TAKE-PROFIT
-    if price >= entry_price * TAKE_PROFIT:
-        return make_decision(
-            "sell",
-            int(shares),
-            f"{symbol}: TAKE-PROFIT hit {price:.2f} >= {TAKE_PROFIT*100:.1f}% of entry {entry_price:.2f}"
-        )
+    # 2️⃣ TRAILING STOP (ONLY AFTER +5% PROFIT)
+    if price >= entry_price * TRAIL_ACTIVATE:
+        trail_level = mp * TRAIL_STOP
+        if price <= trail_level:
+            return make_decision(
+                "sell",
+                int(shares),
+                (
+                    f"{symbol}: TRAIL-STOP hit {price:.2f} <= {TRAIL_STOP*100:.1f}% of max {mp:.2f} "
+                    f"(activated after +{(TRAIL_ACTIVATE-1)*100:.1f}% profit)"
+                )
+            )
 
     return None
 

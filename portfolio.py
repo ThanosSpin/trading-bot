@@ -41,22 +41,40 @@ def get_daily_portfolio_file():
 
 def get_live_portfolio(symbol):
     """Fetch live Alpaca portfolio for a symbol."""
+    symbol = symbol.upper()
+
     try:
         account = api_market.get_account()
         positions = api_market.list_positions()
         cash = float(account.cash)
     except Exception:
-        return {"cash": 0.0, "shares": 0.0, "last_price": 0.0}
+        return {"cash": 0.0, "shares": 0.0, "last_price": 0.0, "avg_price": 0.0}
 
     shares = 0.0
     last_price = 0.0
+    avg_price = 0.0
 
     for p in positions:
-        if p.symbol == symbol:
-            shares = float(p.qty)
-            last_price = float(p.current_price)
+        if str(getattr(p, "symbol", "")).upper() == symbol:
+            try:
+                shares = float(getattr(p, "qty", 0.0) or 0.0)
+            except Exception:
+                shares = 0.0
 
-    return {"cash": cash, "shares": shares, "last_price": last_price}
+            try:
+                last_price = float(getattr(p, "current_price", 0.0) or 0.0)
+            except Exception:
+                last_price = 0.0
+
+            # Prefer Alpaca avg entry price (this is the key fix)
+            try:
+                avg_price = float(getattr(p, "avg_entry_price", 0.0) or 0.0)
+            except Exception:
+                avg_price = 0.0
+
+            break
+
+    return {"cash": cash, "shares": shares, "last_price": last_price, "avg_price": avg_price}
 
 
 # ============================================================
@@ -77,33 +95,82 @@ class PortfolioManager:
         """Load JSON portfolio; fallback to live if missing."""
         if os.path.exists(self.file):
             with open(self.file, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+
+            # Backwards-compatible defaults
+            data.setdefault("cash", 0.0)
+            data.setdefault("shares", 0.0)
+            data.setdefault("last_price", 0.0)
+
+            # If missing, initialize from last_price (or 0)
+            lp = float(data.get("last_price", 0.0) or 0.0)
+            sh = float(data.get("shares", 0.0) or 0.0)
+
+            data.setdefault("avg_price", lp if sh > 0 else 0.0)
+            data.setdefault("max_price", lp if sh > 0 else 0.0)
+
+            return data
 
         # If no local file → create initial state
         live = get_live_portfolio(self.symbol)
+        sh = float(live.get("shares", 0.0) or 0.0)
+        lp = float(live.get("last_price", 0.0) or 0.0)
+        ap = float(live.get("avg_price", 0.0) or 0.0)
+
         data = {
             "cash": live["cash"],
             "shares": live.get("shares", 0.0),
             "last_price": live.get("last_price", 0.0),
+            "avg_price": live.get("last_price", 0.0) if live.get("shares", 0.0) > 0 else 0.0,
+            "max_price": live.get("last_price", 0.0) if live.get("shares", 0.0) > 0 else 0.0,
         }
-
         return data
-
-    def save(self):
-        with open(self.file, "w") as f:
-            json.dump(self.data, f, indent=4)
 
     # ------------------------
     # Live synchronization
     # ------------------------
 
     def refresh_live(self):
-        """Refresh LIVE Alpaca values (cash & shares)."""
+        """Refresh LIVE Alpaca values (cash & shares). Keeps avg_price/max_price consistent."""
         try:
             live = get_live_portfolio(self.symbol)
-            self.data["cash"] = live["cash"]
-            self.data["shares"] = live["shares"]
-            self.data["last_price"] = live["last_price"]
+
+            cash = float(live.get("cash", 0.0) or 0.0)
+            sh   = float(live.get("shares", 0.0) or 0.0)
+            lp   = float(live.get("last_price", 0.0) or 0.0)
+            ap   = float(live.get("avg_price", 0.0) or 0.0)
+
+            self.data["cash"] = cash
+            self.data["shares"] = sh
+            self.data["last_price"] = lp
+
+            # Backfill missing keys for old portfolio files
+            self.data.setdefault("avg_price", 0.0)
+            self.data.setdefault("max_price", 0.0)
+
+            if sh > 0 and lp > 0:
+                # ✅ Prefer Alpaca avg entry if available (fixes STOP/TP/TRAIL logic)
+                if ap > 0:
+                    self.data["avg_price"] = ap
+                else:
+                    # fallback only if we truly don't have it
+                    if float(self.data.get("avg_price", 0.0)) <= 0:
+                        self.data["avg_price"] = lp
+
+                # Update trailing max while in position
+                mp = float(self.data.get("max_price", 0.0) or 0.0)
+                if mp <= 0:
+                    mp = lp
+                self.data["max_price"] = max(mp, lp)
+
+            else:
+                # flat: reset to avoid stale trailing data
+                self.data["shares"] = 0.0
+                self.data["avg_price"] = 0.0
+                self.data["max_price"] = 0.0
+            
+            print(f"[LIVE] {self.symbol} shares={sh} last={lp} avg={self.data['avg_price']} max={self.data['max_price']}")
+
             self.save()
         except Exception:
             pass
@@ -148,13 +215,31 @@ class PortfolioManager:
         qty = float(qty)
 
         if action == "buy":
-            self.data["shares"] += qty
+            prev_shares = float(self.data.get("shares", 0.0))
+            prev_avg = float(self.data.get("avg_price", 0.0))
+            new_shares = prev_shares + qty
+
+            # weighted avg entry
+            if new_shares > 0:
+                self.data["avg_price"] = (prev_shares * prev_avg + qty * price) / new_shares
+
+            self.data["shares"] = new_shares
             self.data["cash"] -= qty * price
 
+            # initialize/raise max_price
+            mp = float(self.data.get("max_price", 0.0))
+            self.data["max_price"] = max(mp, price)
+
         elif action == "sell":
-            qty = min(qty, self.data["shares"])  # safety
+            qty = min(qty, float(self.data.get("shares", 0.0)))
             self.data["shares"] -= qty
             self.data["cash"] += qty * price
+
+            # reset when flat
+            if float(self.data.get("shares", 0.0)) <= 0:
+                self.data["shares"] = 0.0
+                self.data["avg_price"] = 0.0
+                self.data["max_price"] = 0.0
 
         self.data["last_price"] = price
 
