@@ -22,6 +22,7 @@ time.tzset()
 # ===============================================================
 def get_predictions(symbols, debug=True):
     predictions = {}
+    diagnostics = {}
 
     for sym in symbols:
         print(f"\n🔍 Fetching signals for {sym}...")
@@ -51,7 +52,13 @@ def get_predictions(symbols, debug=True):
 
         predictions[sym] = final_prob
 
-    return predictions
+        diagnostics[sym] = {
+            "daily": sig.get("daily_prob"),
+            "intraday": sig.get("intraday_prob"),
+            "final": final_prob,
+        }
+
+    return predictions, diagnostics
 
 # ===============================================================
 # Cycle Summary
@@ -79,6 +86,23 @@ def print_cycle_summary(decisions):
         f"Core BUY: {core_buy or '-'} | "
         f"Cash: ${cash:,.2f}"
     )
+
+def print_signal_diagnostics(decisions, diagnostics):
+    for sym, d in decisions.items():
+        sig = diagnostics.get(sym)
+        if not sig:
+            continue
+
+        daily = sig.get("daily")
+        intra = sig.get("intraday")
+        final = sig.get("final")
+        action = d.get("action", "hold").upper()
+
+        print(
+            f"📊 {sym:<5} | "
+            f"D={daily:.2f} I={intra:.2f} W={INTRADAY_WEIGHT:.2f} "
+            f"→ F={final:.2f} | {action}"
+        )
 
 # ===============================================================
 # Execute decisions (clean & safe)
@@ -253,7 +277,7 @@ def process_all_symbols(symbols):
     # ----------------------------
     # Step 1: Predictions for core stocks
     # ----------------------------
-    predictions = get_predictions(core_symbols, debug=True)
+    predictions, diagnostics = get_predictions(core_symbols, debug=False)
 
     if not predictions:
         print("[INFO] No valid predictions available. Stopping.")
@@ -263,11 +287,12 @@ def process_all_symbols(symbols):
     # Step 1b: ALWAYS fetch SPY too
     # (so strategy can SELL/EXIT SPY when NVDA/AAPL opportunity appears)
     # ----------------------------
-    spy_preds = get_predictions([spy_sym], debug=True)
+    spy_preds, spy_diag = get_predictions([spy_sym], debug=False)
     spy_prob = spy_preds.get(spy_sym)
 
     if spy_prob is not None:
         predictions[spy_sym] = spy_prob
+        diagnostics.update(spy_diag)   # merge SPY diagnostics into main diagnostics
     else:
         print(f"[WARN] Could not get valid prediction for {spy_sym}. SPY will be ignored this cycle.")
 
@@ -293,6 +318,13 @@ def process_all_symbols(symbols):
     print("\n================== CYCLE SUMMARY ==================")
     print_cycle_summary(decisions)
     print("================================================\n")
+
+    # ----------------------------
+    # Step 5: Execute Signal Diagnostics
+    # ----------------------------
+    print("\n================ SIGNAL DIAGNOSTICS ================")
+    print_signal_diagnostics(decisions, diagnostics)
+    print("====================================================\n")
 
 # ===============================================================
 # Entry Point
