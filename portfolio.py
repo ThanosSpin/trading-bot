@@ -169,7 +169,7 @@ class PortfolioManager:
                 self.data["avg_price"] = 0.0
                 self.data["max_price"] = 0.0
             
-            print(f"[LIVE] {self.symbol} shares={sh} last={lp} avg={self.data['avg_price']} max={self.data['max_price']}")
+            # print(f"[LIVE] {self.symbol} shares={sh} last={lp} avg={self.data['avg_price']} max={self.data['max_price']}")
 
             self.save()
         except Exception:

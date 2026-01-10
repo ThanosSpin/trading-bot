@@ -31,7 +31,7 @@ INTRADAY_WEIGHT = 0.65   # default intraday dominance
 
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.65    # require strong confidence to buy
-SELL_THRESHOLD = 0.35   # require strong confidence to sell
+SELL_THRESHOLD = 0.38   # require strong confidence to sell
 
 # =========================
 # SPY fallback configuration

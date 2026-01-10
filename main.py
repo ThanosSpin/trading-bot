@@ -53,6 +53,32 @@ def get_predictions(symbols, debug=True):
 
     return predictions
 
+# ===============================================================
+# Cycle Summary
+# ===============================================================
+def print_cycle_summary(decisions):
+    buys = [s for s, d in decisions.items() if d.get("action") == "buy"]
+    sells = [s for s, d in decisions.items() if d.get("action") == "sell"]
+    holds = [s for s, d in decisions.items() if d.get("action") == "hold"]
+
+    core_buy = next((s for s in buys if s in ("NVDA", "AAPL")), None)
+
+    # Read live cash (account-level)
+    try:
+        pm = PortfolioManager("NVDA")  # any symbol works for cash
+        pm.refresh_live()
+        cash = float(pm.data.get("cash", 0.0))
+    except Exception:
+        cash = 0.0
+
+    print(
+        f"📊 Cycle Summary | "
+        f"BUY: {len(buys)} | "
+        f"SELL: {len(sells)} | "
+        f"HOLD: {len(holds)} | "
+        f"Core BUY: {core_buy or '-'} | "
+        f"Cash: ${cash:,.2f}"
+    )
 
 # ===============================================================
 # Execute decisions (clean & safe)
@@ -255,12 +281,18 @@ def process_all_symbols(symbols):
     for sym, d in decisions.items():
         print(f"{sym}: {d['action'].upper()} {d['qty']} — {d['explain']}")
     print("================================================\n")
-
+    
     # ----------------------------
     # Step 3: Execute trades
     # ----------------------------
     execute_decisions(decisions)
-
+    
+    # ----------------------------
+    # Step 4: Execute Cycle Summary
+    # ----------------------------
+    print("\n================== CYCLE SUMMARY ==================")
+    print_cycle_summary(decisions)
+    print("================================================\n")
 
 # ===============================================================
 # Entry Point
