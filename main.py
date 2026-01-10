@@ -88,21 +88,41 @@ def print_cycle_summary(decisions):
     )
 
 def print_signal_diagnostics(decisions, diagnostics):
+    print("\n================ SIGNAL DIAGNOSTICS ================")
+
+    def pick(d, *keys):
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+        return None
+
+    def fmt(x):
+        return f"{x:.2f}" if isinstance(x, (int, float)) else "NA"
+
     for sym, d in decisions.items():
         sig = diagnostics.get(sym)
-        if not sig:
+        if not isinstance(sig, dict):
             continue
 
-        daily = sig.get("daily")
-        intra = sig.get("intraday")
-        final = sig.get("final")
+        # support both schemas:
+        daily = pick(sig, "daily_prob", "daily")
+        intra = pick(sig, "intraday_prob", "intraday")
+        final = pick(sig, "final_prob", "final")
+
+        w_used = pick(sig, "intraday_weight", "weight")
+        if not isinstance(w_used, (int, float)):
+            w_used = INTRADAY_WEIGHT
+
         action = d.get("action", "hold").upper()
 
         print(
             f"📊 {sym:<5} | "
-            f"D={daily:.2f} I={intra:.2f} W={INTRADAY_WEIGHT:.2f} "
-            f"→ F={final:.2f} | {action}"
+            f"D={fmt(daily)} I={fmt(intra)} "
+            f"W={w_used:.2f} (base={INTRADAY_WEIGHT:.2f}) "
+            f"→ F={fmt(final)} | {action}"
         )
+
+    print("====================================================\n")
 
 # ===============================================================
 # Execute decisions (clean & safe)
@@ -322,9 +342,7 @@ def process_all_symbols(symbols):
     # ----------------------------
     # Step 5: Execute Signal Diagnostics
     # ----------------------------
-    print("\n================ SIGNAL DIAGNOSTICS ================")
     print_signal_diagnostics(decisions, diagnostics)
-    print("====================================================\n")
 
 # ===============================================================
 # Entry Point
