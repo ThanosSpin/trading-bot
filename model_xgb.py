@@ -9,7 +9,7 @@ from xgboost import XGBClassifier
 
 from features import build_daily_features, build_intraday_features
 from data_loader import fetch_historical_data, fetch_intraday_history
-from config import INTRADAY_WEIGHT
+from config import INTRADAY_WEIGHT, MIN_INTRADAY_BARS_FOR_FEATURES
 
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -21,6 +21,29 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
+def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """
+    Proper OHLCV resample:
+      Open=first, High=max, Low=min, Close=last, Volume=sum
+    """
+    df = df.copy()
+
+    # must have these columns
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    for c in required:
+        if c not in df.columns:
+            raise ValueError(f"Missing {c} for resample")
+
+    o = df["Open"].resample(rule).first()
+    h = df["High"].resample(rule).max()
+    l = df["Low"].resample(rule).min()
+    c = df["Close"].resample(rule).last()
+    v = df["Volume"].resample(rule).sum(min_count=1)
+
+    out = pd.concat([o, h, l, c, v], axis=1)
+    out.columns = ["Open", "High", "Low", "Close", "Volume"]
+    out = out.dropna()
+    return out
 
 # ---------------------------------------------------------
 # TRAIN MODEL  (returns artifact dict)
@@ -178,28 +201,39 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
     if model_dict is None:
         return None
 
+    if df_features is None or df_features.empty:
+        print("[ERROR] predict_from_model: df_features empty.")
+        return None
+
     try:
         model = model_dict["model"]
         feat_cols = model_dict["features"]
 
         missing = [c for c in feat_cols if c not in df_features.columns]
         if missing:
-            # Feature schema mismatch — safer to skip
             print(f"[WARN] Missing features for prediction: {missing}")
             return None
 
-        X = df_features[feat_cols].tail(1).values
+        Xdf = df_features[feat_cols]
+
+        # ✅ only drop rows missing required model features (not every engineered column)
+        Xdf = Xdf.replace([np.inf, -np.inf], np.nan).dropna()
+
+        if Xdf.empty:
+            # diagnostic: which columns most often missing
+            na_frac = df_features[feat_cols].isna().mean().sort_values(ascending=False)
+            worst = dict(na_frac.head(8))
+            print(f"[ERROR] predict_from_model: no complete rows after dropna(). worst={worst}")
+            return None
+
+        X = Xdf.tail(1).values
         prob = float(model.predict_proba(X)[0][1])
         return prob
 
     except Exception as e:
         print(f"[ERROR] predict_from_model: {e}")
         return None
-
-
-# =====================================================================
-# COMPLEX SIGNAL CALCULATOR (DAILY + INTRADAY) WITH ADAPTIVE WEIGHTING
-# =====================================================================
+    
 # =====================================================================
 # COMPLEX SIGNAL CALCULATOR (DAILY + INTRADAY) WITH ADAPTIVE LOOKBACK
 # =====================================================================
@@ -207,27 +241,8 @@ def compute_signals(
     symbol,
     lookback_minutes=60,
     intraday_weight=INTRADAY_WEIGHT,
-    resample_to="5min",
+    resample_to="15min",
 ):
-    """
-    Combined signal generator with adaptive intraday weighting and
-    adaptive intraday lookback.
-
-    Returns:
-        {
-          "daily_prob": float or None,
-          "intraday_prob": float or None,
-          "final_prob": float or None,
-          "intraday_weight": float,
-          "allow_intraday": bool,
-          "intraday_rows": int,
-          "intraday_before": int,
-          "daily_rows": int,
-          "used_lookback_minutes": int,
-          "intraday_quality_score": float in [0,1]
-        }
-    """
-
     results = {
         "daily_prob": None,
         "intraday_prob": None,
@@ -263,57 +278,81 @@ def compute_signals(
     # INTRADAY SIGNAL (ADAPTIVE LOOKBACK)
     # -------------------------
     df_intra_resampled = None
+    df_feat_intra = None
 
     try:
-        # Start from requested lookback and gradually expand
-        # if we don't get enough resampled bars.
         candidate_lookbacks = sorted(
-            {lookback_minutes, max(lookback_minutes, 600),
-             max(lookback_minutes, 900), max(lookback_minutes, 1200)}
+            {lookback_minutes,
+             max(lookback_minutes, 600),
+             max(lookback_minutes, 900),
+             max(lookback_minutes, 1200)}
         )
 
+        best_df = None
         best_len = 0
+        best_lb = lookback_minutes
+        best_before = 0
 
         for lb in candidate_lookbacks:
-            df_raw = fetch_intraday_history(symbol, lookback_minutes=lb)
+            df_raw = fetch_intraday_history(symbol, lookback_minutes=lb, interval=resample_to)
             if df_raw is None or df_raw.empty:
                 continue
 
-            results["intraday_before"] = len(df_raw)
-            df_res = df_raw.resample(resample_to).last().dropna()
-            n_res = len(df_res)
+            before = len(df_raw)
 
-            # Keep best seen so far
+            # IMPORTANT: use .last() but ensure index is datetime + sorted
+            df_raw = df_raw.sort_index()
+            # If df_raw is already 15m, resampling again can drop bins -> keep it simple:
+            rt = str(resample_to).lower().replace("mins", "min")
+            if rt in ("15m", "15min"):
+                df_res = df_raw.dropna()
+            else:
+                df_res = df_raw.resample(resample_to).last().dropna()
+
+            n_res = len(df_res)
             if n_res > best_len:
                 best_len = n_res
-                df_intra_resampled = df_res
-                results["used_lookback_minutes"] = lb
-                results["intraday_rows"] = n_res
+                best_df = df_res
+                best_lb = lb
+                best_before = before
 
-            # If we already have a solid dataset, stop expanding
             if n_res >= 80:
                 break
 
-        # If still nothing useful:
-        if df_intra_resampled is None or len(df_intra_resampled) < 20:
-            print(
-                f"[INFO] Intraday dataset too small after adaptive lookback "
-                f"(rows={0 if df_intra_resampled is None else len(df_intra_resampled)})."
-            )
-            results["allow_intraday"] = False
-        else:
-            # Intraday features + prediction
-            df_feat_intra = build_intraday_features(df_intra_resampled)
-            results["intraday_prob"] = predict_from_model(model_intraday, df_feat_intra)
+        # ✅ single source of truth
+        df_intra_resampled = best_df
 
-            # quality score: 0..1 based on 120-resampled-bar target
-            results["intraday_quality_score"] = float(
-                max(0.0, min(1.0, len(df_intra_resampled) / 120.0))
-            )
+        results["intraday_before"] = best_before
+        results["used_lookback_minutes"] = best_lb
+        results["intraday_rows"] = 0 if df_intra_resampled is None else len(df_intra_resampled)
+
+        # Not enough bars -> disable intraday cleanly
+        if df_intra_resampled is None or len(df_intra_resampled) < MIN_INTRADAY_BARS_FOR_FEATURES:
+            results["allow_intraday"] = False
+            results["intraday_prob"] = None
+            results["intraday_quality_score"] = 0.0
+        else:
+            # ✅ actually build intraday features
+            df_feat_intra = build_intraday_features(df_intra_resampled)
+
+            if df_feat_intra is None or df_feat_intra.empty:
+                results["allow_intraday"] = False
+                results["intraday_prob"] = None
+                results["intraday_quality_score"] = 0.0
+            else:
+                results["intraday_prob"] = predict_from_model(model_intraday, df_feat_intra)
+                results["intraday_quality_score"] = float(
+                    max(0.0, min(1.0, len(df_intra_resampled) / 120.0))
+                )
+
+        res_n = 0 if df_intra_resampled is None else len(df_intra_resampled)
+        feat_n = 0 if df_feat_intra is None else len(df_feat_intra)
 
     except Exception as e:
         print(f"[ERROR] Intraday prediction error: {e}")
         results["allow_intraday"] = False
+        results["intraday_prob"] = None
+        results["intraday_quality_score"] = 0.0
 
     # Extract before combine
     dp = results["daily_prob"]
@@ -325,26 +364,20 @@ def compute_signals(
     weight = intraday_weight
 
     if not results["allow_intraday"] or ip is None:
-        # Can't use intraday at all
         weight = 0.0
     else:
-        # Start from base, scale by data quality
         q = results.get("intraday_quality_score", 1.0)
         weight = intraday_weight * q
 
-        # Also incorporate recent intraday volatility
         try:
             close = df_intra_resampled["Close"]
             returns = close.pct_change().dropna()
             vol = returns.std()
 
-            # high vol → rely more on intraday
             if vol > 0.025:
                 weight = min(0.90, weight + 0.20)
-            # very calm → reduce intraday influence
             elif vol < 0.008:
                 weight = max(0.30, weight - 0.20)
-            # otherwise keep as scaled by quality
         except Exception:
             pass
 
@@ -368,7 +401,7 @@ def compute_signals(
 # =====================================================================
 # SIMPLE NEXT-STEP PREDICTOR (WRAPPER)
 # =====================================================================
-def predict_next(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT, resample_to="5min"):
+def predict_next(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT, resample_to="15min"):
     """
     Compatibility wrapper — returns only the final probability.
     """
@@ -383,7 +416,7 @@ def predict_next(
     symbol: str,
     lookback_minutes: int = 60,
     intraday_weight: float = INTRADAY_WEIGHT,
-    resample_to: str = "5min",
+    resample_to: str = "15min",
 ):
     """
     Compatibility wrapper — returns only the final probability.

@@ -29,9 +29,9 @@ def get_predictions(symbols, debug=True):
 
         sig = compute_signals(
             sym,
-            lookback_minutes=900,
+            lookback_minutes=2400,
             intraday_weight=INTRADAY_WEIGHT,
-            resample_to="5min",
+            resample_to="15min",
         )
 
         if debug:
@@ -56,6 +56,8 @@ def get_predictions(symbols, debug=True):
             "daily": sig.get("daily_prob"),
             "intraday": sig.get("intraday_prob"),
             "final": final_prob,
+            "intraday_weight": sig.get("intraday_weight"),
+            "intraday_weight_base": INTRADAY_WEIGHT,
         }
 
     return predictions, diagnostics
@@ -90,36 +92,27 @@ def print_cycle_summary(decisions):
 def print_signal_diagnostics(decisions, diagnostics):
     print("\n================ SIGNAL DIAGNOSTICS ================")
 
-    def pick(d, *keys):
-        for k in keys:
-            if k in d and d[k] is not None:
-                return d[k]
-        return None
-
     def fmt(x):
-        return f"{x:.2f}" if isinstance(x, (int, float)) else "NA"
+        return "NA" if x is None else f"{x:.2f}"
 
     for sym, d in decisions.items():
-        sig = diagnostics.get(sym)
-        if not isinstance(sig, dict):
-            continue
+        sig = diagnostics.get(sym) or {}
+        daily = sig.get("daily")
+        intra = sig.get("intraday")
+        final = sig.get("final")
 
-        # support both schemas:
-        daily = pick(sig, "daily_prob", "daily")
-        intra = pick(sig, "intraday_prob", "intraday")
-        final = pick(sig, "final_prob", "final")
+        used_w = sig.get("intraday_weight")          # ✅ actual
+        base_w = sig.get("intraday_weight_base")     # optional if you store it
 
-        w_used = pick(sig, "intraday_weight", "weight")
-        if not isinstance(w_used, (int, float)):
-            w_used = INTRADAY_WEIGHT
+        action = (d.get("action", "hold") or "hold").upper()
 
-        action = d.get("action", "hold").upper()
+        w_part = f"{fmt(used_w)}"
+        if base_w is not None:
+            w_part += f" (base={fmt(base_w)})"
 
         print(
             f"📊 {sym:<5} | "
-            f"D={fmt(daily)} I={fmt(intra)} "
-            f"W={w_used:.2f} (base={INTRADAY_WEIGHT:.2f}) "
-            f"→ F={fmt(final)} | {action}"
+            f"D={fmt(daily)} I={fmt(intra)} W={w_part} → F={fmt(final)} | {action}"
         )
 
     print("====================================================\n")
@@ -355,9 +348,9 @@ def main():
     debug_market()
 
     # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
     # PDT Display
     try:

@@ -14,7 +14,7 @@ from typing import Optional
 import joblib
 import plotly.graph_objects as go
 
-from config import TIMEZONE, SYMBOL, MODEL_DIR, SPY_SYMBOL
+from config import TIMEZONE, SYMBOL, MODEL_DIR, SPY_SYMBOL, INTRADAY_WEIGHT
 from portfolio import (
     get_trade_log_file,
     get_daily_portfolio_file,
@@ -214,7 +214,7 @@ st.header("📡 Model Signals & Price Charts")
 for sym in symbols:
     st.subheader(f"Signals for {sym}")
     try:
-        sig = compute_signals(sym, lookback_minutes=300, intraday_weight=0.65, resample_to="5min")
+        sig = compute_signals(sym, lookback_minutes=2400, intraday_weight=INTRADAY_WEIGHT, resample_to="15min")
     except Exception as e:
         st.warning(f"{sym}: error computing signals — {e}")
         continue

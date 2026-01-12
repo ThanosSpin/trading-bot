@@ -102,7 +102,8 @@ def macd(close: pd.Series):
 def stoch(df: pd.DataFrame, k: int = 14, d: int = 3):
     low_min = df["Low"].rolling(k).min()
     high_max = df["High"].rolling(k).max()
-    percent_k = (df["Close"] - low_min) / (high_max - low_min) * 100
+    denom = (high_max - low_min).replace(0, np.nan)   # ✅ avoid /0
+    percent_k = (df["Close"] - low_min) / denom * 100
     percent_d = percent_k.rolling(d).mean()
     return percent_k, percent_d
 
@@ -156,22 +157,21 @@ def add_intraday_time_features(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================================
 # ADVANCED FEATURE BUILDER
 # ============================================================================
-def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame:
     """
-    Adds 40+ engineered features.
-    Safe for both Daily and Intraday datasets.
-
-    Assumes df already has cleaned numeric OHLCV columns:
-    Open, High, Low, Close, Volume
+    Adds engineered features.
+    Intraday uses shorter windows so we don't require huge history to produce a row.
     """
     df = df.copy()
 
-    # =====================================================
-    # Price Normalizations & Returns
-    # =====================================================
-    df["return_1"] = df["Close"].pct_change()
-    df["return_5"] = df["Close"].pct_change(5)
-    df["volume_roc"] = df["Volume"].pct_change()
+    # -----------------------------
+    # Core returns / ratios
+    # -----------------------------
+    df["return_1"] = df["Close"].pct_change(fill_method=None)
+    df["return_5"] = df["Close"].pct_change(5, fill_method=None)
+
+    v = df["Volume"].replace(0, np.nan)
+    df["volume_roc"] = v.pct_change(fill_method=None)
 
     df["close_open_ratio"] = df["Close"] / df["Open"]
     df["high_low_ratio"] = df["High"] / df["Low"]
@@ -182,91 +182,128 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     df["upper_wick"] = df["High"] - df[["Close", "Open"]].max(axis=1)
     df["lower_wick"] = df[["Close", "Open"]].min(axis=1) - df["Low"]
 
-    df["body_ratio"] = df["candle_body"] / df["candle_range"]
-    df["upper_wick_ratio"] = df["upper_wick"] / df["candle_range"]
-    df["lower_wick_ratio"] = df["lower_wick"] / df["candle_range"]
+    cr = df["candle_range"].replace(0, np.nan)
+    df["body_ratio"] = df["candle_body"] / cr
+    df["upper_wick_ratio"] = df["upper_wick"] / cr
+    df["lower_wick_ratio"] = df["lower_wick"] / cr
 
-    # =====================================================
-    # Moving Averages (EMAs + SMAs)
-    # =====================================================
-    for win in [5, 10, 20, 50]:
+    # -----------------------------
+    # Window choices by mode
+    # -----------------------------
+    if mode == "intraday":
+        ma_windows = [3, 5, 10, 20]      # ✅ short windows
+        rsi_windows = [6, 10]
+        vol_windows = [3, 6, 12]
+        warmup = 20                      # enough for 20 + indicator buffers
+    else:
+        ma_windows = [5, 10, 20, 50]
+        rsi_windows = [6, 14]
+        vol_windows = [5, 15, 30]
+        warmup = 80                      # enough for 50 + buffers
+
+    # -----------------------------
+    # Moving averages
+    # -----------------------------
+    for win in ma_windows:
         df[f"ema_{win}"] = ema(df["Close"], win)
         df[f"sma_{win}"] = sma(df["Close"], win)
 
-    # =====================================================
+    # -----------------------------
     # RSI
-    # =====================================================
-    df["rsi_6"] = rsi(df["Close"], 6)
-    df["rsi_14"] = rsi(df["Close"], 14)
+    # -----------------------------
+    df[f"rsi_{rsi_windows[0]}"] = rsi(df["Close"], rsi_windows[0])
+    df[f"rsi_{rsi_windows[1]}"] = rsi(df["Close"], rsi_windows[1])
 
-    # =====================================================
-    # MACD
-    # =====================================================
-    macd_line, macd_signal, macd_hist = macd(df["Close"])
+    # -----------------------------
+    # MACD (faster for intraday)
+    # -----------------------------
+    if mode == "intraday":
+        fast = ema(df["Close"], 8)
+        slow = ema(df["Close"], 18)
+        macd_line = fast - slow
+        macd_signal = ema(macd_line, 6)
+        macd_hist = macd_line - macd_signal
+    else:
+        macd_line, macd_signal, macd_hist = macd(df["Close"])
+
     df["macd"] = macd_line
     df["macd_signal"] = macd_signal
     df["macd_hist"] = macd_hist
 
-    # =====================================================
-    # Stochastic Oscillator
-    # =====================================================
-    stoch_k, stoch_d = stoch(df)
-    df["stoch_k"] = stoch_k
-    df["stoch_d"] = stoch_d
+    # -----------------------------
+    # Stochastic (safe denom)
+    # -----------------------------
+    low_min = df["Low"].rolling(14).min()
+    high_max = df["High"].rolling(14).max()
+    denom = (high_max - low_min).replace(0, np.nan)
+    df["stoch_k"] = (df["Close"] - low_min) / denom * 100
+    df["stoch_d"] = df["stoch_k"].rolling(3).mean()
 
-    # =====================================================
-    # Bollinger Bands
-    # =====================================================
-    mid, upper, lower = bollinger(df["Close"])
+    # -----------------------------
+    # Bollinger (safe mid)
+    # -----------------------------
+    mid, upper, lower = bollinger(df["Close"], length=20, num_std=2)
+    mid_safe = mid.replace(0, np.nan)
     df["bb_mid"] = mid
     df["bb_upper"] = upper
     df["bb_lower"] = lower
-    df["bb_width"] = (upper - lower) / mid
+    df["bb_width"] = (upper - lower) / mid_safe
 
-    # =====================================================
-    # ATR + Volatility Clusters
-    # =====================================================
-    df["atr"] = atr(df)
-    df["vol_5"] = df["return_1"].rolling(5).std()
-    df["vol_15"] = df["return_1"].rolling(15).std()
-    df["vol_30"] = df["return_1"].rolling(30).std()
+    # -----------------------------
+    # ATR + volatility
+    # -----------------------------
+    df["atr"] = atr(df, length=14)
+    for w in vol_windows:
+        df[f"vol_{w}"] = df["return_1"].rolling(w).std()
 
-    # =====================================================
-    # OBV
-    # =====================================================
+    # -----------------------------
+    # OBV + lagged returns
+    # -----------------------------
     df["obv"] = obv(df)
-
-    # =====================================================
-    # Lagged Returns
-    # =====================================================
     for lag in [1, 2, 3, 4, 5]:
         df[f"lag_ret_{lag}"] = df["return_1"].shift(lag)
 
-    # =====================================================
-    # Intraday time encodings
-    # =====================================================
+    # -----------------------------
+    # Time-of-day (only meaningful intraday, safe otherwise)
+    # -----------------------------
     df = add_intraday_time_features(df)
 
     # =====================================================
-    # Clean infinities / NaNs and drop initial warm-up rows
+    # Clean infinities / NaNs (but DON'T nuke everything)
     # =====================================================
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.dropna(inplace=True)
 
+    # Always require core price columns
+    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+
+    # --- Dynamic warmup ---
+    # Need enough bars for the *largest* rolling window actually used.
+    if mode == "intraday":
+        # you use up to sma_20 / ema_20 / bollinger(20) / stoch(14) / atr(14)
+        required = 20
+        extra_buffer = 2
+    else:
+        required = 50
+        extra_buffer = 10
+
+    warmup = required + extra_buffer
+
+    # If we don't have enough data, DON'T wipe everything.
+    # Instead: keep what we can and just drop NaNs at the end.
+    if len(df) <= warmup:
+        return df.iloc[0:0]
+
+    # Normal case: trim warmup then drop remaining NaNs
+    df = df.iloc[warmup:].dropna()
     return df
 
 
 # ============================================================================
 # BASE FEATURE ENTRY POINT
 # ============================================================================
-def _build_base_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Base entry point for both daily & intraday feature sets.
-    1) Clean & normalize OHLCV
-    2) Add advanced features
-    """
+def _build_base_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame:
     df = _fix_ohlcv(df)
-    df = add_advanced_features(df)
+    df = add_advanced_features(df, mode=mode)
     return df
 
 
@@ -277,7 +314,7 @@ def build_daily_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build full advanced feature set for daily data.
     """
-    return _build_base_features(df)
+    return _build_base_features(df, mode="daily")
 
 
 def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -285,4 +322,4 @@ def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
     Build full advanced feature set for intraday data.
     Uses same core features as daily, plus extra time-of-day encodings.
     """
-    return _build_base_features(df)
+    return _build_base_features(df, mode="intraday")

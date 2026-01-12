@@ -28,6 +28,7 @@ INITIAL_CAPITAL = 0
 # Model blending weights
 # --------------------
 INTRADAY_WEIGHT = 0.65   # default intraday dominance
+MIN_INTRADAY_BARS_FOR_FEATURES = 25
 
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.65    # require strong confidence to buy
@@ -75,5 +76,5 @@ PORTFOLIO_PATH = "data/portfolio.json"
 LOG_FILE = "logs/trading_bot.log"
 
 # Other configs
-USE_LIVE_TRADING = True  # Switch to True to go live
+USE_LIVE_TRADING = False  # Switch to True to go live
 TIMEZONE = "US/Eastern"
