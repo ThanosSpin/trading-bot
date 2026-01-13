@@ -6,7 +6,7 @@ import pytz
 from datetime import datetime
 
 from trader import api as api_market   # ✅ use updated Alpaca client
-from config import SYMBOL, TIMEZONE, PORTFOLIO_PATH
+from config import SYMBOL, TIMEZONE, PORTFOLIO_PATH, SPY_SYMBOL
 
 
 # -----------------------------
@@ -191,6 +191,12 @@ def replay_and_emit(all_trades, initial_cash):
 # -----------------------------
 if __name__ == "__main__":
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
+    symbols = [s.upper() for s in symbols]
+
+    # ✅ Always include SPY so reconstruction matches dashboard reality
+    spy = SPY_SYMBOL.upper()
+    if spy not in symbols:
+        symbols.append(spy)
 
     print("🔎 Gathering trades for symbols:", symbols)
 
