@@ -459,47 +459,96 @@ for sym in symbols:
             st.warning(f"Could not plot value chart: {e}")
 
     # ----------------------------------
-    # TRADE ANALYTICS
+    # TRADE ANALYTICS (cycle detection using shares_before/after)
     # ----------------------------------
     if not df.empty:
-        df["trade_value"] = df["qty"] * df["price"]
-        df["pnl"] = df.apply(
-            lambda r: -r["trade_value"] if r["action"].lower() == "buy" else r["trade_value"],
+        # Ensure numeric
+        for c in ["qty", "price", "shares"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        # Prefer new columns if present
+        has_before_after = ("shares_before" in df.columns) and ("shares_after" in df.columns)
+
+        if has_before_after:
+            df["shares_before"] = pd.to_numeric(df["shares_before"], errors="coerce")
+            df["shares_after"] = pd.to_numeric(df["shares_after"], errors="coerce")
+        else:
+            # fallback (older logs): approximate before/after from shares column
+            df = df.sort_values("timestamp").copy()
+            df["shares_after"] = pd.to_numeric(df.get("shares"), errors="coerce")
+            df["shares_before"] = df["shares_after"].shift(1).fillna(0.0)
+
+        df = df.dropna(subset=["timestamp", "action", "qty", "price", "shares_before", "shares_after"])
+        df = df.sort_values("timestamp").copy()
+
+        # Signed cashflow: BUY consumes cash (negative), SELL produces cash (positive)
+        df["cashflow"] = df.apply(
+            lambda r: -(r["qty"] * r["price"]) if str(r["action"]).lower() == "buy" else (r["qty"] * r["price"]),
             axis=1
         )
 
-        df = df.sort_values("timestamp")
+        # ---------
+        # Cycle detection:
+        # A "cycle" = position goes from flat (0) -> nonzero -> back to flat (0)
+        # We use shares_before/after to robustly detect the transitions.
+        # ---------
+        cycle_cashflows = []
+        in_cycle = False
+        running_cf = 0.0
 
-        df["shares_after"] = df["shares"]
-        cycle_rows = []
-        cycle_pnls = []
-        prev = 0
+        # tolerance for float noise
+        EPS = 1e-9
 
         for _, r in df.iterrows():
-            cycle_rows.append(r)
-            if r["shares_after"] == prev and len(cycle_rows) >= 2:
-                pnl = sum(x["pnl"] for x in cycle_rows)
-                cycle_pnls.append(pnl)
-                cycle_rows = []
+            sb = float(r["shares_before"])
+            sa = float(r["shares_after"])
+            cf = float(r["cashflow"])
 
-        if cycle_pnls:
-            s = pd.Series(cycle_pnls)
+            was_flat = abs(sb) <= EPS
+            now_flat = abs(sa) <= EPS
+
+            # Start cycle: flat -> non-flat
+            if (not in_cycle) and was_flat and (not now_flat):
+                in_cycle = True
+                running_cf = 0.0
+
+            # If inside cycle, accumulate cashflows
+            if in_cycle:
+                running_cf += cf
+
+            # End cycle: non-flat -> flat
+            if in_cycle and (not was_flat) and now_flat:
+                cycle_cashflows.append(running_cf)
+                in_cycle = False
+                running_cf = 0.0
+
+        if cycle_cashflows:
+            s = pd.Series(cycle_cashflows)
+
             gross_profit = s[s > 0].sum()
             gross_loss = -s[s < 0].sum()
+
             win_rate = (s > 0).mean() * 100
-            avg_win = s[s > 0].mean() if (s > 0).any() else 0
-            avg_loss = s[s < 0].mean() if (s < 0).any() else 0
+            avg_win = s[s > 0].mean() if (s > 0).any() else 0.0
+            avg_loss = s[s < 0].mean() if (s < 0).any() else 0.0
+
             largest_win = s.max()
             largest_loss = s.min()
-            profit_factor = gross_profit / gross_loss if gross_loss != 0 else float("inf")
+
+            profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf")
 
             cA, cB, cC, cD = st.columns(4)
             cA.metric("Win Rate", f"{win_rate:.1f}%")
-            cB.metric("Profit Factor", f"{profit_factor:.2f}")
+            cB.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor != float("inf") else "∞")
             cC.metric("Avg Win / Loss", f"{avg_win:.2f} / {avg_loss:.2f}")
             cD.metric("Largest Win / Loss", f"{largest_win:.2f} / {largest_loss:.2f}")
+
+            # Optional debug panel (super useful)
+            with st.expander("🔍 Closed-trade cycle PnLs (debug)"):
+                st.write(pd.DataFrame({"cycle_pnl": s}))
         else:
-            st.info("Not enough closed trades to compute analytics.")
+            st.info("Not enough closed trades (flat → position → flat) to compute analytics.")
 
 # -------------------------------------------------
 # TOTAL DAILY PORTFOLIO PERFORMANCE (DUAL EQUITY CURVES)

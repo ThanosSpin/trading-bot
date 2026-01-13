@@ -179,7 +179,7 @@ class PortfolioManager:
     # Logging
     # ------------------------
 
-    def log(self, action, price, qty):
+    def log(self, action, price, qty, shares_before, shares_after):
         """Write trade entry into trades_<symbol>.csv."""
         log_path = get_trade_log_file(self.symbol)
         file_exists = os.path.isfile(log_path)
@@ -191,60 +191,107 @@ class PortfolioManager:
             writer = csv.writer(f)
             if not file_exists:
                 writer.writerow([
-                    "timestamp", "symbol", "action", "qty",
-                    "price", "cash", "shares", "value"
+                    "timestamp",
+                    "symbol",
+                    "action",
+                    "qty",
+                    "price",
+                    "cash",
+                    "shares",
+                    "value",
+                    "shares_before",
+                    "shares_after",
                 ])
+
             writer.writerow([
                 timestamp,
                 self.symbol,
                 action,
                 f"{float(qty):g}",
-                f"{float(price):.2f}" if price is not None else "N/A",
+                f"{float(price):.2f}",
                 f"{self.data['cash']:.2f}",
                 f"{self.data['shares']:.8g}",
                 f"{value:.2f}",
+                f"{shares_before:.8g}",
+                f"{shares_after:.8g}",
             ])
 
     # ------------------------
     # Trading updates
     # ------------------------
 
-    def _apply(self, action, price, qty):
-        """Internal balance update + logging + save."""
-        price = float(price)
-        qty = float(qty)
+def _apply(self, action, price, qty):
+    """Internal balance update + logging + save.
+    qty MUST be the executed (filled) quantity.
+    """
+    price = float(price)
+    qty = float(qty)
 
-        if action == "buy":
-            prev_shares = float(self.data.get("shares", 0.0))
-            prev_avg = float(self.data.get("avg_price", 0.0))
-            new_shares = prev_shares + qty
+    if qty <= 0 or price <= 0:
+        return
 
-            # weighted avg entry
-            if new_shares > 0:
-                self.data["avg_price"] = (prev_shares * prev_avg + qty * price) / new_shares
+    # Snapshot BEFORE execution
+    shares_before = float(self.data.get("shares", 0.0))
+    cash_before = float(self.data.get("cash", 0.0))
 
-            self.data["shares"] = new_shares
-            self.data["cash"] -= qty * price
+    # -----------------------
+    # BUY
+    # -----------------------
+    if action == "buy":
+        new_shares = shares_before + qty
+        prev_avg = float(self.data.get("avg_price", 0.0))
 
-            # initialize/raise max_price
-            mp = float(self.data.get("max_price", 0.0))
-            self.data["max_price"] = max(mp, price)
+        # weighted average entry
+        if new_shares > 0:
+            self.data["avg_price"] = (
+                shares_before * prev_avg + qty * price
+            ) / new_shares
 
-        elif action == "sell":
-            qty = min(qty, float(self.data.get("shares", 0.0)))
-            self.data["shares"] -= qty
-            self.data["cash"] += qty * price
+        self.data["shares"] = new_shares
+        self.data["cash"] = cash_before - qty * price
 
-            # reset when flat
-            if float(self.data.get("shares", 0.0)) <= 0:
-                self.data["shares"] = 0.0
-                self.data["avg_price"] = 0.0
-                self.data["max_price"] = 0.0
+        # update max_price
+        mp = float(self.data.get("max_price", 0.0))
+        self.data["max_price"] = max(mp, price)
 
-        self.data["last_price"] = price
+    # -----------------------
+    # SELL
+    # -----------------------
+    elif action == "sell":
+        # ❗ DO NOT clip qty — broker fill is truth
+        new_shares = shares_before - qty
 
-        self.log(action, price, qty)
-        self.save()
+        # clamp negative due to stale local state
+        if new_shares < 0:
+            new_shares = 0.0
+
+        self.data["shares"] = new_shares
+        self.data["cash"] = cash_before + qty * price
+
+        # reset position stats when flat
+        if new_shares <= 0:
+            self.data["shares"] = 0.0
+            self.data["avg_price"] = 0.0
+            self.data["max_price"] = 0.0
+
+    else:
+        return  # unknown action
+
+    self.data["last_price"] = price
+
+    # Snapshot AFTER execution
+    shares_after = float(self.data.get("shares", 0.0))
+
+    # ✅ LOG EXECUTED TRADE (with before/after)
+    self.log(
+        action=action,
+        price=price,
+        qty=qty,
+        shares_before=shares_before,
+        shares_after=shares_after,
+    )
+
+    self.save()
 
     # PUBLIC API -------------------------------------------------------
 
@@ -252,7 +299,6 @@ class PortfolioManager:
         self._apply("buy", price, qty)
 
     def sell(self, qty, price):
-        qty = min(qty, self.data["shares"])
         self._apply("sell", price, qty)
 
     def sell_all(self, price):
