@@ -152,6 +152,13 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         f"(BUY≥{BUY_THRESHOLD}, SELL≤{SELL_THRESHOLD}, shares={shares:.4g}). "
     )
 
+    # If already in a position, don't pyramid by default (prevents confusing "BUY but no cash")
+    if shares > 0 and prob_up >= BUY_THRESHOLD:
+        return make_decision(
+            "hold", 0,
+            explain + f"HOLD — already in position (shares={shares:g}); pyramiding disabled."
+        )
+
     # BUY
     if prob_up >= BUY_THRESHOLD:
         affordable = int(cash // price)
@@ -456,6 +463,33 @@ def compute_strategy_decisions(
                     0,
                     f"{sym}: BUY blocked by pullback guardrail (mom={mom_str}, ip={ip_str} < dp={dp_str})."
                 )
+    
+    # ---------------------------------------------------------
+    # 4.7) ROTATION: If NVDA wants BUY and AAPL is not BUY, sell AAPL to fund NVDA
+    # ---------------------------------------------------------
+    if "NVDA" in core_symbols and "AAPL" in core_symbols:
+        nvda_d = decisions.get("NVDA") or {}
+        aapl_d = decisions.get("AAPL") or {}
+
+        nvda_wants_buy = (nvda_d.get("action") == "buy") or (preds.get("NVDA", 0.0) >= BUY_THRESHOLD)
+        aapl_is_not_buy = (aapl_d.get("action") in ("hold", "sell")) and (preds.get("AAPL", 0.0) < BUY_THRESHOLD + 0.05) 
+
+        if nvda_wants_buy and aapl_is_not_buy:
+            aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
+            if aapl_sh > 0:
+                decisions["AAPL"] = make_decision(
+                    "sell",
+                    int(aapl_sh),
+                    "AAPL: Sold to fund NVDA rotation buy."
+                )
+
+            # mark NVDA as priority buy (main.py will recalc after sells)
+            decisions["NVDA"] = make_decision(
+                "buy", 1,
+                "NVDA PRIORITY BUY — recalc all-in after sells (AAPL rotation + SPY liquidation if any).",
+                recalc_all_in=True,
+                priority_rank=1,
+            )
 
     # ---------------------------------------------------------
     # 5) FINAL ENFORCEMENT: if NVDA/AAPL has BUY INTENT => SELL SPY + recalc flags
