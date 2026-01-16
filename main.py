@@ -53,12 +53,15 @@ def get_predictions(symbols, debug=True):
         predictions[sym] = final_prob
 
         diagnostics[sym] = {
-            "daily": sig.get("daily_prob"),
-            "intraday": sig.get("intraday_prob"),
-            "final": final_prob,
-            "intraday_weight": sig.get("intraday_weight"),
-            "intraday_weight_base": INTRADAY_WEIGHT,
-        }
+                "daily_prob": sig.get("daily_prob"),
+                "intraday_prob": sig.get("intraday_prob"),
+                "final_prob": sig.get("final_prob"),
+                "intraday_weight": sig.get("intraday_weight"),
+                "intraday_model_used": sig.get("intraday_model_used"),
+                "intraday_quality_score": sig.get("intraday_quality_score"),
+                "intraday_vol": sig.get("intraday_vol"),
+                "intraday_mom": sig.get("intraday_mom"),
+            }
 
     return predictions, diagnostics
 
@@ -92,46 +95,51 @@ def print_cycle_summary(decisions):
 def print_signal_diagnostics(decisions, diagnostics):
     print("\n================ SIGNAL DIAGNOSTICS ================")
 
-    def fmt(x, n=2):
-        return "NA" if x is None else f"{float(x):.{n}f}"
+    def fmt(x, n=3):
+        try:
+            return "NA" if x is None else f"{float(x):.{n}f}"
+        except Exception:
+            return "NA"
 
     def fmt_div(x):
-        return "NA" if x is None else f"{float(x):+.3f}"
+        try:
+            return "NA" if x is None else f"{float(x):+.3f}"
+        except Exception:
+            return "NA"
+
+    decisions = decisions or {}
+    diagnostics = diagnostics or {}
 
     for sym, d in decisions.items():
-        sig = diagnostics.get(sym) or {}
+        sig = diagnostics.get(sym, {}) or {}
 
-        dp = sig.get("daily_prob") or sig.get("daily")
-        ip = sig.get("intraday_prob") or sig.get("intraday")
-        final = sig.get("final_prob") or sig.get("final")
+        # ✅ use your actual stored keys (with fallback)
+        dp = sig.get("daily_prob", sig.get("daily"))
+        ip = sig.get("intraday_prob", sig.get("intraday"))
+        fp = sig.get("final_prob", sig.get("final"))
 
-        used_w = sig.get("intraday_weight")
-        base_w = sig.get("intraday_weight_base")  # optional, if you store it
+        w = sig.get("intraday_weight")
+        model_used = sig.get("intraday_model_used", sig.get("model", "intraday"))
 
-        model_used = (
-            sig.get("intraday_model_used")
-            or sig.get("model")
-            or "intraday"
-        )
+        vol = sig.get("intraday_vol")
+        mom = sig.get("intraday_mom")
+        q   = sig.get("intraday_quality_score")
 
         div = None
         if dp is not None and ip is not None:
             try:
-                div = float(ip - dp)
+                div = float(ip) - float(dp)
             except Exception:
-                pass
+                div = None
 
         action = (d.get("action", "hold") or "hold").upper()
-
-        w_part = fmt(used_w)
-        if base_w is not None:
-            w_part += f" (base={fmt(base_w)})"
 
         print(
             f"📊 {sym:<5} | "
             f"D={fmt(dp)} I={fmt(ip)} Δ={fmt_div(div)} "
-            f"W={w_part} → F={fmt(final)} | "
-            f"{model_used} | {action}"
+            f"W={fmt(w,2)} → F={fmt(fp)} | "
+            f"q={fmt(q,2)} vol={fmt(vol,5)} mom={fmt(mom,4)} | "
+            f"model={model_used} | {action}"
         )
 
     print("====================================================\n")
@@ -350,7 +358,7 @@ def process_all_symbols(symbols):
     print("\n================== CYCLE SUMMARY ==================")
     print_cycle_summary(decisions)
     print("================================================\n")
-
+    
     # ----------------------------
     # Step 5: Execute Signal Diagnostics
     # ----------------------------
