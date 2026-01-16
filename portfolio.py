@@ -312,6 +312,12 @@ class PortfolioManager:
         return float(self.data.get("cash", 0)) + \
                float(self.data.get("shares", 0)) * \
                float(self.data.get("last_price", 0))
+    
+    def save(self):
+        """Persist portfolio JSON to disk."""
+        os.makedirs(os.path.dirname(self.file), exist_ok=True)
+        with open(self.file, "w") as f:
+            json.dump(self.data, f, indent=2, sort_keys=True)
 
 
 # ============================================================
