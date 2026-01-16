@@ -92,27 +92,46 @@ def print_cycle_summary(decisions):
 def print_signal_diagnostics(decisions, diagnostics):
     print("\n================ SIGNAL DIAGNOSTICS ================")
 
-    def fmt(x):
-        return "NA" if x is None else f"{x:.2f}"
+    def fmt(x, n=2):
+        return "NA" if x is None else f"{float(x):.{n}f}"
+
+    def fmt_div(x):
+        return "NA" if x is None else f"{float(x):+.3f}"
 
     for sym, d in decisions.items():
         sig = diagnostics.get(sym) or {}
-        daily = sig.get("daily")
-        intra = sig.get("intraday")
-        final = sig.get("final")
 
-        used_w = sig.get("intraday_weight")          # ✅ actual
-        base_w = sig.get("intraday_weight_base")     # optional if you store it
+        dp = sig.get("daily_prob") or sig.get("daily")
+        ip = sig.get("intraday_prob") or sig.get("intraday")
+        final = sig.get("final_prob") or sig.get("final")
+
+        used_w = sig.get("intraday_weight")
+        base_w = sig.get("intraday_weight_base")  # optional, if you store it
+
+        model_used = (
+            sig.get("intraday_model_used")
+            or sig.get("model")
+            or "intraday"
+        )
+
+        div = None
+        if dp is not None and ip is not None:
+            try:
+                div = float(ip - dp)
+            except Exception:
+                pass
 
         action = (d.get("action", "hold") or "hold").upper()
 
-        w_part = f"{fmt(used_w)}"
+        w_part = fmt(used_w)
         if base_w is not None:
             w_part += f" (base={fmt(base_w)})"
 
         print(
             f"📊 {sym:<5} | "
-            f"D={fmt(daily)} I={fmt(intra)} W={w_part} → F={fmt(final)} | {action}"
+            f"D={fmt(dp)} I={fmt(ip)} Δ={fmt_div(div)} "
+            f"W={w_part} → F={fmt(final)} | "
+            f"{model_used} | {action}"
         )
 
     print("====================================================\n")
