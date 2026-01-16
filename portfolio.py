@@ -220,70 +220,70 @@ class PortfolioManager:
     # Trading updates
     # ------------------------
 
-def _apply(self, action, price, qty):
-    """Internal balance update + logging + save.
-    qty MUST be the executed (filled) quantity.
-    """
-    action = (action or "").lower().strip()
+    def _apply(self, action, price, qty):
+        """Internal balance update + logging + save.
+        qty MUST be the executed (filled) quantity.
+        """
+        action = (action or "").lower().strip()
 
-    try:
-        price = float(price)
-        qty = float(qty)
-    except Exception:
-        return
+        try:
+            price = float(price)
+            qty = float(qty)
+        except Exception:
+            return
 
-    if price <= 0 or qty <= 0:
-        return
+        if price <= 0 or qty <= 0:
+            return
 
-    shares_before = float(self.data.get("shares", 0.0))
-    cash_before = float(self.data.get("cash", 0.0))
-    avg_before = float(self.data.get("avg_price", 0.0))
-    max_before = float(self.data.get("max_price", 0.0))
+        shares_before = float(self.data.get("shares", 0.0))
+        cash_before = float(self.data.get("cash", 0.0))
+        avg_before = float(self.data.get("avg_price", 0.0))
+        max_before = float(self.data.get("max_price", 0.0))
 
-    exec_qty = qty  # what we actually apply/log
+        exec_qty = qty  # what we actually apply/log
 
-    # -----------------------
-    # BUY
-    # -----------------------
-    if action == "buy":
-        shares_after = shares_before + exec_qty
-        # weighted avg entry
-        if shares_after > 0:
-            self.data["avg_price"] = (shares_before * avg_before + exec_qty * price) / shares_after
-        self.data["shares"] = shares_after
-        self.data["cash"] = cash_before - (exec_qty * price)
-        self.data["max_price"] = max(max_before, price)
+        # -----------------------
+        # BUY
+        # -----------------------
+        if action == "buy":
+            shares_after = shares_before + exec_qty
+            # weighted avg entry
+            if shares_after > 0:
+                self.data["avg_price"] = (shares_before * avg_before + exec_qty * price) / shares_after
+            self.data["shares"] = shares_after
+            self.data["cash"] = cash_before - (exec_qty * price)
+            self.data["max_price"] = max(max_before, price)
 
-    # -----------------------
-    # SELL
-    # -----------------------
-    elif action == "sell":
-        # If you want to trust broker fills even when local state is stale, keep exec_qty as-is
-        # but prevent negative shares in local state:
-        shares_after = shares_before - exec_qty
-        if shares_after < 0:
-            # clamp local position at 0; still log exec_qty (broker truth)
-            shares_after = 0.0
+        # -----------------------
+        # SELL
+        # -----------------------
+        elif action == "sell":
+            # If you want to trust broker fills even when local state is stale, keep exec_qty as-is
+            # but prevent negative shares in local state:
+            shares_after = shares_before - exec_qty
+            if shares_after < 0:
+                # clamp local position at 0; still log exec_qty (broker truth)
+                shares_after = 0.0
 
-        self.data["shares"] = shares_after
-        self.data["cash"] = cash_before + (exec_qty * price)
+            self.data["shares"] = shares_after
+            self.data["cash"] = cash_before + (exec_qty * price)
 
-        # reset when flat
-        if self.data["shares"] <= 0:
-            self.data["shares"] = 0.0
-            self.data["avg_price"] = 0.0
-            self.data["max_price"] = 0.0
+            # reset when flat
+            if self.data["shares"] <= 0:
+                self.data["shares"] = 0.0
+                self.data["avg_price"] = 0.0
+                self.data["max_price"] = 0.0
 
-    else:
-        # unknown action
-        return
+        else:
+            # unknown action
+            return
 
-    self.data["last_price"] = price
+        self.data["last_price"] = price
 
-    # log *after* state update so "shares" column equals shares_after
-    shares_after_logged = float(self.data.get("shares", 0.0))
-    self.log(action, price, exec_qty, shares_before, shares_after_logged)
-    self.save()
+        # log *after* state update so "shares" column equals shares_after
+        shares_after_logged = float(self.data.get("shares", 0.0))
+        self.log(action, price, exec_qty, shares_before, shares_after_logged)
+        self.save()
 
     # PUBLIC API -------------------------------------------------------
 
