@@ -45,22 +45,55 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     out = out.dropna()
     return out
 
-# ---------------------------------------------------------
-# TRAIN MODEL  (returns artifact dict)
-# ---------------------------------------------------------
+def _add_intraday_regime_cols(df_feat: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds simple regime columns for filtering intraday training rows.
+    Assumes df_feat contains Close (your feature pipeline already does).
+    """
+    df_feat = df_feat.copy()
+
+    # 12 bars * 15m = 3 hours (good regime window)
+    df_feat["ret_12"] = df_feat["Close"].pct_change(12)
+    df_feat["mom_12_abs"] = df_feat["ret_12"].abs()
+
+    # realized vol over same window
+    df_feat["vol_12"] = df_feat["Close"].pct_change().rolling(12).std()
+
+    return df_feat
+
+
+def _filter_intraday_rows_by_mode(df_feat: pd.DataFrame, mode: str) -> pd.DataFrame:
+    """
+    Filters intraday feature rows into either mean-reversion regime or momentum regime.
+    The goal is two specialized models trained on different market conditions.
+    """
+    df_feat = _add_intraday_regime_cols(df_feat)
+
+    df_feat = df_feat.replace([np.inf, -np.inf], np.nan)
+    df_feat = df_feat.dropna(subset=["mom_12_abs", "vol_12"])
+
+    # --- default thresholds ---
+    # momentum: >= ~1% move over ~3h OR higher short-term vol
+    MOM_THR = 0.010
+    VOL_THR = 0.010
+
+    if mode == "intraday_mom":
+        return df_feat[(df_feat["mom_12_abs"] >= MOM_THR) | (df_feat["vol_12"] >= VOL_THR)]
+
+    if mode == "intraday_mr":
+        return df_feat[(df_feat["mom_12_abs"] < MOM_THR) & (df_feat["vol_12"] < VOL_THR)]
+
+    return df_feat
+
 def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     """
     Train XGB model for a given symbol.
 
-    Returns an artifact dict:
-        {
-          "model": XGBClassifier,
-          "features": [list of feature names],
-          "metrics": {...},
-          "trained_at": ISO timestamp,
-          "symbol": str,
-          "mode": "daily" | "intraday",
-        }
+    Supported modes:
+      - daily
+      - intraday (legacy / unfiltered)
+      - intraday_mr (mean reversion regime)
+      - intraday_mom (momentum regime)
     """
 
     from sklearn.metrics import (
@@ -80,12 +113,25 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     # -----------------------------
     if mode == "daily":
         df_feat = build_daily_features(df)
-    elif mode == "intraday":
-        df_feat = build_intraday_features(df)
-    else:
-        raise ValueError("mode must be 'daily' or 'intraday'")
 
-    # Label: next candle up/down
+    elif mode in ("intraday", "intraday_mr", "intraday_mom"):
+        df_feat = build_intraday_features(df)
+
+        # regime filtering only for the dual intraday modes
+        if mode in ("intraday_mr", "intraday_mom"):
+            df_feat = _filter_intraday_rows_by_mode(df_feat, mode=mode)
+
+            # drop regime helper cols so model doesn't learn them directly
+            for c in ["ret_12", "mom_12_abs", "vol_12"]:
+                if c in df_feat.columns:
+                    df_feat.drop(columns=[c], inplace=True)
+
+    else:
+        raise ValueError("mode must be 'daily' or one of: 'intraday', 'intraday_mr', 'intraday_mom'")
+
+    # -----------------------------
+    # LABEL
+    # -----------------------------
     df_feat["target"] = (df_feat["Close"].shift(-1) > df_feat["Close"]).astype(int)
     df_feat.dropna(inplace=True)
 
@@ -143,22 +189,24 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
         metrics["precision"] = float(precision_score(y_test, y_pred))
         metrics["recall"] = float(recall_score(y_test, y_pred))
         metrics["f1"] = float(f1_score(y_test, y_pred))
-        metrics["confusion_matrix"] = (
-            confusion_matrix(y_test, y_pred).tolist()
-        )
+        metrics["confusion_matrix"] = confusion_matrix(y_test, y_pred).tolist()
+
     except Exception as e:
         print(f"[WARN] Could not compute some metrics for {symbol} ({mode}): {e}")
 
     # -----------------------------
     # LOG RESULTS
     # -----------------------------
-    print(f"\n📊 MODEL VALIDATION — {symbol} [{mode.upper()}]")
+    print(f"\n📊 MODEL VALIDATION — {symbol} [{mode.upper()}] rows={len(df_feat)}")
     print("--------------------------------------------")
     for k, v in metrics.items():
         if k == "confusion_matrix":
             print(f"{k:20}: {v}")
         else:
-            print(f"{k:20}: {v:.4f}")
+            try:
+                print(f"{k:20}: {v:.4f}")
+            except Exception:
+                print(f"{k:20}: {v}")
     print("--------------------------------------------\n")
 
     artifact = {
@@ -247,26 +295,38 @@ def compute_signals(
         "daily_prob": None,
         "intraday_prob": None,
         "final_prob": None,
-        "intraday_weight": intraday_weight,
+        "intraday_weight": float(intraday_weight),
         "allow_intraday": True,
         "intraday_rows": 0,
         "intraday_before": 0,
         "daily_rows": 0,
         "used_lookback_minutes": lookback_minutes,
         "intraday_quality_score": 0.0,
+        # Optional diagnostics
+        "intraday_model_used": None,
+        "intraday_vol": None,
+        "intraday_mom": None,
     }
+
+    symU = str(symbol).upper().strip()
 
     # -------------------------
     # Load Models
     # -------------------------
-    model_daily = load_model(symbol, mode="daily")
-    model_intraday = load_model(symbol, mode="intraday")
+    model_daily = load_model(symU, mode="daily")
+
+    # Option B models (may or may not exist yet)
+    model_intra_mr = load_model(symU, mode="intraday_mr")
+    model_intra_mom = load_model(symU, mode="intraday_mom")
+
+    # Legacy fallback intraday
+    model_intraday_legacy = load_model(symU, mode="intraday")
 
     # -------------------------
     # DAILY SIGNAL
     # -------------------------
     try:
-        df_daily = fetch_historical_data(symbol, period="6mo", interval="1d")
+        df_daily = fetch_historical_data(symU, period="6mo", interval="1d")
         if df_daily is not None and not df_daily.empty:
             results["daily_rows"] = len(df_daily)
             df_feat = build_daily_features(df_daily)
@@ -280,12 +340,17 @@ def compute_signals(
     df_intra_resampled = None
     df_feat_intra = None
 
+    vol = None
+    mom = None
+
     try:
         candidate_lookbacks = sorted(
-            {lookback_minutes,
-             max(lookback_minutes, 600),
-             max(lookback_minutes, 900),
-             max(lookback_minutes, 1200)}
+            {
+                lookback_minutes,
+                max(lookback_minutes, 600),
+                max(lookback_minutes, 900),
+                max(lookback_minutes, 1200),
+            }
         )
 
         best_df = None
@@ -293,18 +358,19 @@ def compute_signals(
         best_lb = lookback_minutes
         best_before = 0
 
+        rt = str(resample_to).lower().replace("mins", "min").replace(" ", "")
+
         for lb in candidate_lookbacks:
-            df_raw = fetch_intraday_history(symbol, lookback_minutes=lb, interval=resample_to)
+            df_raw = fetch_intraday_history(symU, lookback_minutes=lb, interval=resample_to)
             if df_raw is None or df_raw.empty:
                 continue
 
             before = len(df_raw)
 
-            # IMPORTANT: use .last() but ensure index is datetime + sorted
             df_raw = df_raw.sort_index()
-            # If df_raw is already 15m, resampling again can drop bins -> keep it simple:
-            rt = str(resample_to).lower().replace("mins", "min")
-            if rt in ("15m", "15min"):
+
+            # If already 15m-ish, don't resample again
+            if rt in ("15m", "15min", "15t"):
                 df_res = df_raw.dropna()
             else:
                 df_res = df_raw.resample(resample_to).last().dropna()
@@ -319,7 +385,6 @@ def compute_signals(
             if n_res >= 80:
                 break
 
-        # ✅ single source of truth
         df_intra_resampled = best_df
 
         results["intraday_before"] = best_before
@@ -332,7 +397,7 @@ def compute_signals(
             results["intraday_prob"] = None
             results["intraday_quality_score"] = 0.0
         else:
-            # ✅ actually build intraday features
+            # Build intraday features
             df_feat_intra = build_intraday_features(df_intra_resampled)
 
             if df_feat_intra is None or df_feat_intra.empty:
@@ -340,13 +405,49 @@ def compute_signals(
                 results["intraday_prob"] = None
                 results["intraday_quality_score"] = 0.0
             else:
-                results["intraday_prob"] = predict_from_model(model_intraday, df_feat_intra)
+                # -------------------------
+                # Regime detection (Option B)
+                # -------------------------
+                # Use raw close series (resampled bars)
+                close = df_intra_resampled["Close"]
+
+                # vol = per-bar std of returns
+                rets = close.pct_change().dropna()
+                vol = float(rets.std()) if len(rets) > 3 else 0.0
+
+                # mom = ~2 hours on 15m bars (8 bars)
+                mom = float((close.iloc[-1] / close.iloc[-9]) - 1.0) if len(close) >= 9 else 0.0
+
+                results["intraday_vol"] = vol
+                results["intraday_mom"] = mom
+
+                # Decide regime
+                # momentum regime: >= 1% move over ~2h OR intraday vol elevated
+                is_momentum_regime = (abs(mom) >= 0.010) or (vol >= 0.010)
+
+                model_used = None
+                model_to_use = None
+
+                if is_momentum_regime and model_intra_mom is not None:
+                    model_used = "intraday_mom"
+                    model_to_use = model_intra_mom
+                elif (not is_momentum_regime) and model_intra_mr is not None:
+                    model_used = "intraday_mr"
+                    model_to_use = model_intra_mr
+                else:
+                    # fallback to legacy intraday if dual model missing
+                    model_used = "intraday"
+                    model_to_use = model_intraday_legacy
+
+                results["intraday_model_used"] = model_used
+
+                # Predict
+                results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
+
+                # quality score
                 results["intraday_quality_score"] = float(
                     max(0.0, min(1.0, len(df_intra_resampled) / 120.0))
                 )
-
-        res_n = 0 if df_intra_resampled is None else len(df_intra_resampled)
-        feat_n = 0 if df_feat_intra is None else len(df_feat_intra)
 
     except Exception as e:
         print(f"[ERROR] Intraday prediction error: {e}")
@@ -361,26 +462,72 @@ def compute_signals(
     # ===============================
     # ADAPTIVE INTRADAY WEIGHT
     # ===============================
-    weight = intraday_weight
+    weight = float(intraday_weight)
 
-    if not results["allow_intraday"] or ip is None:
+    if (not results["allow_intraday"]) or (ip is None):
         weight = 0.0
     else:
-        q = results.get("intraday_quality_score", 1.0)
-        weight = intraday_weight * q
+        q = float(results.get("intraday_quality_score", 1.0) or 0.0)
+        weight = float(intraday_weight) * q
 
+        # Ensure vol/mom exist (may not if intraday failed earlier)
+        if vol is None:
+            vol = float(results.get("intraday_vol") or 0.0)
+        if mom is None:
+            mom = float(results.get("intraday_mom") or 0.0)
+
+        # ---------------------------------------
+        # VOLATILITY ADJUSTMENT
+        # ---------------------------------------
         try:
-            close = df_intra_resampled["Close"]
-            returns = close.pct_change().dropna()
-            vol = returns.std()
-
             if vol > 0.025:
                 weight = min(0.90, weight + 0.20)
-            elif vol < 0.008:
+            elif vol < 0.008 and symU == "SPY":
                 weight = max(0.30, weight - 0.20)
         except Exception:
             pass
 
+        # ---------------------------------------
+        # PRICE MOMENTUM OVERRIDE (model-lag guardrail)
+        # ---------------------------------------
+        try:
+            if (dp is not None) and (dp >= 0.65) and (mom >= 0.010):
+                weight = max(weight, 0.65)
+        except Exception:
+            pass
+
+        # ---------------------------------------
+        # STRONG INTRADAY MOMENTUM OVERRIDE
+        # ---------------------------------------
+        try:
+            if (
+                (ip is not None)
+                and (dp is not None)
+                and (results.get("intraday_quality_score", 0.0) >= 0.6)
+                and (ip >= 0.70)
+                and ((ip - dp) >= 0.15)
+            ):
+                weight = max(weight, 0.75)
+        except Exception:
+            pass
+
+        # ---------------------------------------
+        # STRONG DAILY TREND CONTINUATION OVERRIDE
+        # ---------------------------------------
+        try:
+            if (
+                (dp is not None)
+                and (ip is not None)
+                and (dp >= 0.78)      # strong daily trend
+                and (ip >= 0.25)      # intraday pullback, not collapse
+                and (mom <= -0.005)   # shallow dip
+            ):
+                weight = max(weight, 0.70)
+        except Exception:
+            pass
+
+    # clamp + store
+    weight = float(min(max(weight, 0.0), 0.90))
     results["intraday_weight"] = weight
 
     # ===============================
@@ -389,14 +536,30 @@ def compute_signals(
     if dp is None and ip is None:
         results["final_prob"] = None
     elif dp is None:
-        results["final_prob"] = ip
+        results["final_prob"] = float(ip)
     elif ip is None or weight == 0.0:
-        results["final_prob"] = dp
+        results["final_prob"] = float(dp)
     else:
         results["final_prob"] = float(weight * ip + (1 - weight) * dp)
 
-    return results
+    # -------------------------
+    # Safe debug prints (never crash)
+    # -------------------------
+    def _fmt(x, n=3):
+        return "NA" if x is None else f"{float(x):.{n}f}"
 
+    def _fmt_pct(x):
+        return "NA" if x is None else f"{float(x)*100:.2f}%"
+
+    print(
+        f"[DEBUG] {symU} dp={_fmt(dp)} ip={_fmt(ip)} q={results.get('intraday_quality_score',0):.2f} "
+        f"weight={weight:.2f} model={results.get('intraday_model_used')}"
+    )
+    print(
+        f"[DEBUG] {symU} vol={_fmt(results.get('intraday_vol'), 5)} mom={_fmt_pct(results.get('intraday_mom'))}"
+    )
+
+    return results
 
 # =====================================================================
 # SIMPLE NEXT-STEP PREDICTOR (WRAPPER)

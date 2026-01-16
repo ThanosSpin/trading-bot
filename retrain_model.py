@@ -104,9 +104,11 @@ def main():
             print(f"[ERROR] No intraday data for {sym}. Skipping intraday retraining.")
         else:
             try:
-                df_intraday = _clean_columns(df_intraday)
-                artifact_intra = train_model(df_intraday, symbol=sym, mode="intraday")
-                save_model_with_backup(artifact_intra, symbol=sym, mode="intraday")
+                artifact_mr = train_model(df_intraday, symbol=sym, mode="intraday_mr")
+                save_model_with_backup(artifact_mr, symbol=sym, mode="intraday_mr")
+
+                artifact_mom = train_model(df_intraday, symbol=sym, mode="intraday_mom")
+                save_model_with_backup(artifact_mom, symbol=sym, mode="intraday_mom")
             except Exception as e:
                 print(f"[ERROR] Failed to train intraday model for {sym}: {e}")
 

@@ -235,6 +235,101 @@ for sym in symbols:
     col4.metric("Intraday weight", f"{weight:.2f}")
     st.progress(max(0.0, min(final_p, 1.0)))
 
+    # -----------------------------
+    # Regime badge + quick intraday diagnostics
+    # -----------------------------
+    model_used = sig.get("intraday_model_used") or "intraday"
+
+    # Badge mapping
+    mu = str(model_used).lower()
+    if "mom" in mu:
+        regime_text = "📈 Momentum intraday"
+        regime_color = "#1f77b4"
+    elif "mr" in mu:
+        regime_text = "↩️ Mean-reversion intraday"
+        regime_color = "#ff7f0e"
+    else:
+        regime_text = f"🧠 Intraday (legacy): {model_used}"
+        regime_color = "#6c757d"
+
+    st.markdown(
+        f"""
+        <div style="
+            display:inline-block;
+            padding:6px 10px;
+            border-radius:999px;
+            background:{regime_color};
+            color:white;
+            font-weight:600;
+            font-size:13px;
+            margin-top:6px;
+            margin-bottom:6px;
+        ">
+            {regime_text}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Optional: show vol/mom inline (super useful when debugging regime switches)
+    vol = sig.get("intraday_vol")
+    mom = sig.get("intraday_mom")
+    if vol is not None or mom is not None:
+        vol_s = "N/A" if vol is None else f"{float(vol):.5f}"
+        mom_s = "N/A" if mom is None else f"{float(mom)*100:.2f}%"
+        st.caption(f"Intraday diagnostics → vol={vol_s} | mom(≈2h)={mom_s}")
+
+    # -----------------------------
+    # Tiny improvement: show dp/ip divergence + which intraday model was used
+    # -----------------------------
+    model_used = sig.get("intraday_model_used") or sig.get("model") or "intraday"
+    div = None
+    if daily_p is not None and intra_p is not None:
+        try:
+            div = float(intra_p - daily_p)
+        except Exception:
+            div = None
+
+    if div is not None:
+        st.caption(f"Δ (ip - dp) = {div:+.3f} | intraday model: {model_used}")
+    else:
+        st.caption(f"intraday model: {model_used}")
+
+    pretty_model = {
+        "intraday_mom": "📈 Momentum intraday",
+        "intraday_mr": "↩️ Mean-reversion intraday",
+        "intraday": "🧠 Legacy intraday",
+    }.get(model_used, model_used)
+
+    # -----------------------------
+    # Store points for divergence chart (session-level, bounded, dedup per refresh)
+    # -----------------------------
+    if "divergence_points" not in st.session_state:
+        st.session_state["divergence_points"] = []
+
+    # Use refresh key so we don't append duplicates on Streamlit reruns
+    refresh_key = f"{sym}:{st.session_state.get('global_refresh', 0)}"
+    if "divergence_seen" not in st.session_state:
+        st.session_state["divergence_seen"] = set()
+
+    if refresh_key not in st.session_state["divergence_seen"]:
+        st.session_state["divergence_seen"].add(refresh_key)
+
+        st.session_state["divergence_points"].append({
+            "time": pd.Timestamp.utcnow(),
+            "symbol": sym,
+            "dp": float(daily_p) if daily_p is not None else None,
+            "ip": float(intra_p) if intra_p is not None else None,
+            "divergence": float(div) if div is not None else None,
+            "weight": float(weight) if weight is not None else None,
+            "model": pretty_model,
+        })
+
+        # keep last N points overall (prevents memory growth)
+        MAX_POINTS = 500
+        if len(st.session_state["divergence_points"]) > MAX_POINTS:
+            st.session_state["divergence_points"] = st.session_state["divergence_points"][-MAX_POINTS:]
+
     # -------------------------------------------------
     # MODEL VALIDATION + FRESHNESS
     # -------------------------------------------------
@@ -303,6 +398,72 @@ for sym in symbols:
         if "model_compare" not in st.session_state:
             st.session_state["model_compare"] = {}
         st.session_state["model_compare"][sym] = {"daily": daily_stats, "intraday": intra_stats}
+
+# -------------------------------------------------
+# DIVERGENCE: dp vs ip
+# -------------------------------------------------
+st.subheader("📉 Daily vs Intraday Divergence (ip - dp)")
+
+pts = st.session_state.get("divergence_points", [])
+if not pts:
+    st.info("No divergence points yet.")
+else:
+    dfd = pd.DataFrame(pts)
+
+    # safety: ensure columns exist
+    for col in ["time", "symbol", "dp", "ip", "divergence", "weight", "model"]:
+        if col not in dfd.columns:
+            dfd[col] = None
+
+    dfd["time"] = pd.to_datetime(dfd["time"], utc=True, errors="coerce")
+    dfd = dfd.dropna(subset=["time", "symbol"]).sort_values("time")
+
+    # Optional: keep last N points for plotting
+    dfd = dfd.tail(300)
+
+    # show latest snapshot table
+    latest = (
+        dfd.sort_values("time")
+           .groupby("symbol", as_index=False)
+           .tail(1)
+           .copy()
+    )
+
+    latest = latest[["symbol", "dp", "ip", "divergence", "weight", "model"]].sort_values("symbol")
+    st.dataframe(latest, use_container_width=True)
+
+    # plot divergence over time
+    fig = go.Figure()
+    for sym in sorted(dfd["symbol"].dropna().unique()):
+        sub = dfd[dfd["symbol"] == sym].copy()
+        # skip symbols with no divergence values yet
+        sub = sub.dropna(subset=["divergence"])
+        if sub.empty:
+            continue
+
+        fig.add_trace(go.Scatter(
+            x=sub["time"],
+            y=sub["divergence"],
+            mode="lines+markers",
+            name=sym,
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d %H:%M:%S} UTC</b><br>"
+                "ip - dp: %{y:.3f}<extra></extra>"
+            ),
+        ))
+
+    # zero line
+    fig.add_hline(y=0, line_width=1, line_dash="dash")
+
+    fig.update_layout(
+        height=360,
+        template="plotly_white",
+        xaxis_title="Time (UTC)",
+        yaxis_title="ip - dp",
+        hovermode="x unified",
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------------------------
 # GLOBAL MODEL COMPARISON — NOW HIDE/SHOW
