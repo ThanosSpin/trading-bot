@@ -147,27 +147,27 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
     else:
         max_invest = cash * RISK_FRACTION
 
-    explain = f"{symbol}: prob_up={prob_up:.3f}. "
+    explain = (
+        f"{symbol}: prob_up={prob_up:.3f} "
+        f"(BUY≥{BUY_THRESHOLD}, SELL≤{SELL_THRESHOLD}, shares={shares:.4g}). "
+    )
 
-    # ---------------------------
     # BUY
-    # ---------------------------
     if prob_up >= BUY_THRESHOLD:
         affordable = int(cash // price)
         target = int(max_invest // price)
         qty = min(affordable, target)
 
         if qty > 0:
-            return make_decision("buy", qty,
-                                 explain + f"BUY (≥{BUY_THRESHOLD}). qty={qty}")
+            return make_decision("buy", qty, explain + f"BUY. qty={qty}")
         return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
 
-    # ---------------------------
     # SELL
-    # ---------------------------
-    if prob_up <= SELL_THRESHOLD and shares > 0:
-        return make_decision("sell", int(shares),
-                             explain + f"SELL (≤{SELL_THRESHOLD}). Clearing position.")
+    if prob_up <= SELL_THRESHOLD:
+        if shares > 0:
+            return make_decision("sell", int(shares), explain + "SELL. Clearing position.")
+        else:
+            return make_decision("hold", 0, explain + "SELL signal but no position.")
 
     # HOLD
     return make_decision("hold", 0, explain + "Within thresholds → HOLD.")
@@ -176,7 +176,11 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 # ---------------------------------------------------------
 # NVDA-priority coordinator
 # ---------------------------------------------------------
-def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str] = None):
+def compute_strategy_decisions(
+    predictions: Dict[str, float],
+    symbols: List[str] = None,
+    diagnostics: Dict[str, dict] = None,
+):
 
     spy_sym = SPY_SYMBOL.upper()
 
@@ -186,6 +190,48 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
     symbols = [s.upper() for s in symbols]
     preds = {k.upper(): v for k, v in predictions.items()}
     core_symbols = [s for s in symbols if s != spy_sym]
+
+    # ---------------------------------------------------------
+    # BUY GUARDRAIL HELPERS (use intraday diagnostics)
+    # ---------------------------------------------------------
+    diagnostics = diagnostics or {}
+
+    def _diag(sym: str) -> dict:
+        return diagnostics.get(sym.upper()) or {}
+
+    def _block_buy_on_pullback(sym: str) -> bool:
+        """
+        Guardrail: avoid buying while short-term momentum is negative
+        and intraday signal is weaker than daily.
+        """
+        d = _diag(sym)
+
+        dp = d.get("daily_prob")
+        ip = d.get("intraday_prob")
+        mom = d.get("intraday_mom")   # e.g. -0.0060 == -0.60% over ~2h
+        q = d.get("intraday_quality_score")
+
+        try:
+            dp = None if dp is None else float(dp)
+            ip = None if ip is None else float(ip)
+            mom = None if mom is None else float(mom)
+            q = None if q is None else float(q)
+        except Exception:
+            return False
+
+        # no intraday diagnostics => don't block
+        if mom is None or ip is None or dp is None:
+            return False
+
+        # require reasonable intraday quality
+        if q is not None and q < 0.60:
+            return False
+
+        # pullback + intraday weaker than daily
+        if (mom <= -0.003) and (ip < dp):
+            return True
+
+        return False
 
     # Default decisions
     decisions = {s: make_decision("hold", 0, f"{s}: default HOLD") for s in symbols}
@@ -358,26 +404,76 @@ def compute_strategy_decisions(predictions: Dict[str, float], symbols: List[str]
                     concurrent_buys=concurrent_buys
                 )
 
+   # ---------------------------------------------------------
+    # 4.5) BUY CONFIRMATION GUARDRAIL
+    # ---------------------------------------------------------
+    def _safe_f(x, default=None):
+        try:
+            return float(x)
+        except Exception:
+            return default
+
+    for sym in core_symbols:
+        d = decisions.get(sym) or {}
+        if d.get("action") == "buy":
+            if _block_buy_on_pullback(sym):
+                dd = _diag(sym)
+                mom = _safe_f(dd.get("intraday_mom"))
+                ip  = _safe_f(dd.get("intraday_prob"))
+                dp  = _safe_f(dd.get("daily_prob"))
+
+                mom_str = "NA" if mom is None else f"{mom:.2%}"
+                ip_str  = "NA" if ip is None else f"{ip:.3f}"
+                dp_str  = "NA" if dp is None else f"{dp:.3f}"
+
+                decisions[sym] = make_decision(
+                    "hold",
+                    0,
+                    f"{sym}: BUY blocked by pullback guardrail (mom={mom_str}, ip={ip_str} < dp={dp_str})."
+                )
+
     # ---------------------------------------------------------
     # 5) FINAL ENFORCEMENT: if NVDA/AAPL has BUY INTENT => SELL SPY + recalc flags
     # (prob-based intent, not cash-based)
     # ---------------------------------------------------------
     wanted = []
-    if "NVDA" in core_symbols and preds.get("NVDA", 0.0) >= BUY_THRESHOLD:
+    if "NVDA" in core_symbols and preds.get("NVDA", 0.0) >= BUY_THRESHOLD and not _block_buy_on_pullback("NVDA"):
         wanted.append("NVDA")
-    if "AAPL" in core_symbols and preds.get("AAPL", 0.0) >= BUY_THRESHOLD:
+    if "AAPL" in core_symbols and preds.get("AAPL", 0.0) >= BUY_THRESHOLD and not _block_buy_on_pullback("AAPL"):
         wanted.append("AAPL")
 
     if wanted:
-        sh = spy_shares()
-        if sh > 0:
+        sh_spy = float(spy_shares() or 0.0)
+
+        # --------------------------------------------
+        # Funding sanity: only do "recalc after sells"
+        # if we can actually raise cash.
+        # --------------------------------------------
+        # Anything we can liquidate this cycle?
+        has_other_core_positions = any(
+            float(pms[s].data.get("shares", 0.0) or 0.0) > 0.0
+            for s in core_symbols
+            if s not in ("NVDA", "AAPL")   # exclude targets; optional but recommended
+        )
+
+        has_funding = (sh_spy > 0.0) or has_other_core_positions
+
+        if not has_funding:
+            # Nothing to sell -> don't emit fake "priority buy recalc" intents
+            # Just keep the earlier computed decisions (including guardrail HOLDs).
+            return decisions
+
+        # If we DO have SPY, sell it to fund core
+        if sh_spy > 0.0:
             decisions[spy_sym] = make_decision(
                 "sell",
-                int(sh),
+                int(sh_spy),
                 f"{spy_sym}: SELL (rotate into core) — core BUY intent: {', '.join(wanted)}."
             )
 
+        # --------------------------------------------
         # mark priority buys for main.py to recalc AFTER sells
+        # --------------------------------------------
         if "NVDA" in wanted:
             decisions["NVDA"] = make_decision(
                 "buy", 1,

@@ -340,7 +340,7 @@ def process_all_symbols(symbols):
     # Step 2: Strategy logic
     # ----------------------------
     symbols_for_strategy = list(predictions.keys())
-    decisions = compute_strategy_decisions(predictions, symbols=symbols_for_strategy)
+    decisions = compute_strategy_decisions(predictions, symbols=symbols_for_strategy, diagnostics=diagnostics)
 
     print("\n================== DECISIONS ==================")
     for sym, d in decisions.items():
@@ -375,9 +375,9 @@ def main():
     debug_market()
 
     # Optional market-hours guard
-    # if not is_market_open():
-    #     print("⏳ Market is closed. Exiting.")
-    #     return
+    if not is_market_open():
+        print("⏳ Market is closed. Exiting.")
+        return
 
     # PDT Display
     try:

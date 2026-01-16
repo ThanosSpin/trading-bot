@@ -32,7 +32,7 @@ MIN_INTRADAY_BARS_FOR_FEATURES = 25
 
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.65    # require strong confidence to buy
-SELL_THRESHOLD = 0.38   # require strong confidence to sell
+SELL_THRESHOLD = 0.45   # require strong confidence to sell
 
 # =========================
 # SPY fallback configuration
@@ -47,7 +47,7 @@ WEAK_PROB_THRESHOLD = 0.45
 WEAK_RATIO_THRESHOLD = 0.60
 
 # Only trade SPY if SPY confirms strength:
-SPY_ENTRY_THRESHOLD = 0.55
+SPY_ENTRY_THRESHOLD = 0.70
 SPY_EXIT_THRESHOLD = 0.50
 SPY_RISK_FRACTION = 1.0   # 100% of available cash for SPY trades
 
@@ -76,5 +76,5 @@ PORTFOLIO_PATH = "data/portfolio.json"
 LOG_FILE = "logs/trading_bot.log"
 
 # Other configs
-USE_LIVE_TRADING = False  # Switch to True to go live
+USE_LIVE_TRADING = True  # Switch to True to go live
 TIMEZONE = "US/Eastern"
