@@ -10,6 +10,11 @@ from xgboost import XGBClassifier
 from features import build_daily_features, build_intraday_features
 from data_loader import fetch_historical_data, fetch_intraday_history
 from config import INTRADAY_WEIGHT, MIN_INTRADAY_BARS_FOR_FEATURES
+from config import (
+    INTRADAY_MOM_TRIG,
+    INTRADAY_VOL_TRIG,
+    INTRADAY_REGIME_OVERRIDES,
+)
 
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -406,54 +411,104 @@ def compute_signals(
                 results["intraday_quality_score"] = 0.0
             else:
                 # -------------------------
-                # Regime detection (Option B)
+                # Regime detection (Option B) + model selection (FIXED)
                 # -------------------------
-                # Use raw close series (resampled bars)
-                close = df_intra_resampled["Close"]
+                close = df_intra_resampled["Close"].dropna()
 
-                # vol = per-bar std of returns
+                # vol = per-bar std of returns (15m returns)
                 rets = close.pct_change().dropna()
                 vol = float(rets.std()) if len(rets) > 3 else 0.0
 
-                # mom = ~2 hours on 15m bars (8 bars)
-                mom = float((close.iloc[-1] / close.iloc[-9]) - 1.0) if len(close) >= 9 else 0.0
+                # mom_1h = last ~1 hour on 15m bars (4 bars)
+                mom_1h = float((close.iloc[-1] / close.iloc[-5]) - 1.0) if len(close) >= 5 else 0.0
 
+                # store diagnostics
                 results["intraday_vol"] = vol
-                results["intraday_mom"] = mom
+                results["intraday_mom"] = mom_1h
 
-                # Decide regime
-                # momentum regime: >= 1% move over ~2h OR intraday vol elevated
-                is_momentum_regime = (abs(mom) >= 0.010) or (vol >= 0.010)
+                # thresholds tuned to your observed prints (vol ~0.001–0.0032)
+                # -------------------------
+                # Regime thresholds (config-driven)
+                # -------------------------
+                MOM_TRIG = INTRADAY_MOM_TRIG
+                VOL_TRIG = INTRADAY_VOL_TRIG
 
+                # Symbol-specific override
+                ovr = INTRADAY_REGIME_OVERRIDES.get(symU)
+                if ovr:
+                    MOM_TRIG = float(ovr.get("mom_trig", MOM_TRIG))
+                    VOL_TRIG = float(ovr.get("vol_trig", VOL_TRIG))
+                is_momentum_regime = (abs(mom_1h) >= MOM_TRIG) or (vol >= VOL_TRIG)
+                results["intraday_regime"] = "mom" if is_momentum_regime else "mr"
+
+                try:
+                    print(
+                        f"[DEBUG] {symU} regime={'MOM' if is_momentum_regime else 'MR'} "
+                        f"(mom={mom_1h:+.4%} vol={vol:.5f} | "
+                        f"MOM_TRIG={MOM_TRIG:.4f} VOL_TRIG={VOL_TRIG:.4f})"
+                    )
+                except Exception:
+                    pass
+
+                # Direction-aware gating helper
+                def _direction_conflict(mom_val: float, ip_val: float) -> bool:
+                    # if price momentum UP but model says very bearish -> conflict
+                    if mom_val >= 0.0 and ip_val <= 0.35:
+                        return True
+                    # if price momentum DOWN but model says very bullish -> conflict
+                    if mom_val <= 0.0 and ip_val >= 0.65:
+                        return True
+                    return False
+
+                # Choose model with proper fallbacks
                 model_used = None
                 model_to_use = None
 
-                if is_momentum_regime and model_intra_mom is not None:
-                    model_used = "intraday_mom"
-                    model_to_use = model_intra_mom
-                elif (not is_momentum_regime) and model_intra_mr is not None:
+                if is_momentum_regime and (model_intra_mom is not None):
+                    # Try MOM first
+                    ip_tmp = predict_from_model(model_intra_mom, df_feat_intra)
+                    ip_tmp_f = float(ip_tmp) if ip_tmp is not None else None
+
+                    if ip_tmp_f is not None and _direction_conflict(mom_1h, ip_tmp_f):
+                        # MOM disagrees with realized momentum -> prefer MR if available
+                        if model_intra_mr is not None:
+                            model_used = "intraday_mr"
+                            model_to_use = model_intra_mr
+                            results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
+                        else:
+                            model_used = "intraday"
+                            model_to_use = model_intraday_legacy
+                            results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
+                    else:
+                        model_used = "intraday_mom"
+                        model_to_use = model_intra_mom
+                        results["intraday_prob"] = ip_tmp_f
+
+                elif (not is_momentum_regime) and (model_intra_mr is not None):
                     model_used = "intraday_mr"
                     model_to_use = model_intra_mr
+                    results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
+
                 else:
-                    # fallback to legacy intraday if dual model missing
+                    # Ultimate fallback
                     model_used = "intraday"
                     model_to_use = model_intraday_legacy
+                    results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
 
                 results["intraday_model_used"] = model_used
 
-                # Predict
-                results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
-
-                # quality score
+                # quality score (set it unconditionally here if we had intraday bars + features)
                 results["intraday_quality_score"] = float(
                     max(0.0, min(1.0, len(df_intra_resampled) / 120.0))
-                )
+)
+                results["intraday_regime"] = "mom" if is_momentum_regime else "mr"
 
     except Exception as e:
         print(f"[ERROR] Intraday prediction error: {e}")
         results["allow_intraday"] = False
         results["intraday_prob"] = None
         results["intraday_quality_score"] = 0.0
+        print(f"[DEBUG] {symU} regime={'MOM' if is_momentum_regime else 'MR'} (mom={mom_1h:+.4%} vol={vol:.5f})")
 
     # Extract before combine
     dp = results["daily_prob"]
@@ -491,7 +546,7 @@ def compute_signals(
         # PRICE MOMENTUM OVERRIDE (model-lag guardrail)
         # ---------------------------------------
         try:
-            if (dp is not None) and (dp >= 0.65) and (mom >= 0.010):
+            if (dp is not None) and (dp >= 0.65) and (mom >= 0.0020):
                 weight = max(weight, 0.65)
         except Exception:
             pass

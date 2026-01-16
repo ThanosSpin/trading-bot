@@ -54,6 +54,28 @@ SPY_RISK_FRACTION = 1.0   # 100% of available cash for SPY trades
 # If True: only trade SPY when you took NO stock trades this cycle.
 SPY_MUTUAL_EXCLUSIVE = True
 
+# =========================
+# Intraday regime detection (15m bars)
+# =========================
+
+# Default thresholds (most symbols)
+INTRADAY_MOM_TRIG = 0.0020    # +0.20% over ~1h (4 x 15m bars)
+INTRADAY_VOL_TRIG = 0.0030    # 0.30% per-bar volatility (15m)
+
+# Symbol-specific overrides (optional)
+INTRADAY_REGIME_OVERRIDES = {
+    "NVDA": {
+        "mom_trig": 0.0035,   # NVDA needs stronger push to be "momentum"
+        "vol_trig": 0.0032,
+    },
+    # You can add more later:
+    # "AAPL": {"mom_trig": 0.0022, "vol_trig": 0.0028},
+}
+
+# Hysteresis: once in MOM regime, keep it until it cools down
+MOM_HOLD = 0.003   # 0.30%
+VOL_HOLD = 0.0035  # 0.35%
+
 TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY"]  # used by retrain_model.py
 
 # --- Risk management ---
@@ -62,6 +84,7 @@ TAKE_PROFIT = None      # sell if price rises 5% above last buy price
 TRAIL_STOP = 0.96        # trailing stop vs max_price since entry (e.g., 0.97 = 3% trail)
 TRAIL_ACTIVATE = 1.05   # ✅ activate trailing only after +5% profit
 RISK_FRACTION = 0.5     # default: invest or sell 50%
+
 
 # Model path management
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
