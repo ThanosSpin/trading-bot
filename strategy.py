@@ -358,16 +358,41 @@ def compute_strategy_decisions(
             if nvda_px <= 0:
                 return decisions
 
+            # ---------------------------------------------------------
+            # NVDA ROTATION RULE:
+            # If NVDA is BUY and AAPL is NOT BUY (hold/sell), then sell AAPL (if held)
+            # to fund NVDA.
+            # ---------------------------------------------------------
+            aapl_prob = preds.get("AAPL", 0.0)
+            aapl_sig = should_trade("AAPL", aapl_prob, len(core_symbols), concurrent_buys)
+            aapl_action = (aapl_sig.get("action") or "hold").lower()
+
             # fund with other core positions (excluding NVDA)
             for sym in core_symbols:
                 if sym == "NVDA":
                     continue
+
                 sh = live_shares(sym)
                 px = float(prices.get(sym, 0.0) or 0.0)
-                if sh > 0 and px > 0:
-                    sim_cash += sh * px
-                    decisions[sym] = make_decision("sell", int(sh), f"{sym}: Sold to fund NVDA priority buy.")
+                if sh <= 0 or px <= 0:
+                    continue
 
+                # Only force-sell AAPL if NVDA BUY and AAPL is HOLD/SELL (not BUY)
+                if sym == "AAPL":
+                    if aapl_action != "buy":
+                        sim_cash += sh * px
+                        decisions["AAPL"] = make_decision(
+                            "sell",
+                            int(sh),
+                            f"AAPL: Rotated out to fund NVDA BUY (AAPL={aapl_action.upper()}, NVDA=BUY)."
+                        )
+                    # else: AAPL is also BUY -> keep existing behavior (don’t force sell it)
+                    continue
+
+                # For other symbols (if you add more later), keep the old “sell to fund NVDA”
+                sim_cash += sh * px
+                decisions[sym] = make_decision("sell", int(sh), f"{sym}: Sold to fund NVDA priority buy.")
+            
             max_shares = int(sim_cash // nvda_px)
             if max_shares >= 1:
                 decisions["NVDA"] = make_decision(
