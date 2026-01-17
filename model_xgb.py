@@ -300,6 +300,7 @@ def compute_signals(
         "daily_prob": None,
         "intraday_prob": None,
         "final_prob": None,
+        "price": None,
         "intraday_weight": float(intraday_weight),
         "allow_intraday": True,
         "intraday_rows": 0,
@@ -336,6 +337,18 @@ def compute_signals(
             results["daily_rows"] = len(df_daily)
             df_feat = build_daily_features(df_daily)
             results["daily_prob"] = predict_from_model(model_daily, df_feat)
+
+        # ✅ tiny addition: fallback price from daily close (only if not set by intraday later)
+        if results.get("price") is None:
+            try:
+                dc = df_daily["Close"]
+                dc = dc.iloc[:, 0] if isinstance(dc, pd.DataFrame) else dc
+                dc = dc.dropna()
+                if len(dc) > 0:
+                    results["price"] = float(dc.iloc[-1])
+            except Exception:
+                pass
+
     except Exception as e:
         print(f"[ERROR] Daily prediction error: {e}")
 
@@ -414,6 +427,12 @@ def compute_signals(
                 # Regime detection (Option B) + model selection (FIXED)
                 # -------------------------
                 close = df_intra_resampled["Close"].dropna()
+
+                # ✅ store latest intraday price for logging / dashboard
+                try:
+                    results["price"] = float(close.iloc[-1])
+                except Exception:
+                    pass
 
                 # vol = per-bar std of returns (15m returns)
                 rets = close.pct_change().dropna()

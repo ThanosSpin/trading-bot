@@ -165,6 +165,37 @@ def load_model_info(symbol: str, mode: str) -> Optional[dict]:
     return {"metrics": data.get("metrics", {}), "trained_at": data.get("trained_at")}
 
 # -------------------------------------------------
+# Signal history helpers (robust)
+# -------------------------------------------------
+def _signal_history_paths(sym: str):
+    sym = sym.upper()
+    return [
+        os.path.join("logs", f"signals_{sym}.csv"),
+        os.path.join("data", f"signals_{sym}.csv"),
+        os.path.join(os.getcwd(), "logs", f"signals_{sym}.csv"),
+        os.path.join(os.getcwd(), "data", f"signals_{sym}.csv"),
+    ]
+
+def load_signal_history(sym: str) -> Optional[pd.DataFrame]:
+    """
+    Load signals history from whichever location exists.
+    Returns df or None.
+    """
+    for p in _signal_history_paths(sym):
+        if os.path.exists(p):
+            try:
+                df = pd.read_csv(p)
+                # normalize timestamp
+                if "timestamp" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+                    df = df.dropna(subset=["timestamp"])
+                return df
+            except Exception as e:
+                st.warning(f"{sym}: Failed reading signal history ({p}): {e}")
+                return None
+    return None
+
+# -------------------------------------------------
 # PORTFOLIO SUMMARY
 # -------------------------------------------------
 st.header("Portfolio Summary")
@@ -736,6 +767,77 @@ for sym in symbols:
 
                 with st.expander("🔍 Closed-trade cycle PnLs (debug)"):
                     st.dataframe(pd.DataFrame({"cycle_pnl": s}))
+
+# -------------------------------------------------
+# Price vs Model PERFORMANCE
+# -------------------------------------------------
+st.header("📈 Price vs Model Probability")
+
+for sym in symbols:
+    path = f"logs/signals_{sym}.csv"
+    if not os.path.exists(path):
+        st.info(f"No signal history for {sym}")
+        continue
+
+    df = pd.read_csv(path, parse_dates=["timestamp"])
+    df = df.sort_values("timestamp").tail(300)
+
+    fig = go.Figure()
+
+    # ---- PRICE (left axis)
+    fig.add_trace(go.Scatter(
+        x=df["timestamp"],
+        y=df["price"],
+        name="Price",
+        line=dict(color="black", width=2),
+        yaxis="y1",
+        hovertemplate="Price: %{y:.2f}<extra></extra>",
+    ))
+
+    # ---- FINAL PROBABILITY (right axis)
+    fig.add_trace(go.Scatter(
+        x=df["timestamp"],
+        y=df["final_prob"],
+        name="Final Probability",
+        line=dict(color="blue", width=2),
+        yaxis="y2",
+        hovertemplate="Prob: %{y:.3f}<extra></extra>",
+    ))
+
+    # Optional: intraday vs daily
+    fig.add_trace(go.Scatter(
+        x=df["timestamp"],
+        y=df["intraday_prob"],
+        name="Intraday Prob",
+        line=dict(color="orange", dash="dot"),
+        yaxis="y2",
+        opacity=0.6,
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=df["timestamp"],
+        y=df["daily_prob"],
+        name="Daily Prob",
+        line=dict(color="green", dash="dash"),
+        yaxis="y2",
+        opacity=0.6,
+    ))
+
+    fig.update_layout(
+        title=f"{sym} — Price vs Probability",
+        height=400,
+        hovermode="x unified",
+        template="plotly_white",
+        yaxis=dict(title="Price"),
+        yaxis2=dict(
+            title="Probability",
+            overlaying="y",
+            side="right",
+            range=[0, 1],
+        ),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------------------------
 # TOTAL DAILY PORTFOLIO PERFORMANCE (DUAL EQUITY CURVES)

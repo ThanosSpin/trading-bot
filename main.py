@@ -12,10 +12,54 @@ from config import (
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE
 )
 from market import is_market_open, is_trading_day
-import os
+import os, csv
+import pandas as pd
+from datetime import datetime, timezone
 
 os.environ["TZ"] = "America/New_York"
 time.tzset()
+
+BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGS_DIR = os.path.join(BOT_DIR, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+
+# If you have a price fetch helper already, use that:
+# from data_loader import fetch_latest_price
+# Otherwise adapt the call inside the function.
+
+def log_signal_snapshot(sym: str, sig: dict) -> None:
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        symU = str(sym).upper().strip()
+        path = os.path.join(LOGS_DIR, f"signals_{symU}.csv")
+
+        file_exists = os.path.exists(path)
+        with open(path, "a", newline="") as f:
+            w = csv.writer(f)
+            if not file_exists:
+                w.writerow([
+                    "timestamp", "symbol", "price",
+                    "daily_prob", "intraday_prob", "final_prob",
+                    "intraday_weight", "intraday_model_used",
+                    "intraday_quality_score", "intraday_vol", "intraday_mom"
+                ])
+
+            w.writerow([
+                datetime.now(timezone.utc).isoformat(),
+                symU,
+                sig.get("last_price"),  # if you store it; else None
+                sig.get("daily_prob"),
+                sig.get("intraday_prob"),
+                sig.get("final_prob"),
+                sig.get("intraday_weight"),
+                sig.get("intraday_model_used"),
+                sig.get("intraday_quality_score"),
+                sig.get("intraday_vol"),
+                sig.get("intraday_mom"),
+            ])
+    except Exception as e:
+        print(f"[WARN] log_signal_snapshot failed for {sym}: {e}")
 
 # ===============================================================
 # Fetch Predictions for All Symbols (USING compute_signals)
@@ -33,6 +77,9 @@ def get_predictions(symbols, debug=True):
             intraday_weight=INTRADAY_WEIGHT,
             resample_to="15min",
         )
+
+        # ✅ log signal history for dashboard
+        log_signal_snapshot(sym, sig)
 
         if debug:
             print(f"\n[DEBUG] {sym} Signals Summary")
@@ -64,6 +111,31 @@ def get_predictions(symbols, debug=True):
             }
 
     return predictions, diagnostics
+
+# -------------------------------------------------
+# Signal history logger (for dashboard)
+# -------------------------------------------------
+BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+SIGNALS_DIR = os.path.join(BOT_DIR, "logs")
+os.makedirs(SIGNALS_DIR, exist_ok=True)
+
+def log_signal_snapshot(sym: str, sig: dict):
+    sym = str(sym).upper().strip()
+    path = os.path.join(SIGNALS_DIR, f"signals_{sym}.csv")
+
+    row = {
+        "timestamp": pd.Timestamp.utcnow().isoformat(),
+        "price": fetch_latest_price(sym),
+        "daily_prob": sig.get("daily_prob"),
+        "intraday_prob": sig.get("intraday_prob"),
+        "final_prob": sig.get("final_prob"),
+        "weight": sig.get("intraday_weight"),
+        "model": sig.get("intraday_model_used"),
+    }
+
+    df = pd.DataFrame([row])
+    header = not os.path.exists(path)
+    df.to_csv(path, mode="a", header=header, index=False)
 
 # ===============================================================
 # Cycle Summary
