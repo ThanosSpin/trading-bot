@@ -769,9 +769,9 @@ for sym in symbols:
                     st.dataframe(pd.DataFrame({"cycle_pnl": s}))
 
 # -------------------------------------------------
-# Price vs Model PERFORMANCE
+# Price vs Model PERFORMANCE (with trade markers)
 # -------------------------------------------------
-st.header("📈 Price vs Model Probability")
+st.header("📈 Price vs Model Probability (with Buy/Sell Markers)")
 
 for sym in symbols:
     path = f"logs/signals_{sym}.csv"
@@ -781,6 +781,21 @@ for sym in symbols:
 
     df = pd.read_csv(path, parse_dates=["timestamp"])
     df = df.sort_values("timestamp").tail(300)
+
+    # ---- Load trades (optional) ----
+    trade_path = get_trade_log_file(sym)
+    df_tr = None
+    if os.path.exists(trade_path):
+        try:
+            df_tr = pd.read_csv(trade_path)
+            df_tr["timestamp"] = pd.to_datetime(df_tr["timestamp"], utc=True, errors="coerce")
+            df_tr["action"] = df_tr["action"].astype(str).str.lower().str.strip()
+            df_tr["price"] = pd.to_numeric(df_tr.get("price"), errors="coerce")
+            df_tr["qty"] = pd.to_numeric(df_tr.get("qty"), errors="coerce")
+            df_tr = df_tr.dropna(subset=["timestamp", "action", "price"])
+            df_tr = df_tr[df_tr["action"].isin(["buy", "sell"])].copy()
+        except Exception:
+            df_tr = None
 
     fig = go.Figure()
 
@@ -801,31 +816,74 @@ for sym in symbols:
         name="Final Probability",
         line=dict(color="blue", width=2),
         yaxis="y2",
-        hovertemplate="Prob: %{y:.3f}<extra></extra>",
+        hovertemplate="Final prob: %{y:.3f}<extra></extra>",
     ))
 
     # Optional: intraday vs daily
-    fig.add_trace(go.Scatter(
-        x=df["timestamp"],
-        y=df["intraday_prob"],
-        name="Intraday Prob",
-        line=dict(color="orange", dash="dot"),
-        yaxis="y2",
-        opacity=0.6,
-    ))
+    if "intraday_prob" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"],
+            y=df["intraday_prob"],
+            name="Intraday Prob",
+            line=dict(color="orange", dash="dot"),
+            yaxis="y2",
+            opacity=0.6,
+            hovertemplate="Intraday prob: %{y:.3f}<extra></extra>",
+        ))
 
-    fig.add_trace(go.Scatter(
-        x=df["timestamp"],
-        y=df["daily_prob"],
-        name="Daily Prob",
-        line=dict(color="green", dash="dash"),
-        yaxis="y2",
-        opacity=0.6,
-    ))
+    if "daily_prob" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"],
+            y=df["daily_prob"],
+            name="Daily Prob",
+            line=dict(color="green", dash="dash"),
+            yaxis="y2",
+            opacity=0.6,
+            hovertemplate="Daily prob: %{y:.3f}<extra></extra>",
+        ))
+
+    # ---- BUY/SELL MARKERS (on price axis)
+    if df_tr is not None and not df_tr.empty:
+        buys = df_tr[df_tr["action"] == "buy"].copy()
+        sells = df_tr[df_tr["action"] == "sell"].copy()
+
+        if not buys.empty:
+            fig.add_trace(go.Scatter(
+                x=buys["timestamp"],
+                y=buys["price"],
+                mode="markers",
+                name="BUY",
+                yaxis="y1",
+                marker=dict(symbol="triangle-up", size=12, color="green", line=dict(width=1, color="black")),
+                customdata=buys[["qty"]].values,
+                hovertemplate=(
+                    "<b>BUY</b><br>"
+                    "Time: %{x|%Y-%m-%d %H:%M:%S} UTC<br>"
+                    "Price: %{y:.2f}<br>"
+                    "Qty: %{customdata[0]:g}<extra></extra>"
+                ),
+            ))
+
+        if not sells.empty:
+            fig.add_trace(go.Scatter(
+                x=sells["timestamp"],
+                y=sells["price"],
+                mode="markers",
+                name="SELL",
+                yaxis="y1",
+                marker=dict(symbol="triangle-down", size=12, color="red", line=dict(width=1, color="black")),
+                customdata=sells[["qty"]].values,
+                hovertemplate=(
+                    "<b>SELL</b><br>"
+                    "Time: %{x|%Y-%m-%d %H:%M:%S} UTC<br>"
+                    "Price: %{y:.2f}<br>"
+                    "Qty: %{customdata[0]:g}<extra></extra>"
+                ),
+            ))
 
     fig.update_layout(
         title=f"{sym} — Price vs Probability",
-        height=400,
+        height=420,
         hovermode="x unified",
         template="plotly_white",
         yaxis=dict(title="Price"),
@@ -835,10 +893,11 @@ for sym in symbols:
             side="right",
             range=[0, 1],
         ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
 
     st.plotly_chart(fig, use_container_width=True)
-
+    
 # -------------------------------------------------
 # TOTAL DAILY PORTFOLIO PERFORMANCE (DUAL EQUITY CURVES)
 # -------------------------------------------------
