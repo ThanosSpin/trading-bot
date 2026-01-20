@@ -4,6 +4,8 @@ import alpaca_trade_api as tradeapi
 import pytz
 from datetime import datetime, timedelta
 from collections import defaultdict
+from pdt_guardrails import max_sell_allowed
+from pdt_tracker import add_opened_today, reduce_opened_today
 
 from config import (
     API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL,
@@ -83,7 +85,7 @@ def is_buy_allowed_by_pdt(api_client, symbol, quantity):
     return True
 
 
-def get_pdt_status():
+def get_pdt_status(api):
     """Return dict describing PDT state."""
     try:
         acct = api.get_account()
@@ -93,8 +95,9 @@ def get_pdt_status():
         return {
             "daytrade_count": dt_api,
             "remaining": (4 - dt_api) if eq < 25000 else "Unlimited",
-            "is_pdt": bool(acct.pattern_day_trader),
+            "is_pdt": bool(getattr(acct, "pattern_day_trader", False)),
             "equity": eq,
+            "trading_blocked": bool(getattr(acct, "trading_blocked", False)),
         }
 
     except Exception as e:
@@ -157,8 +160,13 @@ def execute_trade(action, quantity, symbol):
     # -------------------------------------------------------
     try:
         acct = api.get_account()
+        pdt_status = get_pdt_status(api)
 
-        # BUY pre-checks
+        # Optional: if Alpaca says trading is blocked, fail fast
+        if pdt_status and pdt_status.get("trading_blocked"):
+            print("[WARN] Account trading_blocked=true — skipping order.")
+            return 0.0, None
+        
         if action == "buy":
             if not is_buy_allowed_by_pdt(api, symbol, quantity):
                 return 0.0, None
@@ -170,7 +178,16 @@ def execute_trade(action, quantity, symbol):
                 print(f"[WARN] Buying power insufficient for {symbol}: need {price * quantity:.2f}, have {bp:.2f}")
                 return 0.0, None
 
-        # Submit order
+        if action == "sell":
+            allowed_qty = max_sell_allowed(api, symbol, quantity, pdt_status)
+
+            if allowed_qty <= 0:
+                print(f"[INFO] SELL suppressed by PDT guardrail → {symbol}")
+                return 0.0, None
+
+        # Cap the order size if needed
+        quantity = allowed_qty
+
         order = api.submit_order(
             symbol=symbol,
             qty=quantity,
@@ -191,11 +208,18 @@ def execute_trade(action, quantity, symbol):
             return 0.0, None
 
         print(f"[LIVE] Filled {filled_qty} {symbol} @ {filled_price}")
+
+        # Track shares opened today to prevent same-day closes near PDT limit
+        if action == "buy":
+            add_opened_today(symbol, filled_qty)
+        elif action == "sell":
+            reduce_opened_today(symbol, filled_qty)
+
         return filled_qty, filled_price
 
     except Exception as e:
         msg = str(e).lower()
-        if "pattern day trading" in msg:
+        if "pattern day trading" in msg or "pdt" in msg:
             print(f"[PDT BLOCK] Alpaca blocked trade for {symbol}.")
             return 0.0, None
 
