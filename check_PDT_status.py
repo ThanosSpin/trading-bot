@@ -4,34 +4,7 @@ from datetime import datetime, timedelta
 import pytz
 from collections import defaultdict
 from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
-
-
-def estimate_daytrade_count(api_client, days=5):
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    cutoff = cutoff.replace(tzinfo=pytz.UTC)
-    try:
-        orders = api_client.list_orders(status="filled", limit=1000, nested=True)
-    except Exception as e:
-        print(f"[WARN] Unable to fetch filled orders for PDT estimate: {e}")
-        return 0
-
-    buckets = defaultdict(lambda: {"buy": 0, "sell": 0})
-    for o in orders:
-        filled_at = getattr(o, "filled_at", None)
-        if filled_at is None:
-            continue
-        if filled_at.tzinfo is None:
-            filled_at = filled_at.replace(tzinfo=pytz.UTC)
-        if filled_at < cutoff:
-            continue
-        date = filled_at.date()
-        key = (getattr(o, "symbol", None), date)
-        side = getattr(o, "side", "").lower()
-        if side in ("buy", "sell"):
-            buckets[key][side] += 1
-
-    matched_pairs = sum(min(v["buy"], v["sell"]) for v in buckets.values())
-    return matched_pairs
+from trader import estimate_daytrade_count
 
 
 def check_pdt_status():
@@ -54,7 +27,9 @@ def check_pdt_status():
             print("\n✅ Safe: You still have at least one day-trade slot available.")
     else:
         print("\n💰 Equity > $25k — PDT rules do not apply.")
-
+    
+    print(f"API Reported Day Trades (5d): {acc.daytrade_count}  ✅ (authoritative)")
+    print(f"Estimated Day Trades (5d): {est}  ⚠️ (heuristic, may differ)")
 
 if __name__ == "__main__":
     check_pdt_status()
