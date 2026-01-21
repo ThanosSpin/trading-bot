@@ -239,6 +239,6 @@ def execute_trade(action, quantity, symbol):
             print(f"[PDT WARNING] Possible PDT/day-trade restriction for {symbol}.")
             # still return not filled
             return 0.0, None
-
+        
 
         return 0.0, None
