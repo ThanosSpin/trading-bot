@@ -106,11 +106,10 @@ def is_buy_allowed_by_pdt(api_client, symbol, quantity):
     # Optional: use estimator as WARNING only (do NOT block on it)
     try:
         dt_est = estimate_daytrade_count(api_client)
-        if equity < 25000 and dt_est >= 4 and dt_api < 4:
-            print(
-                f"[PDT WARN] Estimator suggests dt_est={dt_est} but Alpaca says dt_api={dt_api}. "
-                f"Allowing BUY; verify filled orders if you see broker rejections."
-            )
+        if equity < 25000:
+            remaining = max(0, 4 - dt_api)
+        if dt_est is not None and dt_est != dt_api:
+            print(f"[PDT WARN] API daytrade_count={dt_api} (remaining {remaining}) | estimator={dt_est}")
     except Exception:
         pass
 
