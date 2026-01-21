@@ -8,7 +8,7 @@ import pandas as pd
 from xgboost import XGBClassifier
 
 from features import build_daily_features, build_intraday_features
-from data_loader import fetch_historical_data, fetch_intraday_history
+from data_loader import fetch_historical_data, fetch_intraday_history, fetch_latest_price
 from config import INTRADAY_WEIGHT, MIN_INTRADAY_BARS_FOR_FEATURES
 from config import (
     INTRADAY_MOM_TRIG,
@@ -300,7 +300,7 @@ def compute_signals(
         "daily_prob": None,
         "intraday_prob": None,
         "final_prob": None,
-        "price": None,
+        "price": None,  # ✅ NEW: always try to populate
         "intraday_weight": float(intraday_weight),
         "allow_intraday": True,
         "intraday_rows": 0,
@@ -308,10 +308,10 @@ def compute_signals(
         "daily_rows": 0,
         "used_lookback_minutes": lookback_minutes,
         "intraday_quality_score": 0.0,
-        # Optional diagnostics
         "intraday_model_used": None,
         "intraday_vol": None,
         "intraday_mom": None,
+        "intraday_regime": None,
     }
 
     symU = str(symbol).upper().strip()
@@ -320,17 +320,14 @@ def compute_signals(
     # Load Models
     # -------------------------
     model_daily = load_model(symU, mode="daily")
-
-    # Option B models (may or may not exist yet)
     model_intra_mr = load_model(symU, mode="intraday_mr")
     model_intra_mom = load_model(symU, mode="intraday_mom")
-
-    # Legacy fallback intraday
     model_intraday_legacy = load_model(symU, mode="intraday")
 
     # -------------------------
-    # DAILY SIGNAL
+    # DAILY SIGNAL + DAILY PRICE FALLBACK
     # -------------------------
+    df_daily = None
     try:
         df_daily = fetch_historical_data(symU, period="6mo", interval="1d")
         if df_daily is not None and not df_daily.empty:
@@ -338,13 +335,12 @@ def compute_signals(
             df_feat = build_daily_features(df_daily)
             results["daily_prob"] = predict_from_model(model_daily, df_feat)
 
-        # ✅ tiny addition: fallback price from daily close (only if not set by intraday later)
-        if results.get("price") is None:
+            # ✅ price fallback from daily close (only if price not set later by intraday)
             try:
                 dc = df_daily["Close"]
                 dc = dc.iloc[:, 0] if isinstance(dc, pd.DataFrame) else dc
                 dc = dc.dropna()
-                if len(dc) > 0:
+                if len(dc) > 0 and results["price"] is None:
                     results["price"] = float(dc.iloc[-1])
             except Exception:
                 pass
@@ -357,9 +353,9 @@ def compute_signals(
     # -------------------------
     df_intra_resampled = None
     df_feat_intra = None
-
     vol = None
-    mom = None
+    mom_1h = None
+    is_momentum_regime = False
 
     try:
         candidate_lookbacks = sorted(
@@ -384,10 +380,8 @@ def compute_signals(
                 continue
 
             before = len(df_raw)
-
             df_raw = df_raw.sort_index()
 
-            # If already 15m-ish, don't resample again
             if rt in ("15m", "15min", "15t"):
                 df_res = df_raw.dropna()
             else:
@@ -415,7 +409,6 @@ def compute_signals(
             results["intraday_prob"] = None
             results["intraday_quality_score"] = 0.0
         else:
-            # Build intraday features
             df_feat_intra = build_intraday_features(df_intra_resampled)
 
             if df_feat_intra is None or df_feat_intra.empty:
@@ -424,39 +417,36 @@ def compute_signals(
                 results["intraday_quality_score"] = 0.0
             else:
                 # -------------------------
-                # Regime detection (Option B) + model selection (FIXED)
+                # Regime detection + model selection
                 # -------------------------
-                close = df_intra_resampled["Close"].dropna()
+                close = df_intra_resampled["Close"]
+                close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
+                close = close.dropna()
 
-                # ✅ store latest intraday price for logging / dashboard
+                # ✅ BEST price source: last intraday close
                 try:
-                    results["price"] = float(close.iloc[-1])
+                    if len(close) > 0:
+                        results["price"] = float(close.iloc[-1])
                 except Exception:
                     pass
 
-                # vol = per-bar std of returns (15m returns)
                 rets = close.pct_change().dropna()
                 vol = float(rets.std()) if len(rets) > 3 else 0.0
 
-                # mom_1h = last ~1 hour on 15m bars (4 bars)
                 mom_1h = float((close.iloc[-1] / close.iloc[-5]) - 1.0) if len(close) >= 5 else 0.0
 
-                # store diagnostics
                 results["intraday_vol"] = vol
                 results["intraday_mom"] = mom_1h
 
-                # thresholds tuned to your observed prints (vol ~0.001–0.0032)
-                # -------------------------
-                # Regime thresholds (config-driven)
-                # -------------------------
-                MOM_TRIG = INTRADAY_MOM_TRIG
-                VOL_TRIG = INTRADAY_VOL_TRIG
+                # thresholds (config-driven)
+                MOM_TRIG = float(INTRADAY_MOM_TRIG)
+                VOL_TRIG = float(INTRADAY_VOL_TRIG)
 
-                # Symbol-specific override
-                ovr = INTRADAY_REGIME_OVERRIDES.get(symU)
+                ovr = (INTRADAY_REGIME_OVERRIDES or {}).get(symU)
                 if ovr:
                     MOM_TRIG = float(ovr.get("mom_trig", MOM_TRIG))
                     VOL_TRIG = float(ovr.get("vol_trig", VOL_TRIG))
+
                 is_momentum_regime = (abs(mom_1h) >= MOM_TRIG) or (vol >= VOL_TRIG)
                 results["intraday_regime"] = "mom" if is_momentum_regime else "mr"
 
@@ -469,65 +459,65 @@ def compute_signals(
                 except Exception:
                     pass
 
-                # Direction-aware gating helper
                 def _direction_conflict(mom_val: float, ip_val: float) -> bool:
-                    # if price momentum UP but model says very bearish -> conflict
                     if mom_val >= 0.0 and ip_val <= 0.35:
                         return True
-                    # if price momentum DOWN but model says very bullish -> conflict
                     if mom_val <= 0.0 and ip_val >= 0.65:
                         return True
                     return False
 
-                # Choose model with proper fallbacks
                 model_used = None
-                model_to_use = None
 
-                if is_momentum_regime and (model_intra_mom is not None):
-                    # Try MOM first
+                # MOM regime
+                if is_momentum_regime and model_intra_mom is not None:
                     ip_tmp = predict_from_model(model_intra_mom, df_feat_intra)
                     ip_tmp_f = float(ip_tmp) if ip_tmp is not None else None
 
                     if ip_tmp_f is not None and _direction_conflict(mom_1h, ip_tmp_f):
-                        # MOM disagrees with realized momentum -> prefer MR if available
                         if model_intra_mr is not None:
                             model_used = "intraday_mr"
-                            model_to_use = model_intra_mr
-                            results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
+                            results["intraday_prob"] = predict_from_model(model_intra_mr, df_feat_intra)
                         else:
                             model_used = "intraday"
-                            model_to_use = model_intraday_legacy
-                            results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
+                            results["intraday_prob"] = predict_from_model(model_intraday_legacy, df_feat_intra)
                     else:
                         model_used = "intraday_mom"
-                        model_to_use = model_intra_mom
                         results["intraday_prob"] = ip_tmp_f
 
-                elif (not is_momentum_regime) and (model_intra_mr is not None):
+                # MR regime
+                elif (not is_momentum_regime) and model_intra_mr is not None:
                     model_used = "intraday_mr"
-                    model_to_use = model_intra_mr
-                    results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
+                    results["intraday_prob"] = predict_from_model(model_intra_mr, df_feat_intra)
 
+                # fallback
                 else:
-                    # Ultimate fallback
                     model_used = "intraday"
-                    model_to_use = model_intraday_legacy
-                    results["intraday_prob"] = predict_from_model(model_to_use, df_feat_intra)
+                    results["intraday_prob"] = predict_from_model(model_intraday_legacy, df_feat_intra)
 
                 results["intraday_model_used"] = model_used
 
-                # quality score (set it unconditionally here if we had intraday bars + features)
+                # ✅ quality score set whenever intraday is usable
                 results["intraday_quality_score"] = float(
                     max(0.0, min(1.0, len(df_intra_resampled) / 120.0))
-)
-                results["intraday_regime"] = "mom" if is_momentum_regime else "mr"
+                )
 
     except Exception as e:
         print(f"[ERROR] Intraday prediction error: {e}")
         results["allow_intraday"] = False
         results["intraday_prob"] = None
         results["intraday_quality_score"] = 0.0
-        print(f"[DEBUG] {symU} regime={'MOM' if is_momentum_regime else 'MR'} (mom={mom_1h:+.4%} vol={vol:.5f})")
+
+    # -------------------------
+    # FINAL PRICE LAST RESORT
+    # -------------------------
+    # If intraday & daily both failed to set price, last resort use fetch_latest_price()
+    if results.get("price") is None:
+        try:
+            p = fetch_latest_price(symU)
+            if p is not None and float(p) > 0:
+                results["price"] = float(p)
+        except Exception:
+            pass
 
     # Extract before combine
     dp = results["daily_prob"]
@@ -544,15 +534,13 @@ def compute_signals(
         q = float(results.get("intraday_quality_score", 1.0) or 0.0)
         weight = float(intraday_weight) * q
 
-        # Ensure vol/mom exist (may not if intraday failed earlier)
+        # Ensure vol/mom exist
         if vol is None:
             vol = float(results.get("intraday_vol") or 0.0)
-        if mom is None:
-            mom = float(results.get("intraday_mom") or 0.0)
+        if mom_1h is None:
+            mom_1h = float(results.get("intraday_mom") or 0.0)
 
-        # ---------------------------------------
-        # VOLATILITY ADJUSTMENT
-        # ---------------------------------------
+        # Volatility adjustment
         try:
             if vol > 0.025:
                 weight = min(0.90, weight + 0.20)
@@ -561,18 +549,14 @@ def compute_signals(
         except Exception:
             pass
 
-        # ---------------------------------------
-        # PRICE MOMENTUM OVERRIDE (model-lag guardrail)
-        # ---------------------------------------
+        # Price momentum override (tuned for 15m)
         try:
-            if (dp is not None) and (dp >= 0.65) and (mom >= 0.0020):
+            if (dp is not None) and (dp >= 0.65) and (mom_1h >= 0.0020):
                 weight = max(weight, 0.65)
         except Exception:
             pass
 
-        # ---------------------------------------
-        # STRONG INTRADAY MOMENTUM OVERRIDE
-        # ---------------------------------------
+        # Strong intraday momentum override
         try:
             if (
                 (ip is not None)
@@ -585,22 +569,19 @@ def compute_signals(
         except Exception:
             pass
 
-        # ---------------------------------------
-        # STRONG DAILY TREND CONTINUATION OVERRIDE
-        # ---------------------------------------
+        # Strong daily continuation override
         try:
             if (
                 (dp is not None)
                 and (ip is not None)
-                and (dp >= 0.78)      # strong daily trend
-                and (ip >= 0.25)      # intraday pullback, not collapse
-                and (mom <= -0.005)   # shallow dip
+                and (dp >= 0.78)
+                and (ip >= 0.25)
+                and (mom_1h <= -0.005)
             ):
                 weight = max(weight, 0.70)
         except Exception:
             pass
 
-    # clamp + store
     weight = float(min(max(weight, 0.0), 0.90))
     results["intraday_weight"] = weight
 
@@ -617,7 +598,7 @@ def compute_signals(
         results["final_prob"] = float(weight * ip + (1 - weight) * dp)
 
     # -------------------------
-    # Safe debug prints (never crash)
+    # Safe debug prints
     # -------------------------
     def _fmt(x, n=3):
         return "NA" if x is None else f"{float(x):.{n}f}"
@@ -627,7 +608,7 @@ def compute_signals(
 
     print(
         f"[DEBUG] {symU} dp={_fmt(dp)} ip={_fmt(ip)} q={results.get('intraday_quality_score',0):.2f} "
-        f"weight={weight:.2f} model={results.get('intraday_model_used')}"
+        f"weight={weight:.2f} model={results.get('intraday_model_used')} price={_fmt(results.get('price'), 2)}"
     )
     print(
         f"[DEBUG] {symU} vol={_fmt(results.get('intraday_vol'), 5)} mom={_fmt_pct(results.get('intraday_mom'))}"

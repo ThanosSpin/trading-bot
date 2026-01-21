@@ -203,6 +203,7 @@ def compute_strategy_decisions(
     # ---------------------------------------------------------
     diagnostics = diagnostics or {}
 
+
     def _diag(sym: str) -> dict:
         return diagnostics.get(sym.upper()) or {}
 
@@ -255,7 +256,8 @@ def compute_strategy_decisions(
         except:
             pass
         pms[sym] = pm
-        prices[sym] = fetch_latest_price(sym) or 0.0
+        d = diagnostics.get(sym.upper()) or {}
+        prices[sym] = float(d.get("price") or 0.0) or (fetch_latest_price(sym) or 0.0)
 
     # Ensure SPY state exists even if not in symbols (safe)
     if spy_sym not in pms:

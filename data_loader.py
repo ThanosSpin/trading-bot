@@ -1,58 +1,148 @@
 # data_loader.py
+import os
+import time
 import pandas as pd
 import pytz
 from datetime import datetime, timedelta
 from typing import Optional
 import yfinance as yf
 from broker import api_market
+from alpaca_client import api as alpaca_api
 
 
 # ============================================================
 # DAILY DATA (Yahoo Finance)
 # ============================================================
+_CACHE_DIR = os.path.join(os.path.dirname(__file__), "data_cache")
+os.makedirs(_CACHE_DIR, exist_ok=True)
+
+def _cache_path(symbol: str, period: Optional[str], years: Optional[int], interval: str) -> str:
+    sym = str(symbol).upper().strip()
+    p = period if period else f"{years}y"
+    safe = f"{sym}_{p}_{interval}".replace("/", "_").replace(" ", "")
+    return os.path.join(_CACHE_DIR, f"{safe}.parquet")
+
+def _read_cache(path: str, max_age_sec: int) -> Optional[pd.DataFrame]:
+    try:
+        if not os.path.exists(path):
+            return None
+        age = time.time() - os.path.getmtime(path)
+        if age > max_age_sec:
+            return None
+        df = pd.read_parquet(path)
+        return df if (df is not None and not df.empty) else None
+    except Exception:
+        return None
+
+def _write_cache(path: str, df: pd.DataFrame) -> None:
+    try:
+        if df is None or df.empty:
+            return
+        df.to_parquet(path)
+    except Exception:
+        pass
+
 def fetch_historical_data(
     symbol: str,
     years: Optional[int] = None,
     period: Optional[str] = None,
     interval: str = "1d",
 ) -> Optional[pd.DataFrame]:
-    try:
-        if period:
-            df = yf.download(symbol, period=period, interval=interval,
-                             progress=False, auto_adjust=True)
-        elif years:
-            df = yf.download(symbol, period=f"{years}y", interval=interval,
-                             progress=False, auto_adjust=True)
-        else:
-            raise ValueError("Either 'years' or 'period' must be provided.")
+    """
+    Yahoo daily/intraday fetch with:
+      - disk cache (parquet)
+      - retry + exponential backoff
+    """
+    symbol = str(symbol).upper().strip()
 
-        if df is None or df.empty:
-            print(f"[WARN] Empty daily data for {symbol}")
-            return None
-        return df
+    if not period and not years:
+        raise ValueError("Either 'years' or 'period' must be provided.")
 
-    except Exception as e:
-        print(f"[ERROR] Daily data fetch failed for {symbol}: {e}")
-        return None
+    # ✅ cache TTL: daily can be cached long; intraday shorter
+    # (tune if you want)
+    if interval == "1d":
+        ttl_sec = 6 * 60 * 60      # 6 hours
+    else:
+        ttl_sec = 5 * 60           # 5 minutes
+
+    cpath = _cache_path(symbol, period, years, interval)
+
+    # 1) Try cache first
+    cached = _read_cache(cpath, ttl_sec)
+    if cached is not None:
+        return cached
+
+    # 2) Fetch with retries/backoff
+    last_err = None
+    for attempt in range(5):
+        try:
+            if period:
+                df = yf.download(
+                    symbol,
+                    period=period,
+                    interval=interval,
+                    progress=False,
+                    auto_adjust=True,
+                    threads=False,   # ✅ helps with rate limiting
+                )
+            else:
+                df = yf.download(
+                    symbol,
+                    period=f"{years}y",
+                    interval=interval,
+                    progress=False,
+                    auto_adjust=True,
+                    threads=False,
+                )
+
+            if df is None or df.empty:
+                print(f"[WARN] Empty data for {symbol} (period={period or str(years)+'y'}, interval={interval})")
+                return None
+
+            # Save cache and return
+            _write_cache(cpath, df)
+            return df
+
+        except Exception as e:
+            last_err = e
+            # backoff: 2, 4, 8, 16, 32 seconds
+            sleep_s = 2 ** (attempt + 1)
+            print(f"[WARN] Daily data fetch failed for {symbol} (attempt {attempt+1}/5): {e} — sleeping {sleep_s}s")
+            time.sleep(sleep_s)
+
+    print(f"[ERROR] Daily data fetch failed for {symbol} after retries: {last_err}")
+    return None
 
 
 # ============================================================
 # LATEST PRICE (Yahoo Finance fallback)
 # ============================================================
 def fetch_latest_price(symbol: str) -> Optional[float]:
-    try:
-        data = yf.download(symbol, period="1d", interval="1m",
-                           progress=False, auto_adjust=True)
-        if data.empty:
-            return None
+    sym = str(symbol).upper().strip()
 
+    # 1) Alpaca first (no Yahoo rate limits)
+    try:
+        bar = alpaca_api.get_latest_bar(sym)
+        if bar and getattr(bar, "c", None) is not None:
+            return float(bar.c)
+        if bar and getattr(bar, "close", None) is not None:
+            return float(bar.close)
+    except Exception as e:
+        print(f"[WARN] Alpaca latest price failed for {sym}: {e}")
+
+    # 2) Fallback: yfinance (can rate-limit)
+    try:
+        data = yf.download(sym, period="1d", interval="1m", progress=False, auto_adjust=True)
+        if data is None or data.empty:
+            return None
+        
         last_close = data["Close"].iloc[-1]
         if isinstance(last_close, pd.Series):
             last_close = last_close.iloc[0]
         return float(last_close)
-
+    
     except Exception as e:
-        print(f"[ERROR] fetch_latest_price {symbol}: {e}")
+        print(f"[ERROR] fetch_latest_price {sym}: {e}")
         return None
 
 

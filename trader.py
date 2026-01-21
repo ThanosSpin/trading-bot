@@ -2,6 +2,7 @@
 import time
 import alpaca_trade_api as tradeapi
 import pytz
+from alpaca_client import api
 from datetime import datetime, timedelta
 from collections import defaultdict
 from pdt_guardrails import max_sell_allowed
@@ -84,13 +85,9 @@ def is_buy_allowed_by_pdt(api_client, symbol, quantity):
 
     return True
 
-
-def get_pdt_status(api_override=None):
-    """Return dict describing PDT state."""
+def get_pdt_status():
     try:
-        _api = api_override or api   # ✅ use global api by default
-
-        acct = _api.get_account()
+        acct = api.get_account()
         eq = float(acct.equity or 0)
         dt_api = int(acct.daytrade_count or 0)
 
@@ -101,7 +98,7 @@ def get_pdt_status(api_override=None):
             "equity": eq,
             "trading_blocked": bool(getattr(acct, "trading_blocked", False)),
         }
-
+    
     except Exception as e:
         print(f"[WARN] PDT status unavailable: {e}")
         return None
