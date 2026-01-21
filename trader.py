@@ -85,10 +85,12 @@ def is_buy_allowed_by_pdt(api_client, symbol, quantity):
     return True
 
 
-def get_pdt_status(api):
+def get_pdt_status(api_override=None):
     """Return dict describing PDT state."""
     try:
-        acct = api.get_account()
+        _api = api_override or api   # ✅ use global api by default
+
+        acct = _api.get_account()
         eq = float(acct.equity or 0)
         dt_api = int(acct.daytrade_count or 0)
 
