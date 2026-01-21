@@ -217,10 +217,28 @@ def execute_trade(action, quantity, symbol):
         return filled_qty, filled_price
 
     except Exception as e:
-        msg = str(e).lower()
-        if "pattern day trading" in msg or "pdt" in msg:
-            print(f"[PDT BLOCK] Alpaca blocked trade for {symbol}.")
+        msg = str(e)
+        low = msg.lower()
+
+        # Always show the real broker error (super important)
+        print(f"[ERROR] Trade failed for {symbol}: {msg}")
+
+        # Only label as PDT if it clearly indicates a PDT day-trade restriction.
+        # (Avoid matching generic 'pdt' strings.)
+        pdt_markers = [
+            "pattern day trader",
+            "day trade buying power",
+            "dtbp",
+            "daytrade",
+            "day-trade",
+            "opening trades would exceed",
+            "insufficient day trade buying power",
+        ]
+
+        if any(m in low for m in pdt_markers):
+            print(f"[PDT WARNING] Possible PDT/day-trade restriction for {symbol}.")
+            # still return not filled
             return 0.0, None
 
-        print(f"[ERROR] Failed to execute trade for {symbol}: {e}")
+
         return 0.0, None
