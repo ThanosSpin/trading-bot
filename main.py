@@ -108,6 +108,7 @@ def get_predictions(symbols, debug=True):
                 "intraday_quality_score": sig.get("intraday_quality_score"),
                 "intraday_vol": sig.get("intraday_vol"),
                 "intraday_mom": sig.get("intraday_mom"),
+                "price": sig.get("price"),
             }
 
     return predictions, diagnostics
