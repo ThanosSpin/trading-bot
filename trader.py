@@ -159,7 +159,7 @@ def execute_trade(action, quantity, symbol):
     # -------------------------------------------------------
     try:
         acct = api.get_account()
-        pdt_status = get_pdt_status(api)
+        pdt_status = get_pdt_status()
 
         # Optional: if Alpaca says trading is blocked, fail fast
         if pdt_status and pdt_status.get("trading_blocked"):
