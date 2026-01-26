@@ -32,7 +32,7 @@ MIN_INTRADAY_BARS_FOR_FEATURES = 25
 
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.65    # require strong confidence to buy
-SELL_THRESHOLD = 0.45   # require strong confidence to sell
+SELL_THRESHOLD = 0.50   # require strong confidence to sell
 
 # =========================
 # SPY fallback configuration
@@ -85,6 +85,18 @@ TRAIL_STOP = 0.96        # trailing stop vs max_price since entry (e.g., 0.97 = 
 TRAIL_ACTIVATE = 1.05   # ✅ activate trailing only after +5% profit
 RISK_FRACTION = 0.5     # default: invest or sell 50%
 
+# PDT-aware stop tiers (only relevant if equity < 25k and dt_api >= 3)
+PDT_TIERING_ENABLED = True
+
+# If position opened today, do NOT stop out unless loss exceeds this
+PDT_SAMEDAY_STOP_BLOCK = 0.020   # 2.0% loss blocks normal stop sell
+
+# Emergency override: if loss exceeds this, allow selling opened-today shares
+# (consumes a day trade; set None to disable emergency exits entirely)
+PDT_EMERGENCY_STOP = 0.060       # 6.0% loss triggers emergency exit
+
+# Only allow at most N emergency day-trade exits per day
+PDT_EMERGENCY_MAX_PER_DAY = 1
 
 # Model path management
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

@@ -277,7 +277,7 @@ def execute_decisions(decisions):
             sell_failed.add(sym)
             continue
 
-        filled_qty, filled_price = execute_trade("sell", qty, sym)
+        filled_qty, filled_price = execute_trade("sell", qty, sym, decision=decision)
 
         if not filled_qty:
             print(f"[WARN] {sym} SELL not filled.")

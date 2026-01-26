@@ -2,10 +2,13 @@ from typing import Dict, List
 from config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
-    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP
+    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
+    PDT_TIERING_ENABLED, PDT_SAMEDAY_STOP_BLOCK, PDT_EMERGENCY_STOP,
 )
 from portfolio import PortfolioManager
 from data_loader import fetch_latest_price
+from trader import get_pdt_status
+from pdt_tracker import get_opened_today_qty
 
 
 # ---------------------------------------------------------
@@ -75,6 +78,8 @@ def _any_stock_trade(decisions: Dict[str, dict], symbols: List[str]) -> bool:
 # Evaluate STOP-LOSS / TAKE-PROFIT (universal)
 # ---------------------------------------------------------
 def check_stop_tp(symbol, price, pm):
+    symbol = str(symbol).upper().strip()
+
     shares = float(pm.data.get("shares", 0.0))
     if shares <= 0:
         return None
@@ -83,8 +88,41 @@ def check_stop_tp(symbol, price, pm):
     if entry_price <= 0:
         return None
 
+    # ---------------------------------------------------------
+    # PDT context (only used to limit selling opened-today shares)
+    # ---------------------------------------------------------
+    pdt = None
+    eq = 0.0
+    dt = 0
+
+    opened_today = 0.0
+    sellable_overnight = shares  # default = all shares sellable
+
+    if PDT_TIERING_ENABLED:
+        try:
+            pdt = get_pdt_status()  # your zero-arg version
+        except Exception:
+            pdt = None
+
+        if pdt:
+            try:
+                eq = float(pdt.get("equity", 0) or 0)
+                dt = int(pdt.get("daytrade_count", 0) or 0)
+            except Exception:
+                eq, dt = 0.0, 0
+
+            # Only tier when PDT matters and you're near limit
+            if eq < 25000 and dt >= 3:
+                try:
+                    opened_today = float(get_opened_today_qty(symbol) or 0.0)
+                except Exception:
+                    opened_today = 0.0
+
+                opened_today = max(0.0, min(opened_today, shares))
+                sellable_overnight = max(0.0, shares - opened_today)
+
     # Maintain max_price while holding
-    mp = float(pm.data.get("max_price", entry_price))
+    mp = float(pm.data.get("max_price", entry_price) or entry_price)
     if price > mp:
         pm.data["max_price"] = price
         try:
@@ -93,21 +131,64 @@ def check_stop_tp(symbol, price, pm):
             pass
         mp = price
 
-    # 1️⃣ HARD STOP-LOSS (always active)
-    if price <= entry_price * STOP_LOSS:
+    # helpers
+    def _loss_pct() -> float:
+        # positive number when losing, e.g. 0.03 == -3%
+        return max(0.0, 1.0 - (float(price) / float(entry_price)))
+
+    def _pdt_tiered_sell(reason: str):
+        """
+        PDT-aware selling:
+        - If near PDT limit: sell ONLY overnight shares (shares - opened_today)
+        - If everything was opened today: block unless emergency stop triggers
+        - If opened_today == 0: selling is safe (won't create a day-trade) -> sell all
+        """
+        near_pdt = bool(PDT_TIERING_ENABLED and pdt and eq < 25000 and dt >= 3)
+
+        # Not near PDT limit => sell everything normally
+        if not near_pdt:
+            return make_decision("sell", int(shares), reason)
+
+        # If we have any overnight shares, sell ONLY those (avoid day trade)
+        if sellable_overnight > 0:
+            # If opened_today==0 then sellable_overnight==shares, so this sells all anyway.
+            return make_decision(
+                "sell",
+                int(sellable_overnight),
+                reason + f" | PDT-tier: sold overnight={sellable_overnight:g}, blocked opened_today={opened_today:g}"
+            )
+
+        # At this point: sellable_overnight == 0 (everything opened today)
+        loss = _loss_pct()
+
+        # Emergency override => allow same-day exit (day-trade risk accepted)
+        if PDT_EMERGENCY_STOP is not None and loss >= float(PDT_EMERGENCY_STOP):
+            d = make_decision(
+                "sell",
+                int(shares),
+                reason + f" | 🚨 PDT EMERGENCY stop (loss={loss:.2%}) allowing same-day exit"
+            )
+            d["pdt_emergency"] = True
+            return d
+
+        # Otherwise block
         return make_decision(
-            "sell",
-            int(shares),
+            "hold",
+            0,
+            f"{symbol}: STOP blocked by PDT tiering (opened_today={opened_today:g}, loss={loss:.2%})."
+        )
+
+    # 1) HARD STOP-LOSS
+    if price <= entry_price * STOP_LOSS:
+        return _pdt_tiered_sell(
             f"{symbol}: STOP-LOSS hit {price:.2f} <= {STOP_LOSS*100:.1f}% of entry {entry_price:.2f}"
         )
 
-    # 2️⃣ TRAILING STOP (ONLY AFTER +5% PROFIT)
+    # 2) TRAILING STOP (ONLY AFTER +5% PROFIT)
     if price >= entry_price * TRAIL_ACTIVATE:
         trail_level = mp * TRAIL_STOP
         if price <= trail_level:
-            return make_decision(
-                "sell",
-                int(shares),
+            return _pdt_tiered_sell(
                 (
                     f"{symbol}: TRAIL-STOP hit {price:.2f} <= {TRAIL_STOP*100:.1f}% of max {mp:.2f} "
                     f"(activated after +{(TRAIL_ACTIVATE-1)*100:.1f}% profit)"
