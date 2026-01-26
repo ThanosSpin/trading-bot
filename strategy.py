@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 from config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
@@ -330,7 +330,7 @@ def compute_strategy_decisions(
     def _is_buy(sym: str) -> bool:
         return preds.get(sym, 0.0) >= BUY_THRESHOLD and (not _block_buy_on_pullback(sym))
 
-    def _pick_secondary_between_aapl_abbv() -> str | None:
+    def _pick_secondary_between_aapl_abbv() -> Optional[str]:
         """
         Decide which secondary symbol to buy when NVDA is NOT a BUY.
         Returns: "AAPL", "ABBV", or None.
