@@ -3,7 +3,7 @@ from config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
-    PDT_TIERING_ENABLED, PDT_SAMEDAY_STOP_BLOCK, PDT_EMERGENCY_STOP,
+    PDT_TIERING_ENABLED, PDT_EMERGENCY_STOP, RS_MARGIN
 )
 from portfolio import PortfolioManager
 from data_loader import fetch_latest_price
@@ -321,6 +321,51 @@ def compute_strategy_decisions(
             return True
 
         return False
+    
+    # ---------------------------------------------------------
+    # ABBV secondary logic helpers
+    # ---------------------------------------------------------
+    rs_margin = max(0.0, min(float(RS_MARGIN), 0.25))  # require ABBV to beat AAPL by 0.05 to switch (anti-churn)
+
+    def _is_buy(sym: str) -> bool:
+        return preds.get(sym, 0.0) >= BUY_THRESHOLD and (not _block_buy_on_pullback(sym))
+
+    def _pick_secondary_between_aapl_abbv() -> str | None:
+        """
+        Decide which secondary symbol to buy when NVDA is NOT a BUY.
+        Returns: "AAPL", "ABBV", or None.
+        """
+        aapl_in = "AAPL" in core_symbols
+        abbv_in = "ABBV" in core_symbols
+
+        aapl_p = preds.get("AAPL") if aapl_in else None
+        abbv_p = preds.get("ABBV") if abbv_in else None
+
+        aapl_buy = (aapl_p is not None) and _is_buy("AAPL")
+        abbv_buy = (abbv_p is not None) and _is_buy("ABBV")
+
+        if not aapl_buy and not abbv_buy:
+            return None
+        if aapl_buy and not abbv_buy:
+            return "AAPL"
+        if abbv_buy and not aapl_buy:
+            return "ABBV"
+
+        # both BUY -> compare with margin
+        if float(abbv_p) > float(aapl_p) + rs_margin:
+            return "ABBV"
+        if float(aapl_p) > float(abbv_p) + rs_margin:
+            return "AAPL"
+
+        # too close -> keep incumbent if held, else choose higher prob
+        aapl_sh = float(pms.get("AAPL").data.get("shares", 0.0) or 0.0) if aapl_in else 0.0
+        abbv_sh = float(pms.get("ABBV").data.get("shares", 0.0) or 0.0) if abbv_in else 0.0
+        if aapl_sh > 0 and abbv_sh <= 0:
+            return "AAPL"
+        if abbv_sh > 0 and aapl_sh <= 0:
+            return "ABBV"
+
+        return "ABBV" if float(abbv_p) >= float(aapl_p) else "AAPL"
 
     # Default decisions
     decisions = {s: make_decision("hold", 0, f"{s}: default HOLD") for s in symbols}
@@ -467,6 +512,13 @@ def compute_strategy_decisions(
                 if sh <= 0 or px <= 0:
                     continue
 
+                sim_cash += sh * px
+                decisions[sym] = make_decision(
+                    "sell",
+                    int(sh),
+                    f"{sym}: Sold to fund NVDA BUY (NVDA priority)."
+                )
+
                 # Only force-sell AAPL if NVDA BUY and AAPL is HOLD/SELL (not BUY)
                 if sym == "AAPL":
                     if aapl_action != "buy":
@@ -510,14 +562,36 @@ def compute_strategy_decisions(
                 qty = int(cash_now // tgt_px) if tgt_px > 0 else 0
                 if qty >= 1:
                     decisions[strongest] = make_decision("buy", qty, f"{strongest}: Rotated from NVDA sell, qty={qty}")
-        else:
-            # NVDA HOLD -> normal core trading
-            for sym in core_symbols:
-                decisions[sym] = should_trade(
-                    sym, preds.get(sym, 0.0),
-                    total_symbols=len(core_symbols),
-                    concurrent_buys=concurrent_buys
-                )
+            else:
+                # NVDA HOLD -> allow at most ONE secondary BUY: AAPL vs ABBV
+                secondary = _pick_secondary_between_aapl_abbv()
+
+                for sym in core_symbols:
+                    d0 = should_trade(
+                        sym, preds.get(sym, 0.0),
+                        total_symbols=len(core_symbols),
+                        concurrent_buys=concurrent_buys
+                    )
+
+                    # suppress BUY for the non-selected secondary candidate
+                    if d0.get("action") == "buy" and secondary is not None and sym in ("AAPL", "ABBV") and sym != secondary:
+                        d0 = make_decision("hold", 0, f"{sym}: BUY suppressed (secondary={secondary}).")
+
+                    decisions[sym] = d0
+
+                # If ABBV chosen AND AAPL is not BUY AND we hold AAPL -> sell AAPL to fund ABBV
+                if secondary == "ABBV" and "AAPL" in core_symbols and "ABBV" in core_symbols:
+                    aapl_action = (decisions.get("AAPL") or {}).get("action", "hold")
+                    aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
+
+                    if aapl_sh > 0 and aapl_action in ("hold", "sell"):
+                        decisions["AAPL"] = make_decision("sell", int(aapl_sh), "AAPL: Sold to fund ABBV BUY (rotation).")
+                        decisions["ABBV"] = make_decision(
+                            "buy", 1,
+                            "ABBV PRIORITY BUY — recalc all-in after sells (AAPL rotation).",
+                            recalc_all_in=True,
+                            priority_rank=2,  # NVDA would be 1 if it existed here; this runs after sells
+                        )
 
    # ---------------------------------------------------------
     # 4.5) BUY CONFIRMATION GUARDRAIL
@@ -583,6 +657,8 @@ def compute_strategy_decisions(
         wanted.append("NVDA")
     if "AAPL" in core_symbols and preds.get("AAPL", 0.0) >= BUY_THRESHOLD and not _block_buy_on_pullback("AAPL"):
         wanted.append("AAPL")
+    if "ABBV" in core_symbols and preds.get("ABBV", 0.0) >= BUY_THRESHOLD and not _block_buy_on_pullback("ABBV"):
+        wanted.append("ABBV")
 
     if wanted:
         sh_spy = float(spy_shares() or 0.0)
@@ -595,7 +671,7 @@ def compute_strategy_decisions(
         has_other_core_positions = any(
             float(pms[s].data.get("shares", 0.0) or 0.0) > 0.0
             for s in core_symbols
-            if s not in ("NVDA", "AAPL")   # exclude targets; optional but recommended
+            if s not in ("NVDA", "AAPL", "ABBV")   # exclude targets; optional but recommended
         )
 
         has_funding = (sh_spy > 0.0) or has_other_core_positions
@@ -623,20 +699,41 @@ def compute_strategy_decisions(
                 recalc_all_in=True,
                 priority_rank=1,
             )
-            if "AAPL" in wanted:
-                decisions["AAPL"] = make_decision(
+
+            # choose best secondary between AAPL and ABBV
+            secondary = None
+            if "AAPL" in wanted and "ABBV" in wanted:
+                secondary = "ABBV" if preds.get("ABBV", 0.0) > preds.get("AAPL", 0.0) + rs_margin else "AAPL"
+            elif "AAPL" in wanted:
+                secondary = "AAPL"
+            elif "ABBV" in wanted:
+                secondary = "ABBV"
+
+            if secondary:
+                decisions[secondary] = make_decision(
                     "buy", 1,
-                    "AAPL BUY intent — secondary to NVDA (after sells).",
+                    f"{secondary} BUY intent — secondary to NVDA (after sells).",
                     recalc_after_sells=True,
                     priority_rank=2,
                 )
+
         else:
-            decisions["AAPL"] = make_decision(
-                "buy", 1,
-                "AAPL PRIORITY BUY — recalc all-in after sells (SPY liquidation).",
-                recalc_all_in=True,
-                priority_rank=1,
-            )
+            # NVDA not wanted -> pick best of AAPL/ABBV if any
+            secondary = None
+            if "AAPL" in wanted and "ABBV" in wanted:
+                secondary = "ABBV" if preds.get("ABBV", 0.0) > preds.get("AAPL", 0.0) + rs_margin else "AAPL"
+            elif "AAPL" in wanted:
+                secondary = "AAPL"
+            elif "ABBV" in wanted:
+                secondary = "ABBV"
+
+            if secondary:
+                decisions[secondary] = make_decision(
+                    "buy", 1,
+                    f"{secondary} PRIORITY BUY — recalc all-in after sells (SPY liquidation).",
+                    recalc_all_in=True,
+                    priority_rank=1,
+                )
 
         # When core wants to buy, we do NOT allow SPY buy this cycle
         return decisions
