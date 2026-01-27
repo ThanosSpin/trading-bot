@@ -174,7 +174,7 @@ class PortfolioManager:
             self.save()
         except Exception:
             pass
-
+        
     # ------------------------
     # Logging
     # ------------------------
@@ -220,7 +220,7 @@ class PortfolioManager:
     # Trading updates
     # ------------------------
 
-    def _apply(self, action, price, qty):
+    def _apply(self, action, price, qty, account_cash: float = None):
         """Internal balance update + logging + save.
         qty MUST be the executed (filled) quantity.
         """
@@ -251,7 +251,7 @@ class PortfolioManager:
             if shares_after > 0:
                 self.data["avg_price"] = (shares_before * avg_before + exec_qty * price) / shares_after
             self.data["shares"] = shares_after
-            self.data["cash"] = cash_before - (exec_qty * price)
+
             self.data["max_price"] = max(max_before, price)
 
         # -----------------------
@@ -266,7 +266,7 @@ class PortfolioManager:
                 shares_after = 0.0
 
             self.data["shares"] = shares_after
-            self.data["cash"] = cash_before + (exec_qty * price)
+            
 
             # reset when flat
             if self.data["shares"] <= 0:
@@ -279,6 +279,12 @@ class PortfolioManager:
             return
 
         self.data["last_price"] = price
+
+        if account_cash is not None:
+            try:
+                self.data["cash"] = float(account_cash)
+            except Exception:
+                pass
 
         # log *after* state update so "shares" column equals shares_after
         shares_after_logged = float(self.data.get("shares", 0.0))

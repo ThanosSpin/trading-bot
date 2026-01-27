@@ -286,8 +286,9 @@ def execute_decisions(decisions):
 
         any_sell_filled = True
         pm.refresh_live()
-        pm._apply("sell", filled_price, filled_qty)
-        print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
+        account_cash = _get_live_account_cash(proxy_symbol=sym)
+        pm._apply("sell", filled_price, filled_qty, account_cash=account_cash)
+        print(f"Updated Snapshot (cash + {sym} position): ${pm.value():.2f}")
 
     # -------------------------
     # Refresh cash after SELLs
@@ -358,7 +359,8 @@ def execute_decisions(decisions):
             continue
 
         pm.refresh_live()
-        pm._apply("buy", filled_price, filled_qty)
+        account_cash = _get_live_account_cash(proxy_symbol=sym)
+        pm._apply("buy", filled_price, filled_qty, account_cash=account_cash)
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
         # update remaining cash after successful buy
