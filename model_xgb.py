@@ -9,8 +9,12 @@ from xgboost import XGBClassifier
 
 from features import build_daily_features, build_intraday_features
 from data_loader import fetch_historical_data, fetch_intraday_history, fetch_latest_price
-from config import INTRADAY_WEIGHT, MIN_INTRADAY_BARS_FOR_FEATURES
+from target_labels import create_target_label, backtest_threshold
+from trading_metrics import calculate_financial_metrics, print_trading_report
+
 from config import (
+    INTRADAY_WEIGHT,
+    MIN_INTRADAY_BARS_FOR_FEATURES,
     INTRADAY_MOM_TRIG,
     INTRADAY_VOL_TRIG,
     INTRADAY_REGIME_OVERRIDES,
@@ -90,63 +94,99 @@ def _filter_intraday_rows_by_mode(df_feat: pd.DataFrame, mode: str) -> pd.DataFr
 
     return df_feat
 
-def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
+def train_model_with_validation(
+    df: pd.DataFrame,
+    symbol: str,
+    mode: str = "daily",
+    train_pct: float = 0.7,
+    val_pct: float = 0.15,
+):
     """
-    Train XGB model for a given symbol.
-
-    Supported modes:
-      - daily
-      - intraday (legacy / unfiltered)
-      - intraday_mr (mean reversion regime)
-      - intraday_mom (momentum regime)
+    Train model with proper walk-forward validation.
+    
+    Split:
+    - Train: 70% (oldest data)
+    - Validation: 15% (tune threshold)
+    - Test: 15% (final holdout - NEVER TOUCH during training)
     """
-
     from sklearn.metrics import (
-        accuracy_score,
-        log_loss,
-        roc_auc_score,
-        confusion_matrix,
-        precision_score,
-        recall_score,
-        f1_score,
+        accuracy_score, log_loss, roc_auc_score,
+        confusion_matrix, precision_score, recall_score, f1_score
     )
-
+    from target_labels import create_target_label, backtest_threshold
+    from trading_metrics import calculate_financial_metrics, print_trading_report
+    
     df = df.copy()
-
+    
     # -----------------------------
     # FEATURE GENERATION
     # -----------------------------
     if mode == "daily":
         df_feat = build_daily_features(df)
-
     elif mode in ("intraday", "intraday_mr", "intraday_mom"):
         df_feat = build_intraday_features(df)
-
-        # regime filtering only for the dual intraday modes
+        
+        # Regime filtering
         if mode in ("intraday_mr", "intraday_mom"):
             df_feat = _filter_intraday_rows_by_mode(df_feat, mode=mode)
-
-            # drop regime helper cols so model doesn't learn them directly
             for c in ["ret_12", "mom_12_abs", "vol_12"]:
                 if c in df_feat.columns:
                     df_feat.drop(columns=[c], inplace=True)
-
     else:
-        raise ValueError("mode must be 'daily' or one of: 'intraday', 'intraday_mr', 'intraday_mom'")
-
+        raise ValueError(f"Invalid mode: {mode}")
+    
     # -----------------------------
-    # LABEL
+    # COST-AWARE TARGET
     # -----------------------------
-    df_feat["target"] = (df_feat["Close"].shift(-1) > df_feat["Close"]).astype(int)
-    df_feat.dropna(inplace=True)
-
+    df_feat = create_target_label(df_feat, mode=mode)
+    df_feat = df_feat.dropna(subset=["target", "forward_return"])
+    
     if df_feat.empty:
-        raise ValueError(f"No rows left after feature engineering for {symbol} ({mode})")
-
-    X = df_feat.drop(columns=["target"])
+        raise ValueError(f"No rows after feature engineering for {symbol} ({mode})")
+    
+    # Store returns for threshold optimization
+    forward_returns = df_feat["forward_return"].copy()
+    
+    # ✅ Separate features and target (safe column drop)
+    X = df_feat.drop(
+        columns=["target", "forward_return", "target_3class"], 
+        errors='ignore'  # Skip columns that don't exist
+    )
     y = df_feat["target"]
     feature_list = list(X.columns)
-
+    
+    # -----------------------------
+    # WALK-FORWARD SPLIT
+    # -----------------------------
+    n = len(X)
+    train_end = int(n * train_pct)
+    val_end = int(n * (train_pct + val_pct))
+    
+    if train_end < 50 or (val_end - train_end) < 20 or (n - val_end) < 20:
+        raise ValueError(
+            f"Insufficient data for {symbol} ({mode}): "
+            f"train={train_end}, val={val_end-train_end}, test={n-val_end}"
+        )
+    
+    # Split data chronologically (NO SHUFFLE)
+    X_train = X.iloc[:train_end]
+    y_train = y.iloc[:train_end]
+    ret_train = forward_returns.iloc[:train_end]
+    
+    X_val = X.iloc[train_end:val_end]
+    y_val = y.iloc[train_end:val_end]
+    ret_val = forward_returns.iloc[train_end:val_end]
+    
+    X_test = X.iloc[val_end:]
+    y_test = y.iloc[val_end:]
+    ret_test = forward_returns.iloc[val_end:]
+    
+    print(f"\n📊 DATA SPLIT — {symbol} [{mode.upper()}]")
+    print(f"Train: {len(X_train)} bars ({X_train.index[0]} → {X_train.index[-1]})")
+    print(f"Val:   {len(X_val)} bars ({X_val.index[0]} → {X_val.index[-1]})")
+    print(f"Test:  {len(X_test)} bars ({X_test.index[0]} → {X_test.index[-1]})")
+    print(f"Class balance - Train: {y_train.mean():.2%} | Val: {y_val.mean():.2%} | Test: {y_test.mean():.2%}")
+    
     # -----------------------------
     # HYPERPARAMETERS
     # -----------------------------
@@ -156,74 +196,111 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
         "subsample": 0.8,
         "colsample_bytree": 0.8,
         "max_depth": 6,
+        "random_state": 42,
     }
-
+    
     if mode == "daily":
         params.update({"n_estimators": 400, "learning_rate": 0.04})
     else:
         params.update({"n_estimators": 500, "learning_rate": 0.035})
-
+    
+    # -----------------------------
+    # TRAIN MODEL
+    # -----------------------------
     model = XGBClassifier(**params)
-
+    
+    print(f"🔄 Training {symbol} [{mode}] with {params['n_estimators']} trees...")
+    model.fit(X_train, y_train, verbose=False)
+    print(f"✅ Training complete.")
+    
     # -----------------------------
-    # TIME-SERIES TRAIN/TEST SPLIT (80/20, no shuffle)
+    # VALIDATION: FIND OPTIMAL THRESHOLD
     # -----------------------------
-    split_idx = int(len(X) * 0.8)
-    if split_idx <= 0 or split_idx >= len(X):
-        raise ValueError(f"Not enough data to split train/test for {symbol} ({mode})")
-
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-
-    # -----------------------------
-    # TRAIN
-    # -----------------------------
-    model.fit(X_train, y_train)
-
-    # -----------------------------
-    # VALIDATION METRICS
-    # -----------------------------
-    metrics = {}
-    try:
-        y_pred_proba = model.predict_proba(X_test)[:, 1]
-        y_pred = (y_pred_proba > 0.5).astype(int)
-
-        metrics["accuracy"] = float(accuracy_score(y_test, y_pred))
-        metrics["logloss"] = float(log_loss(y_test, y_pred_proba))
-        metrics["roc_auc"] = float(roc_auc_score(y_test, y_pred_proba))
-        metrics["precision"] = float(precision_score(y_test, y_pred))
-        metrics["recall"] = float(recall_score(y_test, y_pred))
-        metrics["f1"] = float(f1_score(y_test, y_pred))
-        metrics["confusion_matrix"] = confusion_matrix(y_test, y_pred).tolist()
-
-    except Exception as e:
-        print(f"[WARN] Could not compute some metrics for {symbol} ({mode}): {e}")
-
-    # -----------------------------
-    # LOG RESULTS
-    # -----------------------------
-    print(f"\n📊 MODEL VALIDATION — {symbol} [{mode.upper()}] rows={len(df_feat)}")
+    y_val_proba = model.predict_proba(X_val)[:, 1]
+    
+    # ✅ Updated threshold search with better parameters
+    optimal_threshold_info = backtest_threshold(
+        y_val, 
+        y_val_proba, 
+        ret_val, 
+        threshold_range=(0.45, 0.60),  # ✅ Lower range
+        min_trades=15,                  # ✅ Require minimum trades
+        optimization_metric="composite" # ✅ Balance profit + recall
+    )
+    
+    optimal_threshold = optimal_threshold_info.get("threshold", 0.5)
+    
+    print(f"\n🎯 VALIDATION RESULTS (Optimal Threshold={optimal_threshold:.2f})")
     print("--------------------------------------------")
-    for k, v in metrics.items():
-        if k == "confusion_matrix":
-            print(f"{k:20}: {v}")
+    for k, v in optimal_threshold_info.items():
+        if isinstance(v, float):
+            print(f"{k:20}: {v:.4f}")
         else:
-            try:
-                print(f"{k:20}: {v:.4f}")
-            except Exception:
-                print(f"{k:20}: {v}")
-    print("--------------------------------------------\n")
-
+            print(f"{k:20}: {v}")
+    
+    # -----------------------------
+    # TEST: FINAL EVALUATION (NEVER SEEN DURING TRAINING)
+    # -----------------------------
+    y_test_proba = model.predict_proba(X_test)[:, 1]
+    y_test_pred = (y_test_proba > optimal_threshold).astype(int)
+    
+    # ML Metrics
+    metrics = {
+        "accuracy": float(accuracy_score(y_test, y_test_pred)),
+        "logloss": float(log_loss(y_test, y_test_proba)),
+        "roc_auc": float(roc_auc_score(y_test, y_test_proba)),
+        "precision": float(precision_score(y_test, y_test_pred, zero_division=0)),
+        "recall": float(recall_score(y_test, y_test_pred, zero_division=0)),
+        "f1": float(f1_score(y_test, y_test_pred, zero_division=0)),
+        "confusion_matrix": confusion_matrix(y_test, y_test_pred).tolist(),
+        "optimal_threshold": optimal_threshold,
+    }
+    
+    # Financial Metrics on Test Set
+    financial_metrics = calculate_financial_metrics(
+        y_true=y_test.values,
+        y_pred=y_test_pred,
+        y_pred_proba=y_test_proba,
+        returns=ret_test.values,
+        initial_capital=1000.0,
+        commission=0.001,  # 0.1% round-trip
+    )
+    
+    # Print detailed report
+    print_trading_report(financial_metrics)
+    
+    # Merge financial metrics into main metrics dict
+    metrics.update(financial_metrics)
+    
+    # -----------------------------
+    # SAVE ARTIFACT
+    # -----------------------------
     artifact = {
         "model": model,
         "features": feature_list,
         "metrics": metrics,
+        "optimal_threshold": optimal_threshold,
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
         "mode": mode,
+        "split_info": {
+            "train_size": len(X_train),
+            "val_size": len(X_val),
+            "test_size": len(X_test),
+            "train_start": str(X_train.index[0]),
+            "train_end": str(X_train.index[-1]),
+            "test_start": str(X_test.index[0]),
+            "test_end": str(X_test.index[-1]),
+        }
     }
-
+    
     return artifact
+
+
+# Update the old train_model to use the new function
+def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
+    """Wrapper for backward compatibility."""
+    return train_model_with_validation(df, symbol, mode)
 
 
 # ---------------------------------------------------------

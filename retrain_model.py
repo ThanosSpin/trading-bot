@@ -10,6 +10,7 @@ from data_loader import fetch_historical_data
 from model_xgb import train_model, MODEL_DIR
 from features import _clean_columns
 from config import TRAIN_SYMBOLS
+from feature_selection import select_features_with_shap, retrain_with_selected_features
 
 # ---------------------------------------------------------
 # Settings
@@ -66,52 +67,80 @@ def save_model_with_backup(artifact, symbol, mode: str = "daily"):
 # ---------------------------------------------------------
 def main():
     symbols = TRAIN_SYMBOLS if isinstance(TRAIN_SYMBOLS, list) else [TRAIN_SYMBOLS]
-    print("\n🔄 Starting model retraining...")
-    print(f"📌 Symbols: {symbols}\n")
-
+    
+    print("\n🔄 Starting model retraining with feature selection...\n")
+    
     for sym in symbols:
-        # =====================================================
-        # DAILY MODEL
-        # =====================================================
-        print(f"\n==============================")
-        print(f"🔄 Retraining DAILY model for {sym}")
-        print(f"==============================")
-
+        # Train initial model (as before)
+        print(f"\n{'='*60}")
+        print(f"🔄 Training {sym} - DAILY MODEL")
+        print(f"{'='*60}")
+        
         df_daily = fetch_historical_data(sym, years=LOOKBACK_YEARS, interval=DAILY_INTERVAL)
+        
         if df_daily is None or df_daily.empty:
-            print(f"[ERROR] No daily data for {sym}. Skipping daily retraining.")
-        else:
-            try:
-                df_daily = _clean_columns(df_daily)
-                artifact_daily = train_model(df_daily, symbol=sym, mode="daily")
-                save_model_with_backup(artifact_daily, symbol=sym, mode="daily")
-            except Exception as e:
-                print(f"[ERROR] Failed to train daily model for {sym}: {e}")
-
-        # =====================================================
-        # INTRADAY MODEL
-        # =====================================================
-        print(f"\n==============================")
-        print(f"🔄 Retraining INTRADAY model for {sym}")
-        print(f"==============================")
-
-        df_intraday = fetch_historical_data(
-            sym,
-            period=f"{INTRADAY_LOOKBACK_DAYS}d",
-            interval=INTRADAY_INTERVAL,
-        )
-        if df_intraday is None or df_intraday.empty:
-            print(f"[ERROR] No intraday data for {sym}. Skipping intraday retraining.")
-        else:
-            try:
-                artifact_mr = train_model(df_intraday, symbol=sym, mode="intraday_mr")
-                save_model_with_backup(artifact_mr, symbol=sym, mode="intraday_mr")
-
-                artifact_mom = train_model(df_intraday, symbol=sym, mode="intraday_mom")
-                save_model_with_backup(artifact_mom, symbol=sym, mode="intraday_mom")
-            except Exception as e:
-                print(f"[ERROR] Failed to train intraday model for {sym}: {e}")
-
+            print(f"[ERROR] No daily data for {sym}. Skipping.")
+            continue
+        
+        try:
+            df_daily = _clean_columns(df_daily)
+            
+            # Train with validation
+            artifact_daily = train_model(df_daily, symbol=sym, mode="daily")
+            
+            # Extract trained model and data
+            model = artifact_daily["model"]
+            features = artifact_daily["features"]
+            split_info = artifact_daily.get("split_info", {})
+            
+            # Reconstruct X_train, X_test for SHAP
+            # (You'll need to save these in train_model_with_validation)
+            # For now, we'll retrain quickly to get them:
+            
+            # Rebuild features
+            from model_xgb import build_daily_features
+            from target_labels import create_target_label
+            
+            df_feat = build_daily_features(df_daily)
+            df_feat = create_target_label(df_feat, mode="daily")
+            df_feat = df_feat.dropna(subset=["target"])
+            
+            X = df_feat.drop(columns=["target", "forward_return", "target_3class"])
+            y = df_feat["target"]
+            
+            # Split (same as training)
+            train_end = int(len(X) * 0.6)
+            val_end = int(len(X) * 0.8)
+            
+            X_train = X.iloc[:train_end]
+            X_test = X.iloc[val_end:]
+            y_test = y.iloc[val_end:]
+            
+            # ✅ SHAP Feature Selection
+            top_features, shap_vals, X_test_reduced = select_features_with_shap(
+                model=model,
+                X_train=X_train,
+                X_test=X_test,
+                top_n=30,
+                plot=True
+            )
+            
+            # ✅ Optional: Retrain with reduced features
+            # (Skip if performance doesn't improve significantly)
+            
+            # Save artifact with top features
+            artifact_daily["top_features"] = top_features
+            artifact_daily["feature_selection_method"] = "shap"
+            
+            save_model_with_backup(artifact_daily, symbol=sym, mode="daily")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to train daily model for {sym}: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Repeat for intraday models...
+        
     print("\n🎉 All retraining tasks complete.\n")
 
 

@@ -3,12 +3,54 @@ from config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
-    PDT_TIERING_ENABLED, PDT_EMERGENCY_STOP, RS_MARGIN
+    PDT_TIERING_ENABLED, PDT_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
+    MAX_POSITION_SIZE_DOLLARS
 )
 from portfolio import PortfolioManager
 from data_loader import fetch_latest_price
 from trader import get_pdt_status
 from pdt_tracker import get_opened_today_qty
+from account_cache import account_cache
+
+
+# ---------------------------------------------------------
+# Helper for position limits
+# ---------------------------------------------------------
+def apply_position_limits(qty: int, price: float, cash: float, symbol: str) -> int:
+    """
+    Apply hard position size limits to prevent over-concentration.
+    
+    Args:
+        qty: Proposed quantity to buy
+        price: Current price per share
+        cash: Available cash
+        symbol: Symbol being traded
+    
+    Returns:
+        Adjusted quantity after limits
+    """
+    if qty <= 0 or price <= 0:
+        return 0
+    
+    proposed_value = qty * price
+    
+    # Limit 1: Percentage of cash
+    max_by_pct = int((cash * MAX_POSITION_SIZE_PCT) // price)
+    
+    # Limit 2: Absolute dollar amount (if configured)
+    if MAX_POSITION_SIZE_DOLLARS is not None:
+        max_by_dollars = int(MAX_POSITION_SIZE_DOLLARS // price)
+        max_allowed = min(max_by_pct, max_by_dollars)
+    else:
+        max_allowed = max_by_pct
+    
+    # Return lesser of proposed and max allowed
+    if qty > max_allowed:
+        print(f"[RISK] {symbol}: Position size limited {qty} → {max_allowed} "
+              f"(${proposed_value:.2f} → ${max_allowed * price:.2f})")
+        return max_allowed
+    
+    return qty
 
 
 # ---------------------------------------------------------
@@ -246,6 +288,9 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         target = int(max_invest // price)
         qty = min(affordable, target)
 
+        # NEW: Apply hard limits
+        qty = apply_position_limits(qty, price, cash, symbol)
+
         if qty > 0:
             return make_decision("buy", qty, explain + f"BUY. qty={qty}")
         return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
@@ -373,14 +418,16 @@ def compute_strategy_decisions(
     # ---------------------------------------------------------
     # Fetch live state + prices (for stop/tp + funding calcs)
     # ---------------------------------------------------------
+    
+    # ✅ Fetch account state ONCE
+    account_cache.invalidate()  # Fresh data for this strategy cycle
+    account_state = account_cache.get_account()
+
     pms = {}
     prices = {}
     for sym in symbols:
         pm = PortfolioManager(sym)
-        try:
-            pm.refresh_live()
-        except:
-            pass
+
         pms[sym] = pm
         d = diagnostics.get(sym.upper()) or {}
         prices[sym] = float(d.get("price") or 0.0) or (fetch_latest_price(sym) or 0.0)
@@ -536,6 +583,10 @@ def compute_strategy_decisions(
                 decisions[sym] = make_decision("sell", int(sh), f"{sym}: Sold to fund NVDA priority buy.")
             
             max_shares = int(sim_cash // nvda_px)
+
+            # NEW: Apply limits
+            max_shares = apply_position_limits(max_shares, nvda_px, sim_cash, "NVDA")
+
             if max_shares >= 1:
                 decisions["NVDA"] = make_decision(
                     "buy",

@@ -14,6 +14,7 @@ from typing import Optional
 import joblib
 import plotly.graph_objects as go
 
+
 from config import TIMEZONE, SYMBOL, MODEL_DIR, SPY_SYMBOL, INTRADAY_WEIGHT
 from portfolio import (
     get_trade_log_file,
@@ -24,19 +25,23 @@ from trader import get_pdt_status
 from model_xgb import compute_signals
 from data_loader import fetch_historical_data, fetch_intraday_history
 
+
 # -------------------------------------------------
 # Streamlit setup
 # -------------------------------------------------
 st.set_page_config(page_title="Trading Bot Dashboard", layout="wide")
 st.title("📊 Trading Bot Dashboard")
 
+
 # -------------------------------------------------
 # MARKET STATUS BOX (Big + Color Coded)
 # -------------------------------------------------
 st.header("🕒 Market Status")
 
+
 # Fetch detailed diagnostics
 m = debug_market(return_dict=True)
+
 
 alpaca_flag = m.get("alpaca_is_open")
 within_hours = m.get("within_hours")
@@ -44,6 +49,7 @@ is_day = m.get("is_trading_day")
 open_time = m.get("market_open")
 close_time = m.get("market_close")
 ny_now = m.get("ny_time")
+
 
 # Build visual message
 if not is_day:
@@ -61,6 +67,7 @@ elif alpaca_flag and not within_hours:
 else:
     status_color = "red"
     status_text = "❌ Market CLOSED"
+
 
 # Draw Streamlit Box
 st.markdown(
@@ -81,6 +88,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # Detailed breakdown
 st.subheader("Market Diagnostics")
 c1, c2, c3 = st.columns(3)
@@ -88,12 +96,15 @@ c1.metric("NY Time", str(ny_now))
 c2.metric("Market Opens", str(open_time))
 c3.metric("Market Closes", str(close_time))
 
+
 c4, c5, c6 = st.columns(3)
 c4.metric("Trading Day", "Yes" if is_day else "No")
 c5.metric("Within Hours", "Yes" if within_hours else "No")
 c6.metric("Alpaca Clock", "OPEN" if alpaca_flag else "CLOSED")
 
+
 st.caption("🔍 Decision = what main.py will use for trading.")
+
 
 # Auto-refresh
 # Refresh full dashboard (and therefore prob_up) every 10 minutes
@@ -101,18 +112,22 @@ REFRESH_INTERVAL = 600  # seconds
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="global_refresh")
 st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL // 60} minutes.")
 
+
 # Normalize SYMBOL into list
 symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
 symbols = [s.upper() for s in symbols]
 
+
 # Optional toggle to include SPY in dashboard
 include_spy = st.checkbox(f"Include {SPY_SYMBOL} in dashboard", value=False)
+
 
 def _has_model(sym: str) -> bool:
     return (
         os.path.exists(os.path.join(MODEL_DIR, f"{sym}_daily_xgb.pkl")) or
         os.path.exists(os.path.join(MODEL_DIR, f"{sym}_intraday_xgb.pkl"))
     )
+
 
 def _has_position(sym: str) -> bool:
     try:
@@ -121,13 +136,16 @@ def _has_position(sym: str) -> bool:
     except Exception:
         return False
 
+
 spy = SPY_SYMBOL.upper()
+
 
 # Auto-include SPY if relevant, or via toggle
 if include_spy or spy in symbols or _has_model(spy) or _has_position(spy):
     if spy not in symbols:
         symbols.append(spy)
 tz = pytz.timezone(TIMEZONE)
+
 
 # -------------------------------------------------
 # Helper: safely extract Close column
@@ -150,6 +168,7 @@ def _get_close_series(df: pd.DataFrame) -> Optional[pd.Series]:
             return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
     return None
 
+
 # -------------------------------------------------
 # Helper: load model info
 # -------------------------------------------------
@@ -164,6 +183,7 @@ def load_model_info(symbol: str, mode: str) -> Optional[dict]:
         return None
     return {"metrics": data.get("metrics", {}), "trained_at": data.get("trained_at")}
 
+
 # -------------------------------------------------
 # Signal history helpers (robust)
 # -------------------------------------------------
@@ -176,24 +196,62 @@ def _signal_history_paths(sym: str):
         os.path.join(os.getcwd(), "data", f"signals_{sym}.csv"),
     ]
 
+
 def load_signal_history(sym: str) -> Optional[pd.DataFrame]:
     """
-    Load signals history from whichever location exists.
+    Load signals history with robust error handling for schema changes.
     Returns df or None.
     """
     for p in _signal_history_paths(sym):
-        if os.path.exists(p):
+        if not os.path.exists(p):
+            continue
+        
+        try:
+            # Try normal load first
+            df = pd.read_csv(p)
+            
+            # Normalize timestamp
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+                df = df.dropna(subset=["timestamp"])
+            
+            return df
+            
+        except pd.errors.ParserError as e:
+            # Handle corrupted/mismatched schema
+            st.warning(f"⚠️ {sym}: Signal log has schema mismatch. Attempting recovery...")
+            
             try:
-                df = pd.read_csv(p)
-                # normalize timestamp
+                # Try skipping bad lines
+                df = pd.read_csv(p, on_bad_lines='skip')
+                
                 if "timestamp" in df.columns:
                     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
                     df = df.dropna(subset=["timestamp"])
+                
+                st.success(f"✅ Recovered {len(df)} valid rows for {sym}")
                 return df
-            except Exception as e:
-                st.warning(f"{sym}: Failed reading signal history ({p}): {e}")
+                
+            except Exception as e2:
+                st.error(f"❌ Could not recover {sym} signal log: {e2}")
+                
+                # Offer to delete corrupted file
+                if st.button(f"🗑️ Delete corrupted signal log for {sym}", key=f"delete_signal_{sym}"):
+                    try:
+                        os.remove(p)
+                        st.success(f"Deleted {p}. Will be regenerated on next cycle.")
+                        st.rerun()
+                    except Exception as e3:
+                        st.error(f"Failed to delete: {e3}")
+                
                 return None
+                
+        except Exception as e:
+            st.warning(f"{sym}: Failed reading signal history ({p}): {e}")
+            return None
+    
     return None
+
 
 # -------------------------------------------------
 # PORTFOLIO SUMMARY
@@ -207,14 +265,17 @@ for sym in symbols:
         last_price = live["last_price"]
         value = cash + shares * last_price
 
+
         st.subheader(f"Live Portfolio ({sym})")
         c1, c2, c3 = st.columns(3)
         c1.metric("Cash", f"${cash:,.2f}")
         c2.metric("Shares", f"{shares:,.2f}")
         c3.metric("Value", f"${value:,.2f}")
 
+
     except Exception as e:
         st.error(f"Error fetching live Alpaca data for {sym}: {e}")
+
 
 # -------------------------------------------------
 # PDT STATUS
@@ -237,10 +298,12 @@ if pdt:
 else:
     st.info("Unable to fetch PDT status.")
 
+
 # -------------------------------------------------
 # MODEL SIGNALS
 # -------------------------------------------------
 st.header("📡 Model Signals & Price Charts")
+
 
 for sym in symbols:
     st.subheader(f"Signals for {sym}")
@@ -250,14 +313,17 @@ for sym in symbols:
         st.warning(f"{sym}: error computing signals — {e}")
         continue
 
+
     if not sig or sig.get("final_prob") is None:
         st.info(f"{sym}: No valid prediction available.")
         continue
+
 
     daily_p = sig.get("daily_prob")
     intra_p = sig.get("intraday_prob")
     final_p = sig.get("final_prob")
     weight = sig.get("intraday_weight", 0.65)
+
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Final prob_up", f"{final_p:.3f}")
@@ -266,10 +332,12 @@ for sym in symbols:
     col4.metric("Intraday weight", f"{weight:.2f}")
     st.progress(max(0.0, min(final_p, 1.0)))
 
+
     # -----------------------------
     # Regime badge + quick intraday diagnostics
     # -----------------------------
     model_used = sig.get("intraday_model_used") or "intraday"
+
 
     # Badge mapping
     mu = str(model_used).lower()
@@ -282,6 +350,7 @@ for sym in symbols:
     else:
         regime_text = f"🧠 Intraday (legacy): {model_used}"
         regime_color = "#6c757d"
+
 
     st.markdown(
         f"""
@@ -302,6 +371,7 @@ for sym in symbols:
         unsafe_allow_html=True,
     )
 
+
     # Optional: show vol/mom inline (super useful when debugging regime switches)
     vol = sig.get("intraday_vol")
     mom = sig.get("intraday_mom")
@@ -309,6 +379,7 @@ for sym in symbols:
         vol_s = "N/A" if vol is None else f"{float(vol):.5f}"
         mom_s = "N/A" if mom is None else f"{float(mom)*100:.2f}%"
         st.caption(f"Intraday diagnostics → vol={vol_s} | mom(≈2h)={mom_s}")
+
 
     # -----------------------------
     # Tiny improvement: show dp/ip divergence + which intraday model was used
@@ -321,10 +392,12 @@ for sym in symbols:
         except Exception:
             div = None
 
+
     if div is not None:
         st.caption(f"Δ (ip - dp) = {div:+.3f} | intraday model: {model_used}")
     else:
         st.caption(f"intraday model: {model_used}")
+
 
     pretty_model = {
         "intraday_mom": "📈 Momentum intraday",
@@ -332,19 +405,23 @@ for sym in symbols:
         "intraday": "🧠 Legacy intraday",
     }.get(model_used, model_used)
 
+
     # -----------------------------
     # Store points for divergence chart (session-level, bounded, dedup per refresh)
     # -----------------------------
     if "divergence_points" not in st.session_state:
         st.session_state["divergence_points"] = []
 
+
     # Use refresh key so we don't append duplicates on Streamlit reruns
     refresh_key = f"{sym}:{st.session_state.get('global_refresh', 0)}"
     if "divergence_seen" not in st.session_state:
         st.session_state["divergence_seen"] = set()
 
+
     if refresh_key not in st.session_state["divergence_seen"]:
         st.session_state["divergence_seen"].add(refresh_key)
+
 
         st.session_state["divergence_points"].append({
             "time": pd.Timestamp.utcnow(),
@@ -356,20 +433,25 @@ for sym in symbols:
             "model": pretty_model,
         })
 
+
         # keep last N points overall (prevents memory growth)
         MAX_POINTS = 500
         if len(st.session_state["divergence_points"]) > MAX_POINTS:
             st.session_state["divergence_points"] = st.session_state["divergence_points"][-MAX_POINTS:]
+
 
     # -------------------------------------------------
     # MODEL VALIDATION + FRESHNESS
     # -------------------------------------------------
     with st.expander(f"📘 {sym} Model Validation & Freshness"):
 
+
         info_daily = load_model_info(sym, "daily")
         info_intra = load_model_info(sym, "intraday")
 
+
         c_md1, c_md2 = st.columns(2)
+
 
         def show_model_block(container, label, info):
             container.markdown(f"### **{label} Model**")
@@ -377,11 +459,14 @@ for sym in symbols:
                 container.caption("No saved model found.")
                 return None
 
+
             metrics = info.get("metrics", {})
             trained_at = info.get("trained_at")
 
+
             if trained_at:
                 container.caption(f"Trained at: `{trained_at}`")
+
 
             age_days = None
             if trained_at:
@@ -397,6 +482,7 @@ for sym in symbols:
                     else:
                         status = "🟢 Fresh ✓"
                         color = "green"
+
 
                     container.markdown(
                         f"""
@@ -414,26 +500,33 @@ for sym in symbols:
                 except:
                     pass
 
+
             for key in ["accuracy", "logloss", "roc_auc", "precision", "recall", "f1"]:
                 container.write(f"- **{key}**: `{metrics.get(key)}`")
+
 
             cm = metrics.get("confusion_matrix")
             if cm:
                 container.write(f"- **Confusion Matrix**: `{cm}`")
 
+
             return {"accuracy": metrics.get("accuracy"), "logloss": metrics.get("logloss"), "age": age_days}
+
 
         daily_stats = show_model_block(c_md1, "Daily", info_daily)
         intra_stats = show_model_block(c_md2, "Intraday", info_intra)
+
 
         if "model_compare" not in st.session_state:
             st.session_state["model_compare"] = {}
         st.session_state["model_compare"][sym] = {"daily": daily_stats, "intraday": intra_stats}
 
+
 # -------------------------------------------------
 # DIVERGENCE: dp vs ip
 # -------------------------------------------------
 st.subheader("📉 Daily vs Intraday Divergence (ip - dp)")
+
 
 pts = st.session_state.get("divergence_points", [])
 if not pts:
@@ -441,16 +534,20 @@ if not pts:
 else:
     dfd = pd.DataFrame(pts)
 
+
     # safety: ensure columns exist
     for col in ["time", "symbol", "dp", "ip", "divergence", "weight", "model"]:
         if col not in dfd.columns:
             dfd[col] = None
 
+
     dfd["time"] = pd.to_datetime(dfd["time"], utc=True, errors="coerce")
     dfd = dfd.dropna(subset=["time", "symbol"]).sort_values("time")
 
+
     # Optional: keep last N points for plotting
     dfd = dfd.tail(300)
+
 
     # show latest snapshot table
     latest = (
@@ -460,8 +557,10 @@ else:
            .copy()
     )
 
+
     latest = latest[["symbol", "dp", "ip", "divergence", "weight", "model"]].sort_values("symbol")
     st.dataframe(latest, use_container_width=True)
+
 
     # plot divergence over time
     fig = go.Figure()
@@ -471,6 +570,7 @@ else:
         sub = sub.dropna(subset=["divergence"])
         if sub.empty:
             continue
+
 
         fig.add_trace(go.Scatter(
             x=sub["time"],
@@ -483,8 +583,10 @@ else:
             ),
         ))
 
+
     # zero line
     fig.add_hline(y=0, line_width=1, line_dash="dash")
+
 
     fig.update_layout(
         height=360,
@@ -494,18 +596,24 @@ else:
         hovermode="x unified",
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+
+    st.plotly_chart(fig, use_container_width=True, key="divergence_chart")
+
 
 # -------------------------------------------------
 # GLOBAL MODEL COMPARISON — NOW HIDE/SHOW
 # -------------------------------------------------
 st.header("📊 Model Comparison Across Symbols")
 
+
 show_compare = st.checkbox("Show model comparison charts", value=False)
+
 
 model_compare = st.session_state.get("model_compare", {})
 
+
 if show_compare and model_compare:
+
 
     chart_data = []
     for sym, vals in model_compare.items():
@@ -516,9 +624,12 @@ if show_compare and model_compare:
         if i:
             chart_data.append([sym, "Intraday", i["accuracy"], i["logloss"]])
 
+
     df_chart = pd.DataFrame(chart_data, columns=["Symbol", "Mode", "Accuracy", "Logloss"])
 
+
     colA, colB = st.columns(2)
+
 
     # Accuracy Chart
     with colA:
@@ -533,6 +644,7 @@ if show_compare and model_compare:
         ax.grid(True, alpha=0.2)
         st.pyplot(fig)
 
+
     # Logloss Chart
     with colB:
         st.subheader("Logloss Comparison")
@@ -545,60 +657,68 @@ if show_compare and model_compare:
         ax.grid(True, alpha=0.2)
         st.pyplot(fig)
 
-    # Price charts…
-    for sym in symbols:
-        st.subheader(f"📈 Price Charts for {sym}")
 
-        col_price1, col_price2 = st.columns(2)
+# Price charts
+for sym in symbols:
+    st.subheader(f"📈 Price Charts for {sym}")
 
-        with col_price1:
-            try:
-                df_daily = fetch_historical_data(sym, period="6mo", interval="1d")
-                if df_daily is not None and not df_daily.empty:
-                    s = _get_close_series(df_daily)
-                    if s is not None:
-                        fig, ax = plt.subplots(figsize=(5, 3))
-                        ax.plot(s.index, s.values, marker="o", linewidth=1)
-                        ax.set_title(f"{sym} Daily Close (6 months)")
-                        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-                        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-                        plt.xticks(rotation=45)
-                        st.pyplot(fig)
-                    else:
-                        st.caption("Daily Close column missing.")
-            except Exception as e:
-                st.error(f"Daily chart error: {e}")
 
-        with col_price2:
-            try:
-                df_intra = fetch_intraday_history(sym, lookback_minutes=300)
-                if df_intra is not None and not df_intra.empty:
-                    s = _get_close_series(df_intra)
-                    if s is not None:
-                        fig, ax = plt.subplots(figsize=(5, 3))
-                        ax.plot(s.index, s.values, linewidth=1)
-                        ax.set_title(f"{sym} Intraday Close")
-                        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-                        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-                        plt.xticks(rotation=45)
-                        st.pyplot(fig)
-                    else:
-                        st.caption("Intraday Close column missing.")
-            except Exception as e:
-                st.error(f"Intraday chart error: {e}")
+    col_price1, col_price2 = st.columns(2)
+
+
+    with col_price1:
+        try:
+            df_daily = fetch_historical_data(sym, period="6mo", interval="1d")
+            if df_daily is not None and not df_daily.empty:
+                s = _get_close_series(df_daily)
+                if s is not None:
+                    fig, ax = plt.subplots(figsize=(5, 3))
+                    ax.plot(s.index, s.values, marker="o", linewidth=1)
+                    ax.set_title(f"{sym} Daily Close (6 months)")
+                    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+                    plt.xticks(rotation=45)
+                    st.pyplot(fig)
+                else:
+                    st.caption("Daily Close column missing.")
+        except Exception as e:
+            st.error(f"Daily chart error: {e}")
+
+
+    with col_price2:
+        try:
+            df_intra = fetch_intraday_history(sym, lookback_minutes=300)
+            if df_intra is not None and not df_intra.empty:
+                s = _get_close_series(df_intra)
+                if s is not None:
+                    fig, ax = plt.subplots(figsize=(5, 3))
+                    ax.plot(s.index, s.values, linewidth=1)
+                    ax.set_title(f"{sym} Intraday Close")
+                    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                    plt.xticks(rotation=45)
+                    st.pyplot(fig)
+                else:
+                    st.caption("Intraday Close column missing.")
+        except Exception as e:
+            st.error(f"Intraday chart error: {e}")
+
 
 # -------------------------------------------------
 # TRADE LOGS & TRADE ANALYTICS
 # -------------------------------------------------
 st.header("💼 Trade Logs & Analytics")
 
+
 for sym in symbols:
     st.subheader(f"🔎 Trades for {sym}")
     path = get_trade_log_file(sym)
 
+
     if not os.path.exists(path):
         st.info(f"No trade log found for {sym}.")
         continue
+
 
     df = pd.read_csv(path)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
@@ -606,19 +726,17 @@ for sym in symbols:
     df["local_time"] = df["timestamp"].dt.tz_convert(tz)
     df["local_str"] = df["local_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
+
     st.dataframe(df.sort_values("local_time", ascending=False), use_container_width=True)
 
-    # ----------------------------------
-    # VALUE OVER TIME PER SYMBOL
-    # ----------------------------------
-    # ----------------------------------
+
     # VALUE OVER TIME PER SYMBOL (Plotly)
-    # ----------------------------------
     if "value" in df.columns:
         try:
             dfp = df.sort_values("local_time").copy()
             # Interactive Plotly line + markers
             fig = go.Figure()
+
 
             fig.add_trace(
                 go.Scatter(
@@ -633,6 +751,7 @@ for sym in symbols:
                 )
             )
 
+
             fig.update_layout(
                 title=f"{sym} Portfolio Value (per trade)",
                 xaxis_title="Time",
@@ -642,27 +761,32 @@ for sym in symbols:
                 template="plotly_white",
             )
 
+
             # optional: show y as dollars with thousands separator
             fig.update_yaxes(tickprefix="$", separatethousands=True)
 
-            st.plotly_chart(fig, use_container_width=True)
+
+            st.plotly_chart(fig, use_container_width=True, key=f"value_chart_{sym}")
+
 
         except Exception as e:
             st.warning(f"Could not plot value chart: {e}")
 
-    # ----------------------------------
-    # TRADE ANALYTICS (bullet-proof: derive exec_qty from shares_before/after)
-    # ----------------------------------
+
+    # TRADE ANALYTICS
     if not df.empty:
         df = df.copy()
+
 
         # ---- coerce types safely ----
         df["action"] = df["action"].astype(str).str.lower().str.strip()
         df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
         df["timestamp"] = pd.to_datetime(df.get("timestamp"), utc=True, errors="coerce")
 
+
         # shares column in your CSV is "shares AFTER this trade"
         df["shares"] = pd.to_numeric(df.get("shares"), errors="coerce")
+
 
         # optional new columns if you add them later
         if "shares_before" in df.columns:
@@ -670,19 +794,23 @@ for sym in symbols:
         if "shares_after" in df.columns:
             df["shares_after"] = pd.to_numeric(df["shares_after"], errors="coerce")
 
+
         df = df.dropna(subset=["timestamp", "action", "price", "shares"])
+
 
         # ---- build shares_before / shares_after ----
         df = df.sort_values("timestamp").copy()
 
+
         if "shares_after" not in df.columns:
             df["shares_after"] = df["shares"]
+
 
         if "shares_before" not in df.columns:
             df["shares_before"] = df["shares_after"].shift(1).fillna(0.0)
 
+
         # ---- derive executed quantity from share deltas ----
-        # This fixes logs where qty is wrong (e.g., SPY sell qty=0).
         def _exec_qty(r):
             sb = float(r["shares_before"])
             sa = float(r["shares_after"])
@@ -692,16 +820,18 @@ for sym in symbols:
                 return max(0.0, sb - sa)
             return 0.0
 
+
         df["exec_qty"] = df.apply(_exec_qty, axis=1)
 
-        # drop rows that don’t change position (bad logs / duplicates / no fills)
+
+        # drop rows that don't change position
         df = df[df["exec_qty"] > 0].copy()
+
 
         if df.empty:
             st.info("No filled trades detected (position never changed).")
         else:
             # ---- cashflow from executed qty ----
-            # BUY consumes cash (negative), SELL returns cash (positive)
             df["cashflow"] = df.apply(
                 lambda r: -(r["exec_qty"] * r["price"]) if r["action"] == "buy"
                 else +(r["exec_qty"] * r["price"]) if r["action"] == "sell"
@@ -709,27 +839,33 @@ for sym in symbols:
                 axis=1,
             )
 
+
             # ---- cycle detection: flat -> in position -> flat ----
             EPS = 1e-9
             cycle_pnls = []
             in_cycle = False
             running = 0.0
 
+
             for _, r in df.iterrows():
                 sb = float(r["shares_before"])
                 sa = float(r["shares_after"])
                 cf = float(r["cashflow"])
 
+
                 was_flat = abs(sb) <= EPS
                 now_flat = abs(sa) <= EPS
+
 
                 # start cycle
                 if (not in_cycle) and was_flat and (not now_flat):
                     in_cycle = True
                     running = 0.0
 
+
                 if in_cycle:
                     running += cf
+
 
                 # end cycle (position fully closed)
                 if in_cycle and (not was_flat) and now_flat:
@@ -737,13 +873,16 @@ for sym in symbols:
                     in_cycle = False
                     running = 0.0
 
+
             if not cycle_pnls:
                 st.info("Not enough closed trades (need flat → position → flat).")
             else:
                 s = pd.Series(cycle_pnls, dtype=float)
 
+
                 gross_profit = float(s[s > 0].sum())
-                gross_loss = float(-s[s < 0].sum())  # positive number
+                gross_loss = float(-s[s < 0].sum())
+
 
                 win_rate = float((s > 0).mean() * 100.0)
                 avg_win = float(s[s > 0].mean()) if (s > 0).any() else 0.0
@@ -751,7 +890,8 @@ for sym in symbols:
                 largest_win = float(s.max())
                 largest_loss = float(s.min())
 
-                # Profit factor: handle no-loss case cleanly
+
+                # Profit factor
                 if gross_loss > 0:
                     profit_factor = gross_profit / gross_loss
                     pf_str = f"{profit_factor:.2f}"
@@ -759,28 +899,34 @@ for sym in symbols:
                     profit_factor = float("inf")
                     pf_str = "∞"
 
+
                 cA, cB, cC, cD = st.columns(4)
                 cA.metric("Win Rate", f"{win_rate:.1f}%")
                 cB.metric("Profit Factor", pf_str)
                 cC.metric("Avg Win / Loss", f"{avg_win:.2f} / {avg_loss:.2f}")
                 cD.metric("Largest Win / Loss", f"{largest_win:.2f} / {largest_loss:.2f}")
 
+
                 with st.expander("🔍 Closed-trade cycle PnLs (debug)"):
                     st.dataframe(pd.DataFrame({"cycle_pnl": s}))
+
 
 # -------------------------------------------------
 # Price vs Model PERFORMANCE (with trade markers)
 # -------------------------------------------------
 st.header("📈 Price vs Model Probability (with Buy/Sell Markers)")
 
+
 for sym in symbols:
-    path = f"logs/signals_{sym}.csv"
-    if not os.path.exists(path):
+    # Use robust loader
+    df = load_signal_history(sym)
+    
+    if df is None or df.empty:
         st.info(f"No signal history for {sym}")
         continue
-
-    df = pd.read_csv(path, parse_dates=["timestamp"])
+    
     df = df.sort_values("timestamp").tail(300)
+
 
     # ---- Load trades (optional) ----
     trade_path = get_trade_log_file(sym)
@@ -797,33 +943,41 @@ for sym in symbols:
         except Exception:
             df_tr = None
 
+
     fig = go.Figure()
 
+
     # ---- PRICE (left axis)
-    fig.add_trace(go.Scatter(
-        x=df["timestamp"],
-        y=df["price"],
-        name="Price",
-        line=dict(color="black", width=2),
-        yaxis="y1",
-        hovertemplate="Price: %{y:.2f}<extra></extra>",
-    ))
-
-    # ---- FINAL PROBABILITY (right axis)
-    fig.add_trace(go.Scatter(
-        x=df["timestamp"],
-        y=df["final_prob"],
-        name="Final Probability",
-        line=dict(color="blue", width=2),
-        yaxis="y2",
-        hovertemplate="Final prob: %{y:.3f}<extra></extra>",
-    ))
-
-    # Optional: intraday vs daily
-    if "intraday_prob" in df.columns:
+    if "price" in df.columns:
         fig.add_trace(go.Scatter(
             x=df["timestamp"],
-            y=df["intraday_prob"],
+            y=df["price"],
+            name="Price",
+            line=dict(color="black", width=2),
+            yaxis="y1",
+            hovertemplate="Price: %{y:.2f}<extra></extra>",
+        ))
+
+
+    # ---- FINAL PROBABILITY (right axis)
+    if "finalprob" in df.columns or "final_prob" in df.columns:
+        prob_col = "finalprob" if "finalprob" in df.columns else "final_prob"
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"],
+            y=df[prob_col],
+            name="Final Probability",
+            line=dict(color="blue", width=2),
+            yaxis="y2",
+            hovertemplate="Final prob: %{y:.3f}<extra></extra>",
+        ))
+
+
+    # Optional: intraday vs daily
+    if "intradayprob" in df.columns or "intraday_prob" in df.columns:
+        ip_col = "intradayprob" if "intradayprob" in df.columns else "intraday_prob"
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"],
+            y=df[ip_col],
             name="Intraday Prob",
             line=dict(color="orange", dash="dot"),
             yaxis="y2",
@@ -831,10 +985,12 @@ for sym in symbols:
             hovertemplate="Intraday prob: %{y:.3f}<extra></extra>",
         ))
 
-    if "daily_prob" in df.columns:
+
+    if "dailyprob" in df.columns or "daily_prob" in df.columns:
+        dp_col = "dailyprob" if "dailyprob" in df.columns else "daily_prob"
         fig.add_trace(go.Scatter(
             x=df["timestamp"],
-            y=df["daily_prob"],
+            y=df[dp_col],
             name="Daily Prob",
             line=dict(color="green", dash="dash"),
             yaxis="y2",
@@ -842,10 +998,12 @@ for sym in symbols:
             hovertemplate="Daily prob: %{y:.3f}<extra></extra>",
         ))
 
+
     # ---- BUY/SELL MARKERS (on price axis)
     if df_tr is not None and not df_tr.empty:
         buys = df_tr[df_tr["action"] == "buy"].copy()
         sells = df_tr[df_tr["action"] == "sell"].copy()
+
 
         if not buys.empty:
             fig.add_trace(go.Scatter(
@@ -864,6 +1022,7 @@ for sym in symbols:
                 ),
             ))
 
+
         if not sells.empty:
             fig.add_trace(go.Scatter(
                 x=sells["timestamp"],
@@ -881,6 +1040,7 @@ for sym in symbols:
                 ),
             ))
 
+
     fig.update_layout(
         title=f"{sym} — Price vs Probability",
         height=420,
@@ -896,20 +1056,25 @@ for sym in symbols:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
 
-    st.plotly_chart(fig, use_container_width=True)
-    
+
+    st.plotly_chart(fig, use_container_width=True, key=f"price_prob_chart_{sym}")
+
+
 # -------------------------------------------------
-# TOTAL DAILY PORTFOLIO PERFORMANCE (DUAL EQUITY CURVES)
+# TOTAL DAILY PORTFOLIO PERFORMANCE
 # -------------------------------------------------
 st.header("📈 Total Portfolio Performance (All Symbols Combined)")
+
 
 show_bot_only = st.checkbox("Show Bot-Only Equity (PnL curve)", value=True)
 show_total_equity = st.checkbox("Show Total Equity (includes deposits/withdrawals)", value=True)
 show_markers = st.checkbox("Show deposit/withdrawal markers", value=True)
 
-# ---- Load daily portfolio PnL file ----
+
+# Load daily portfolio PnL file
 portfolio_path = get_daily_portfolio_file()
 deposit_path = os.path.join(os.path.dirname(portfolio_path), "deposits.csv")
+
 
 df_dep = None
 if os.path.exists(deposit_path):
@@ -918,24 +1083,29 @@ if os.path.exists(deposit_path):
 else:
     st.info("ℹ️ No deposits.csv found — only showing PnL performance.")
 
+
 if os.path.exists(portfolio_path):
     df = pd.read_csv(portfolio_path)
+
 
     if df.empty:
         st.warning("Daily portfolio is empty.")
     else:
-        # ---- Normalize ----
+        # Normalize
         df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert(tz)
         df = df.sort_values("date")
+
 
         # PnL-only curve
         df["pnl_value"] = df["value"]
         V0 = df["pnl_value"].iloc[0]
         VT = df["pnl_value"].iloc[-1]
 
+
         days = max((df["date"].iloc[-1] - df["date"].iloc[0]).days, 1)
         cumulative_return = VT / V0 - 1
         annualized_return = (VT / V0) ** (365 / days) - 1
+
 
         df["ret"] = df["pnl_value"].pct_change()
         daily_vol = df["ret"].std()
@@ -944,10 +1114,12 @@ if os.path.exists(portfolio_path):
             if daily_vol and daily_vol > 0 else float("nan")
         )
 
+
         c1, c2, c3 = st.columns(3)
         c1.metric("Cumulative Return (PnL-only)", f"{cumulative_return*100:.2f}%")
         c2.metric("Annualized Return (PnL-only)", f"{annualized_return*100:.2f}%")
         c3.metric("Sharpe Ratio (PnL-only)", f"{sharpe:.2f}")
+
 
         # Total equity (adds deposits/withdrawals)
         df["total_equity"] = df["pnl_value"]
@@ -958,13 +1130,12 @@ if os.path.exists(portfolio_path):
                 amount = row["amount"]
                 df.loc[df["date"] >= dep_date, "total_equity"] += amount
 
-        # ---------------------------------------
-        # 📈 Dual Curve Chart + Markers (Plotly)
-        # ---------------------------------------
 
+        # Dual Curve Chart + Markers (Plotly)
         fig = go.Figure()
 
-        # --- PnL-only curve ---
+
+        # PnL-only curve
         if show_bot_only:
             fig.add_trace(go.Scatter(
                 x=df["date"],
@@ -980,7 +1151,8 @@ if os.path.exists(portfolio_path):
                 ),
             ))
 
-        # --- Total equity (with deposits) ---
+
+        # Total equity (with deposits)
         if show_total_equity:
             fig.add_trace(go.Scatter(
                 x=df["date"],
@@ -996,26 +1168,31 @@ if os.path.exists(portfolio_path):
                 ),
             ))
 
+
         # Determine dynamic Y-axis label
         if show_bot_only and not show_total_equity:
             y_axis_label = "PnL-Only Equity ($)"
         elif show_total_equity and not show_bot_only:
             y_axis_label = "Total Equity ($)"
         elif show_bot_only and show_total_equity:
-            y_axis_label = "Value ($)"        # both curves displayed
+            y_axis_label = "Value ($)"
         else:
-            y_axis_label = ""  # no curves selected
+            y_axis_label = ""
 
-        # ---- Deposit / Withdrawal Markers ----
-        if df_dep is not None and not df_dep.empty:
+
+        # Deposit / Withdrawal Markers
+        if show_markers and df_dep is not None and not df_dep.empty:
             target_tz = df["date"].dt.tz
+
 
             has_dep_legend = False
             has_wdr_legend = False
 
+
             for _, row in df_dep.iterrows():
                 dep_t = row["date"]
                 amount = float(row["amount"])
+
 
                 if target_tz is not None:
                     if dep_t.tzinfo is None:
@@ -1023,12 +1200,15 @@ if os.path.exists(portfolio_path):
                     else:
                         dep_t = dep_t.tz_convert(target_tz)
 
+
                 nearest_idx = (df["date"] - dep_t).abs().idxmin()
                 nearest_date = df.loc[nearest_idx, "date"]
                 nearest_value = df.loc[nearest_idx, "total_equity"]
 
+
                 is_dep = amount > 0
                 name = "Deposit" if is_dep else "Withdrawal"
+
 
                 showlegend = False
                 if is_dep and not has_dep_legend:
@@ -1037,6 +1217,7 @@ if os.path.exists(portfolio_path):
                 elif not is_dep and not has_wdr_legend:
                     showlegend = True
                     has_wdr_legend = True
+
 
                 fig.add_trace(go.Scatter(
                     x=[nearest_date],
@@ -1059,6 +1240,7 @@ if os.path.exists(portfolio_path):
                     )
                 ))
 
+
         # Layout with dynamic Y-label
         fig.update_layout(
             title="PnL vs Total Account Equity",
@@ -1069,15 +1251,16 @@ if os.path.exists(portfolio_path):
             height=450,
         )
 
-        st.plotly_chart(fig, use_container_width=True)
 
-        # ---------------------------------------
-        # 💵 Deposits / Withdrawals Log
-        # ---------------------------------------
+        st.plotly_chart(fig, use_container_width=True, key="portfolio_chart")
+
+
+        # Deposits / Withdrawals Log
         if df_dep is not None:
             st.subheader("💵 Deposits / Withdrawals Log")
 
-            # Convert timezone → strip time → format YYYY-MM-DD
+
+            # Convert timezone
             df_dep["display_date"] = (
                 df_dep["date"]
                     .dt.tz_convert(tz)
@@ -1085,11 +1268,13 @@ if os.path.exists(portfolio_path):
                     .dt.strftime("%Y-%m-%d")
             )
 
+
             st.dataframe(
                 df_dep[["display_date", "amount"]]
                     .rename(columns={"display_date": "Date", "amount": "Amount ($)"}),
                 use_container_width=True
             )
+
 
 else:
     st.info("No daily portfolio file found. Run update_portfolio_data.py.")

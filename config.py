@@ -86,6 +86,12 @@ TRAIL_STOP = 0.96        # trailing stop vs max_price since entry (e.g., 0.97 = 
 TRAIL_ACTIVATE = 1.05   # ✅ activate trailing only after +5% profit
 RISK_FRACTION = 0.5     # default: invest or sell 50%
 
+# NEW: Hard limits (always enforced)
+MAX_POSITION_SIZE_PCT = 0.90  # Never invest >90% in single symbol
+MAX_POSITION_SIZE_DOLLARS = None  # Optional: Set to dollar amount like 50000
+
+MIN_RETURN_THRESHOLD = 0.002  # 0.2% - must beat transaction costs
+
 # PDT-aware stop tiers (only relevant if equity < 25k and dt_api >= 3)
 PDT_TIERING_ENABLED = True
 

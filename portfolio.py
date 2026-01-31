@@ -8,6 +8,7 @@ import pytz
 
 from config import PORTFOLIO_PATH, TIMEZONE
 from broker import api_market
+from account_cache import account_cache
 
 
 # ============================================================
@@ -40,41 +41,35 @@ def get_daily_portfolio_file():
 # ============================================================
 
 def get_live_portfolio(symbol):
-    """Fetch live Alpaca portfolio for a symbol."""
+    """Fetch live Alpaca portfolio for a symbol (using cache)."""
     symbol = symbol.upper()
-
+    
     try:
-        account = api_market.get_account()
-        positions = api_market.list_positions()
-        cash = float(account.cash)
-    except Exception:
+        cache = account_cache.get_account()
+        cash = cache.get("cash", 0.0)
+        
+        # Find position from cached list
+        position = account_cache.get_position(symbol)
+        
+        if position:
+            shares = float(getattr(position, "qty", 0.0) or 0.0)
+            last_price = float(getattr(position, "current_price", 0.0) or 0.0)
+            avg_price = float(getattr(position, "avg_entry_price", 0.0) or 0.0)
+        else:
+            shares = 0.0
+            last_price = 0.0
+            avg_price = 0.0
+        
+        return {
+            "cash": cash,
+            "shares": shares,
+            "last_price": last_price,
+            "avg_price": avg_price
+        }
+        
+    except Exception as e:
+        print(f"[WARN] get_live_portfolio({symbol}) failed: {e}")
         return {"cash": 0.0, "shares": 0.0, "last_price": 0.0, "avg_price": 0.0}
-
-    shares = 0.0
-    last_price = 0.0
-    avg_price = 0.0
-
-    for p in positions:
-        if str(getattr(p, "symbol", "")).upper() == symbol:
-            try:
-                shares = float(getattr(p, "qty", 0.0) or 0.0)
-            except Exception:
-                shares = 0.0
-
-            try:
-                last_price = float(getattr(p, "current_price", 0.0) or 0.0)
-            except Exception:
-                last_price = 0.0
-
-            # Prefer Alpaca avg entry price (this is the key fix)
-            try:
-                avg_price = float(getattr(p, "avg_entry_price", 0.0) or 0.0)
-            except Exception:
-                avg_price = 0.0
-
-            break
-
-    return {"cash": cash, "shares": shares, "last_price": last_price, "avg_price": avg_price}
 
 
 # ============================================================
@@ -266,7 +261,7 @@ class PortfolioManager:
                 shares_after = 0.0
 
             self.data["shares"] = shares_after
-            
+
 
             # reset when flat
             if self.data["shares"] <= 0:
