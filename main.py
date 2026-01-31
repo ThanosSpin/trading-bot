@@ -535,10 +535,10 @@ def main():
     debug_market()
 
 
-    # # Optional market-hours guard
-    # if not is_market_open():
-    #     print("⏳ Market is closed. Exiting.")
-    #     return
+    # Optional market-hours guard
+    if not is_market_open():
+        print("⏳ Market is closed. Exiting.")
+        return
 
 
     # PDT Display
