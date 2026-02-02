@@ -92,6 +92,11 @@ MAX_POSITION_SIZE_DOLLARS = None  # Optional: Set to dollar amount like 50000
 
 MIN_RETURN_THRESHOLD = 0.002  # 0.2% - must beat transaction costs
 
+# DIP-BUY OVERRIDE: 100% capital if high conviction + dip
+DIP_BUY_ENABLED = True
+DIP_BUY_MIN_PROB = 0.75
+DIP_BUY_THRESHOLD = 0.015
+
 # PDT-aware stop tiers (only relevant if equity < 25k and dt_api >= 3)
 PDT_TIERING_ENABLED = True
 
