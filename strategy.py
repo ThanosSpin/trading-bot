@@ -4,7 +4,7 @@ from config import (
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
     PDT_TIERING_ENABLED, PDT_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
-    MAX_POSITION_SIZE_DOLLARS
+    MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB
 )
 from portfolio import PortfolioManager
 from data_loader import fetch_latest_price
@@ -12,6 +12,39 @@ from trader import get_pdt_status
 from pdt_tracker import get_opened_today_qty
 from account_cache import account_cache
 
+
+# ---------------------------------------------------------
+# Helper for afterhours_dip
+# ---------------------------------------------------------
+def detect_afterhours_dip(sym: str, threshold: float = 0.015) -> bool:
+    """
+    Returns True if stock dropped >= threshold after market close.
+    Compares current pre-market price vs yesterday's close.
+    """
+    try:
+        from data_loader import fetch_historical_data, fetch_latest_price
+        
+        # Get yesterday's close
+        df = fetch_historical_data(sym, period="5d", interval="1d")
+        if df is None or len(df) < 1:
+            return False
+        
+        last_close = float(df["Close"].iloc[-1])
+        
+        # Get current price (pre-market or live)
+        current = fetch_latest_price(sym)
+        if current is None:
+            return False
+        
+        drop_pct = (current - last_close) / last_close
+        
+        print(f"[DIP] {sym} close={last_close:.2f} current={current:.2f} drop={drop_pct:.2%}")
+        
+        return drop_pct <= -threshold  # True if dropped >= 1.5%
+        
+    except Exception as e:
+        print(f"[ERROR] detect_afterhours_dip: {e}")
+        return False
 
 # ---------------------------------------------------------
 # Helper for position limits
@@ -844,5 +877,58 @@ def compute_strategy_decisions(
             decisions[spy_sym] = spy_candidate
         else:
             decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
+    
+    # ============================================================
+    # 🔥 DIP-BUY BLOCK
+    # ============================================================
+    
+    def detect_afterhours_dip(sym: str, threshold: float = 0.015) -> bool:
+        """Check if stock dropped >= threshold since yesterday close."""
+        try:
+            from data_loader import fetch_historical_data, fetch_latest_price
+            
+            df = fetch_historical_data(sym, period="5d", interval="1d")
+            if df is None or len(df) < 1:
+                return False
+            
+            last_close = float(df["Close"].iloc[-1])
+            current = fetch_latest_price(sym)
+            if current is None:
+                return False
+            
+            drop_pct = (current - last_close) / last_close
+            print(f"[DIP] {sym} close={last_close:.2f} current={current:.2f} drop={drop_pct:.2%}")
+            
+            return drop_pct <= -threshold
+            
+        except Exception as e:
+            print(f"[ERROR] detect_afterhours_dip: {e}")
+            return False
+    
+    if DIP_BUY_ENABLED:
+        for sym, decision in decisions.items():
+            if decision.get("action") == "buy":
+                prob = preds.get(sym, 0.0)
+                
+                if prob >= DIP_BUY_MIN_PROB:
+                    if detect_afterhours_dip(sym, threshold=DIP_BUY_THRESHOLD):
+                        
+                        print(f"🚀 [DIP-BUY] {sym} prob={prob:.2f} + dip → 100% capital override!")
+                        
+                        try:
+                            price = prices.get(sym, 0.0) or fetch_latest_price(sym) or 0.0
+                            if price > 0:
+                                pm = pms.get(sym)
+                                if pm:
+                                    cash = float(pm.data.get("cash", 0.0))
+                                    new_qty = int(cash * 0.98 / price)
+                                    
+                                    if new_qty > decision.get("qty", 0):
+                                        old_qty = decision.get("qty", 0)
+                                        decision["qty"] = new_qty
+                                        decision["explain"] = f"{decision.get('explain', '')} [DIP-BUY 100%]"
+                                        print(f"   → {old_qty} → {new_qty} shares")
+                        except Exception as e:
+                            print(f"[ERROR] Dip-buy: {e}")
 
     return decisions
