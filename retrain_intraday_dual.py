@@ -12,12 +12,17 @@ INTRADAY_LOOKBACK_DAYS = 60
 INTRADAY_INTERVAL = "15m"
 
 def _save_artifact(artifact, symbol: str, mode: str):
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
+    model_dir = MODEL_DIR if MODEL_DIR else "models"
+    os.makedirs(model_dir, exist_ok=True)
+    path = os.path.join(model_dir, f"{symbol}_{mode}_xgb.pkl")
+    abs_path = os.path.abspath(path)  # Force absolute path
     joblib.dump(artifact, path)
-    print(f"✅ Saved {symbol} {mode}: {path}")
+    print(f"✅ Saved {symbol} {mode}: {abs_path}")  # Verify location!
 
 def main():
+    # Shows exactly where models will be saved
+    print("📂 MODEL_DIR:", os.path.abspath(MODEL_DIR if MODEL_DIR else "models"))
+    
     symbols = TRAIN_SYMBOLS if isinstance(TRAIN_SYMBOLS, list) else [TRAIN_SYMBOLS]
     print("\n🔄 Weekend intraday dual-model training")
     print("📌 Symbols:", symbols)

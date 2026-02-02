@@ -7,7 +7,7 @@ from config import (
     MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB
 )
 from portfolio import PortfolioManager
-from data_loader import fetch_latest_price
+from data_loader import fetch_latest_price, fetch_historical_data
 from trader import get_pdt_status
 from pdt_tracker import get_opened_today_qty
 from account_cache import account_cache
@@ -882,11 +882,15 @@ def compute_strategy_decisions(
     # 🔥 DIP-BUY BLOCK
     # ============================================================
     
+    # ============================================================
+    # 🔥 DIP-BUY OVERRIDE - PASTE HERE
+    # ============================================================
+    
     def detect_afterhours_dip(sym: str, threshold: float = 0.015) -> bool:
         """Check if stock dropped >= threshold since yesterday close."""
         try:
-            from data_loader import fetch_historical_data, fetch_latest_price
-            
+
+
             df = fetch_historical_data(sym, period="5d", interval="1d")
             if df is None or len(df) < 1:
                 return False
