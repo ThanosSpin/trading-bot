@@ -268,8 +268,8 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         # Replace inf/-inf with NaN, then fill with 0.0 (NO dropna!)
         df_clean = df_aligned.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        print(f"[PREDICT] ({len(df_features)}, {len(df_features.columns)}) & aligned ({len(df_aligned)}, {len(feat_cols)}) & clean ({len(df_clean)}, {len(feat_cols)})")
 
+        
         if df_clean.empty:
             print("[ERROR] predict_from_model: df_clean empty after fillna")
             return None

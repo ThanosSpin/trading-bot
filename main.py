@@ -189,74 +189,46 @@ def print_cycle_summary(decisions):
 
 
 def print_signal_diagnostics(decisions, diagnostics):
-    print("\n================ SIGNAL DIAGNOSTICS ================")
-
-
+    print("🔍 SIGNAL DIAGNOSTICS")
+    
     def fmt(x, n=3):
         try:
             return "NA" if x is None else f"{float(x):.{n}f}"
-        except Exception:
+        except:
             return "NA"
-
-
+    
     def fmt_div(x):
         try:
-            return "NA" if x is None else f"{float(x):+.3f}"
-        except Exception:
+            return "NA" if x is None else f"{float(x):.3f}"
+        except:
             return "NA"
-
-
+    
     decisions = decisions or {}
     diagnostics = diagnostics or {}
-
-
-    for sym, d in decisions.items():
-        sig = diagnostics.get(sym, {}) or {}
-        
-        
-        
-        dp = sig.get("daily_prob", sig.get("daily"))
-        ip = sig.get("intraday_prob", sig.get("intraday"))
-        fp = sig.get("final_prob", sig.get("final"))
-        
-
-        w = sig.get("intraday_weight")
-        model_used = sig.get("intraday_model_used", sig.get("model", "intraday"))
-        
-
-        vol = sig.get("intraday_vol")
-        mom = sig.get("intraday_mom")
-        q   = sig.get("intraday_quality_score")
-
-
-        regime = sig.get("intraday_regime", "unknown")
-        allow = sig.get("allow_intraday", True)
-        vol_ratio = sig.get("intraday_volume_ratio")  # ✅ NEW
-        
-        div = None
-        if dp is not None and ip is not None:
-            try:
-                div = float(ip) - float(dp)
-            except Exception:
-                div = None
-        
-
-        action = (d.get("action", "hold") or "hold").upper()
-        
-        # Format volume ratio
-        vr_str = "NA" if vol_ratio is None else f"{float(vol_ratio):.2f}"
-        
-        print(
-            f"📊 {sym:<5} | "
-            f"D={fmt(dp)} I={fmt(ip)} Δ={fmt_div(div)} "
-            f"W={fmt(w,2)} → F={fmt(fp)} | "
-            f"q={fmt(q,2)} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr_str} | "  # ✅ NEW
-            f"regime={regime} allow={allow} | "
-            f"model={model_used} | {action}"
-        )
     
-
-    print("====================================================\n")
+    for sym, d in decisions.items():
+        sig = diagnostics.get(sym, {})
+        dp, ip, fp = sig.get("daily_prob"), sig.get("intraday_prob"), sig.get("final_prob")
+        w, model_used = sig.get("intraday_weight"), sig.get("intraday_model_used") or sig.get("model")
+        vol, mom, q = sig.get("intraday_vol"), sig.get("intraday_mom"), sig.get("intraday_quality_score")
+        
+        div = fmt_div(ip - dp) if dp is not None and ip is not None else "NA"
+        action = d.get("action", "hold").upper()
+        
+        # 🔥 VR FIX: intraday_vol / daily_vol
+        vr = "NA"
+        if vol is not None:
+            try:
+                df_daily = fetch_historical_data(sym, period="1mo", interval="1d")
+                if df_daily is not None and len(df_daily) >= 20:
+                    daily_close = df_daily["Close"].iloc[:, 0] if isinstance(df_daily["Close"], pd.DataFrame) else df_daily["Close"]
+                    daily_rets = daily_close.pct_change().dropna()
+                    daily_vol = float(daily_rets.std()) if len(daily_rets) >= 5 else 0.0024
+                    vr = f"{vol/daily_vol:.2f}" if daily_vol > 0 else "NA"
+            except:
+                vr = f"{vol/0.0024:.1f}"  # fallback
+        
+        print(f"  {sym:<5} D={fmt(dp)} I={fmt(ip)} Δ={div} W={fmt(w):>5} → F={fmt(fp)} | q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} | regime={sig.get('intraday_regime')} | model={model_used} | {action}")
 
 
 # ===============================================================
