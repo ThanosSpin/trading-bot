@@ -109,7 +109,14 @@ def get_predictions(symbols, debug=True):
             intraday_weight=INTRADAY_WEIGHT,
             resample_to="15min",
         )
-
+        # ✅ DEBUG
+        print(f"[MAIN] {sym} regime={sig.get('intraday_regime')} model={sig.get('intraday_model_used')} ip={sig.get('intraday_prob')}")
+        # print(f"[DIAG] NVDA debug ")
+        # print(f"  intraday_rows: {sig.get('intraday_rows')}")
+        # print(f"  intraday_quality_score: {sig.get('intraday_quality_score')}")
+        # print(f"  allow_intraday: {sig.get('allow_intraday')}")
+        # print(f"  intraday_vol: {sig.get('intraday_vol')}")
+        # print("  ---")
 
         # ✅ log signal history for dashboard
         log_signal_snapshot(sym, sig)

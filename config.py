@@ -60,7 +60,7 @@ SPY_MUTUAL_EXCLUSIVE = True
 # =========================
 
 # Default thresholds (most symbols)
-INTRADAY_MOM_TRIG = 0.0020    # +0.20% over ~1h (4 x 15m bars)
+INTRADAY_MOM_TRIG = 0.0030    # +0.30% over ~1h (4 x 15m bars)
 INTRADAY_VOL_TRIG = 0.0030    # 0.30% per-bar volatility (15m)
 
 # Symbol-specific overrides (optional)
