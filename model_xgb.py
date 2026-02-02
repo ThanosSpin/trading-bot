@@ -488,6 +488,39 @@ def compute_signals(
         else:
             df_feat_intra = build_intraday_features(df_intra_resampled)
 
+            # ADD this volume computation:
+            if "Volume" in df_intra_resampled.columns:
+                vol_series = df_intra_resampled["Volume"].dropna()
+                if len(vol_series) >= 20:
+                    current_vol = float(vol_series.iloc[-1])
+                    avg_vol_20 = float(vol_series.tail(20).mean())
+                    vol_ratio = current_vol / avg_vol_20 if avg_vol_20 > 0 else 0.0
+                else:
+                    vol_ratio = None
+            else:
+                vol_ratio = None
+
+            results["intraday_volume"] = current_vol if 'current_vol' in locals() else None
+
+            try:
+                vol_series = df_intra_resampled["Volume"]
+                vol_series = vol_series.iloc[:, 0] if isinstance(vol_series, pd.DataFrame) else vol_series
+                vol_series = pd.to_numeric(vol_series, errors='coerce').dropna()
+                
+                if len(vol_series) >= 20:
+                    current_vol = float(vol_series.iloc[-1])
+                    avg_vol_20 = float(vol_series.tail(20).mean())
+                    vol_ratio = current_vol / avg_vol_20 if avg_vol_20 > 0 else 0.0
+                else:
+                    current_vol = None
+                    vol_ratio = None
+                
+                results["intraday_volume"] = current_vol
+                results["intraday_volume_ratio"] = vol_ratio
+            except Exception:
+                results["intraday_volume"] = None
+                results["intraday_volume_ratio"] = None
+            
             if df_feat_intra is None or df_feat_intra.empty:
                 results["allow_intraday"] = False
                 results["intraday_prob"] = None
@@ -515,6 +548,37 @@ def compute_signals(
                 results["intraday_vol"] = vol
                 results["intraday_mom"] = mom_1h
 
+            try:
+                # Extract Volume column from resampled intraday data
+                if "Volume" in df_intra_resampled.columns:
+                    vol_series = df_intra_resampled["Volume"]
+                    
+                    # Handle both DataFrame and Series formats
+                    if isinstance(vol_series, pd.DataFrame):
+                        vol_series = vol_series.iloc[:, 0]
+                    
+                    # Convert to numeric and drop NaN
+                    vol_series = pd.to_numeric(vol_series, errors='coerce').dropna()
+                    
+                    if len(vol_series) >= 20:
+                        current_vol = float(vol_series.iloc[-1])
+                        avg_vol_20 = float(vol_series.tail(20).mean())
+                        vol_ratio = current_vol / avg_vol_20 if avg_vol_20 > 0 else None
+                    else:
+                        current_vol = None
+                        vol_ratio = None
+                    
+                    results["intraday_volume"] = current_vol
+                    results["intraday_volume_ratio"] = vol_ratio
+                else:
+                    # No Volume column available
+                    results["intraday_volume"] = None
+                    results["intraday_volume_ratio"] = None
+            except Exception as e:
+                # If any error, set to None
+                results["intraday_volume"] = None
+                results["intraday_volume_ratio"] = None
+                    
                 # thresholds (config-driven)
                 MOM_TRIG = float(INTRADAY_MOM_TRIG)
                 VOL_TRIG = float(INTRADAY_VOL_TRIG)

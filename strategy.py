@@ -367,13 +367,60 @@ def compute_strategy_decisions(
 
         return False
     
+    def _block_buy_on_weak_volume(sym: str) -> bool:
+        """
+        Guardrail: avoid full-size BUY when intraday volume is weak
+        relative to its recent average.
+        
+        Returns True if volume is too weak for the current regime.
+        """
+        d = _diag(sym)
+        vol_ratio = d.get("intraday_volume_ratio")
+        regime = d.get("intraday_regime")  # "mom", "mr", or None
+        
+        try:
+            vol_ratio = None if vol_ratio is None else float(vol_ratio)
+        except Exception:
+            vol_ratio = None
+        
+        if vol_ratio is None:
+            # No volume data → don't block (fail open)
+            return False
+        
+        # Regime-specific thresholds
+        if regime == "mom":
+            min_ratio = 1.20   # momentum needs volume expansion
+        elif regime == "mr":
+            min_ratio = 0.80   # mean-reversion can work in quieter conditions
+        else:
+            min_ratio = 1.00   # default for legacy intraday
+        
+        return vol_ratio < min_ratio
+
     # ---------------------------------------------------------
     # ABBV secondary logic helpers
     # ---------------------------------------------------------
     rs_margin = max(0.0, min(float(RS_MARGIN), 0.25))  # require ABBV to beat AAPL by 0.05 to switch (anti-churn)
 
     def _is_buy(sym: str) -> bool:
-        return preds.get(sym, 0.0) >= BUY_THRESHOLD and (not _block_buy_on_pullback(sym))
+        """
+        Core BUY predicate used for AAPL/ABBV and other symbols.
+        
+        Returns True only if:
+        - final_prob >= BUY_THRESHOLD
+        - NOT blocked by momentum pullback guard
+        - NOT blocked by weak volume guard
+        """
+        if preds.get(sym, 0.0) < BUY_THRESHOLD:
+            return False
+        
+        if _block_buy_on_pullback(sym):
+            return False
+        
+        if _block_buy_on_weak_volume(sym):
+            return False
+        
+        return True
 
     def _pick_secondary_between_aapl_abbv() -> Optional[str]:
         """
