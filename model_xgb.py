@@ -198,7 +198,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     # -----------------------------
     # PRINT VALIDATION SUMMARY
     # -----------------------------
-    print(f"ðŸ“Š MODEL VALIDATION: {symbol}/{mode.upper()} (rows={len(df_feat)})")
+    print(f"MODEL VALIDATION: {symbol}/{mode.upper()} (rows={len(df_feat)})")
     print("--------------------------------------------")
     for k, v in metrics.items():
         if k == "confusion_matrix":
@@ -269,7 +269,7 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         df_clean = df_aligned.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
-        
+
         if df_clean.empty:
             print("[ERROR] predict_from_model: df_clean empty after fillna")
             return None

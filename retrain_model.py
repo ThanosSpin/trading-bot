@@ -12,6 +12,10 @@ from features import _clean_columns
 from config import TRAIN_SYMBOLS
 from feature_selection import select_features_with_shap, retrain_with_selected_features
 
+# Rebuild features for SHAP
+from features import build_intraday_features
+from target_labels import create_target_label
+
 
 # ---------------------------------------------------------
 # Settings
@@ -161,10 +165,8 @@ def train_intraday_models_with_shap(sym: str):
             artifact = train_model(df_intra, symbol=sym, mode=mode)
             model = artifact["model"]
 
-            # Rebuild features for SHAP
-            from features import build_intraday_features
-            from target_labels import create_target_label
 
+            
             df_feat = build_intraday_features(df_intra)
             df_feat = create_target_label(df_feat, mode="intraday")
             df_feat = df_feat.dropna(subset=["target"])
