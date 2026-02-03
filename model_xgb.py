@@ -355,7 +355,7 @@ def compute_signals(
                         log_prediction(
                             symbol=symU,
                             mode="daily",
-                            prob=float(dp),
+                            predicted_prob=float(dp),
                             price=float(current_price)
                         )
                 except Exception as e:
@@ -513,7 +513,7 @@ def compute_signals(
                             log_prediction(
                                 symbol=symU,
                                 mode=model_used,
-                                prob=float(ip),
+                                predicted_prob=float(ip),
                                 price=float(current_price)
                             )
                     except Exception as e:
