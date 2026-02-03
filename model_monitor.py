@@ -349,3 +349,24 @@ class ModelMonitor:
 
             except Exception as e:
                 print(f"⚠️ Error cleaning {filename}: {e}")
+
+
+# Add this near the bottom of model_monitor.py, after the ModelMonitor class definition
+_monitor_instance = None
+
+def get_monitor(logs_dir: str = "logs") -> ModelMonitor:
+    """
+    Get or create singleton ModelMonitor instance.
+    
+    Args:
+        logs_dir: Directory for prediction logs
+        
+    Returns:
+        ModelMonitor instance
+    """
+    global _monitor_instance
+    
+    if _monitor_instance is None:
+        _monitor_instance = ModelMonitor(logs_dir=logs_dir)
+    
+    return _monitor_instance

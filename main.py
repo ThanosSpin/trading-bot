@@ -1,4 +1,5 @@
 # main.py
+#!/usr/bin/env python
 import time
 from data_loader import fetch_historical_data, fetch_latest_price
 from market import is_market_open, debug_market
@@ -7,7 +8,7 @@ from strategy import compute_strategy_decisions
 from portfolio import PortfolioManager
 from trader import execute_trade, get_pdt_status
 from strategy import apply_position_limits
-from model_monitor import get_monitor, evaluate_predictions
+from model_monitor import get_monitor, evaluate_predictions, log_prediction
 from account_cache import account_cache
 from config import (
     SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT,
@@ -20,13 +21,16 @@ import pandas as pd
 from datetime import datetime, timezone
 
 
+
 os.environ["TZ"] = "America/New_York"
 time.tzset()
+
 
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
+
 
 
 # ===============================================================
@@ -92,6 +96,7 @@ def log_signal_snapshot(sym: str, sig: dict) -> None:
         print(f"[WARN] log_signal_snapshot failed for {sym}: {e}")
 
 
+
 # ===============================================================
 # Fetch Predictions for All Symbols (USING compute_signals)
 # ===============================================================
@@ -110,6 +115,34 @@ def get_predictions(symbols, debug=True):
             intraday_weight=INTRADAY_WEIGHT,
             resample_to="15min",
         )
+
+        # ✅ FIX: Log predictions for EACH model type separately
+        try:
+            # Log daily prediction
+            if sig.get('daily_prob') is not None:
+                log_prediction(
+                    symbol=sym,
+                    mode='daily',
+                    predicted_prob=float(sig.get('daily_prob')),
+                    actual_outcome=None,
+                    price=float(sig.get('price')) if sig.get('price') else None
+                )
+        except Exception as e:
+            print(f"[WARN] Could not log daily prediction: {e}")
+
+        try:
+            # Log intraday prediction based on model used
+            if sig.get('intraday_prob') is not None and sig.get('intraday_model_used'):
+                intraday_mode = sig.get('intraday_model_used')  # 'intraday_mr' or 'intraday_mom'
+                log_prediction(
+                    symbol=sym,
+                    mode=intraday_mode,
+                    predicted_prob=float(sig.get('intraday_prob')),
+                    actual_outcome=None,
+                    price=float(sig.get('price')) if sig.get('price') else None
+                )
+        except Exception as e:
+            print(f"[WARN] Could not log intraday prediction: {e}")
 
         # ✅ DEBUG
         print(f"[MAIN] {sym} regime={sig.get('intraday_regime')} model={sig.get('intraday_model_used')} ip={sig.get('intraday_prob')}")
@@ -160,23 +193,26 @@ def get_predictions(symbols, debug=True):
 
     # ✅ EVALUATE PAST PREDICTIONS (monitoring)
     print("\n📊 Evaluating past predictions...")
-    monitor = get_monitor()
-
+    
     for sym in symbols:
         for mode in ['daily', 'intraday_mr', 'intraday_mom']:
             try:
-                current_price = diagnostics.get(sym, {}).get('price', 0.0)
-
-                if current_price and float(current_price) > 0:
-                    result = evaluate_predictions(sym, mode, float(current_price))
-
-                    if result.get('evaluated_count', 0) > 0:
-                        print(f"  ✅ {sym}/{mode}: Evaluated {result['evaluated_count']} predictions")
-
+                result = evaluate_predictions(
+                    symbol=sym,
+                    mode=mode,
+                    lookback_days=7
+                )
+                
+                if result.get('sample_size', 0) > 5:  # Only show if enough data
+                    print(f"  ✅ {sym}/{mode}: {result['sample_size']} samples, "
+                          f"accuracy={result['accuracy']:.2%}, "
+                          f"brier={result['brier_score']:.4f}")
             except Exception as e:
-                pass  # Silent fail - don't break main loop
+                # Silent fail for evaluation errors
+                pass
 
     return predictions, diagnostics
+
 
 
 # ===============================================================
@@ -200,6 +236,7 @@ def print_cycle_summary(decisions):
         f"Core BUY: {core_buy or '-'} | "
         f"Cash: ${cash:,.2f}"
     )
+
 
 
 def print_signal_diagnostics(decisions, diagnostics):
@@ -245,6 +282,7 @@ def print_signal_diagnostics(decisions, diagnostics):
         print(f"  {sym:<5} D={fmt(dp)} I={fmt(ip)} Δ={div} W={fmt(w):>5} → F={fmt(fp)} | q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} | regime={sig.get('intraday_regime')} | model={model_used} | {action}")
 
 
+
 # ===============================================================
 # Execute decisions (clean & safe)
 # ===============================================================
@@ -252,7 +290,7 @@ def execute_decisions(decisions):
     """
     Execute SELLs first (to free capital), then BUYs.
 
-
+    
     Supports flags from strategy.py:
       - recalc_all_in=True        -> recompute qty from live cash after SELLs
       - recalc_after_sells=True   -> recompute qty using remaining cash after higher-priority buys
@@ -279,25 +317,26 @@ def execute_decisions(decisions):
     sell_syms = [s for s, d in decisions.items()
                 if d.get("action") == "sell" and int(d.get("qty", 0)) > 0]
 
-
+    
     buy_syms = [s for s, d in decisions.items()
                if d.get("action") == "buy" and int(d.get("qty", 0)) > 0]
 
-
+    
     hold_syms = [s for s, d in decisions.items()
                 if d.get("action") not in ("buy", "sell") or int(d.get("qty", 0)) <= 0]
 
-
+    
     any_sell_filled = False
+    
     sell_failed = set()
 
-
+    
     # ✅ Fetch account state ONCE at the beginning
     account_cache.invalidate()  # Force fresh data for this cycle
     account_state = account_cache.get_account()
     remaining_cash = account_state.get("cash", 0.0)
 
-
+    
     # -------------------------
     # PASS 1: SELLs
     # -------------------------
@@ -306,50 +345,50 @@ def execute_decisions(decisions):
         qty = int(decision.get("qty", 0))
         explain = decision.get("explain", "")
 
-
+     
         pm = PortfolioManager(sym)
         price = fetch_latest_price(sym)
 
-
+        
         print(f"\n--- {sym} Decision ---")
         print(f"Action: SELL | Qty: {qty} | Price: {price}")
         print(f"Reason: {explain}")
 
-
+        
         if price is None or qty <= 0:
             print(f"[WARN] {sym} invalid sell input, skipping.")
             sell_failed.add(sym)
             continue
 
-
+        
         filled_qty, filled_price = execute_trade("sell", qty, sym, decision=decision)
 
-
+       
         if not filled_qty:
             print(f"[WARN] {sym} SELL not filled.")
             sell_failed.add(sym)
             continue
 
-
+        
         any_sell_filled = True
         pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
         pm._apply("sell", filled_price, filled_qty, account_cash=account_cash)
         print(f"Updated Snapshot (cash + {sym} position): ${pm.value():.2f}")
 
-
+    
     # -------------------------
     # Refresh cash after SELLs
     # -------------------------
     global_cash_after_sells = _get_live_account_cash(proxy_symbol="NVDA")
     remaining_cash = global_cash_after_sells
 
-
+    
     # If strategy required SPY liquidation to fund core and it failed, we should not "all-in" core.
     spy_required_sell = ("SPY" in decisions and decisions["SPY"].get("action") == "sell")
     spy_sell_failed = (spy_required_sell and "SPY" in sell_failed)
 
-
+    
     # -------------------------
     # PASS 2: BUYs (priority order)
     # -------------------------
@@ -359,84 +398,84 @@ def execute_decisions(decisions):
         # if missing, default to 999 so it runs after priority buys
         return int(d.get("priority_rank", 999))
 
-
+    
     buy_syms_sorted = sorted(buy_syms, key=_buy_sort_key)
 
-
+    
     for sym in buy_syms_sorted:
         decision = decisions[sym]
         explain = (decision.get("explain", "") or "")
         price = fetch_latest_price(sym)
 
-
+        
         print(f"\n--- {sym} Decision ---")
         print(f"Action: BUY | Price: {price}")
         print(f"Reason: {explain}")
 
-
+        
         if price is None or price <= 0:
             print(f"[WARN] No valid price for {sym}, skipping.")
             continue
 
-
+        
         qty = int(decision.get("qty", 0))
 
-
+        
         # Flag-based recompute (preferred, no string matching)
         recalc_all_in = bool(decision.get("recalc_all_in", False))
         recalc_after_sells = bool(decision.get("recalc_after_sells", False))
 
-
+        
         # If strategy expected SPY to be sold first but it didn't fill, skip flagged buys.
         if (recalc_all_in or recalc_after_sells) and spy_sell_failed:
             print("[INFO] BUY skipped because required SPY SELL did not fill (cannot fund priority buy).")
             continue
 
-
+        
         # Recompute qty from remaining cash if flagged
         if recalc_all_in:
             # refresh live cash in case SELL filled changed it (and to avoid stale state)
             remaining_cash = _get_live_account_cash(proxy_symbol=sym)
             qty = int(remaining_cash // price)
 
-
+        
             # ✅ Apply limits
             qty = apply_position_limits(qty, price, remaining_cash, sym)
 
-
+        
             print(f"[INFO] {sym} recalc_all_in: cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}")
 
-
+        
         elif recalc_after_sells:
             # use the cash remaining after earlier buys in this same cycle
             qty = int(remaining_cash // price)
             print(f"[INFO] {sym} recalc_after_sells: remaining_cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}")
 
-
+        
         if qty <= 0:
             print("[INFO] BUY skipped — insufficient cash.")
             continue
 
-
+        
         pm = PortfolioManager(sym)
         filled_qty, filled_price = execute_trade("buy", qty, sym)
 
-
+        
         if not filled_qty:
             print(f"[WARN] {sym} BUY not filled.")
             continue
 
-
+        
         pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
         pm._apply("buy", filled_price, filled_qty, account_cash=account_cash)
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
-
+        
         # update remaining cash after successful buy
         remaining_cash = _get_live_account_cash(proxy_symbol=sym)
 
-
+    
     # -------------------------
     # PASS 3: HOLD prints
     # -------------------------
@@ -447,6 +486,7 @@ def execute_decisions(decisions):
         print(f"Action: HOLD | Qty: 0 | Price: {price}")
         print(f"Reason: {decision.get('explain','')}")
         print("[INFO] HOLD — No trade executed.")
+
 
 
 # ===============================================================
@@ -518,6 +558,7 @@ def process_all_symbols(symbols):
     # Step 5: Execute Signal Diagnostics
     # ----------------------------
     print_signal_diagnostics(decisions, diagnostics)
+
 
 
 # ===============================================================
