@@ -11,6 +11,10 @@ from features import build_daily_features, build_intraday_features
 from data_loader import fetch_historical_data, fetch_intraday_history, fetch_latest_price
 from target_labels import create_target_label, backtest_threshold
 from trading_metrics import calculate_financial_metrics, print_trading_report
+from adaptive_thresholds import get_adaptive_regime_thresholds
+from model_monitor import log_prediction, evaluate_predictions
+
+
 
 from config import (
     INTRADAY_WEIGHT,
@@ -332,6 +336,31 @@ def compute_signals(
             df_feat = build_daily_features(df_daily)
             results["daily_prob"] = predict_from_model(model_daily, df_feat)
 
+            # ✅ LOG DAILY PREDICTION
+            if results["daily_prob"] is not None:
+                try:
+                    dp = results["daily_prob"]
+                    current_price = results.get("price")
+                    if current_price is None:
+                        try:
+                            dc = df_daily["Close"]
+                            dc = dc.iloc[:, 0] if isinstance(dc, pd.DataFrame) else dc
+                            dc = dc.dropna()
+                            if len(dc) > 0:
+                                current_price = float(dc.iloc[-1])
+                        except:
+                            pass
+                    
+                    if current_price and float(current_price) > 0:
+                        log_prediction(
+                            symbol=symU,
+                            mode="daily",
+                            prob=float(dp),
+                            price=float(current_price)
+                        )
+                except Exception as e:
+                    print(f"[WARN] Could not log daily prediction: {e}")
+
             # price fallback from daily close (only if price not set later by intraday)
             try:
                 dc = df_daily["Close"]
@@ -435,16 +464,19 @@ def compute_signals(
                 # ========================================
                 # âœ… REGIME DETECTION + MODEL SELECTION
                 # ========================================
-                MOMTRIG = float(INTRADAY_MOM_TRIG)
-                VOLTRIG = float(INTRADAY_VOL_TRIG)
-
-                # Per-symbol overrides
-                ovr = (INTRADAY_REGIME_OVERRIDES or {}).get(symU)
-                if ovr:
-                    MOMTRIG = float(ovr.get("mom_trig", MOMTRIG))
-                    VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
-
-                print(f"[REGIME] {symU} mom1h={mom1h:.4f} vol={vol:.5f} MOMTRIG={MOMTRIG:.4f} VOLTRIG={VOLTRIG:.4f}")
+                try:
+                    adaptive = get_adaptive_regime_thresholds(symU, lookback_days=30, percentile=0.70)
+                    MOMTRIG = float(adaptive['mom_trig'])
+                    VOLTRIG = float(adaptive['vol_trig'])
+                    print(f"[ADAPTIVE] {symU} using adaptive: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
+                except Exception as e:
+                    MOMTRIG = float(INTRADAY_MOM_TRIG)
+                    VOLTRIG = float(INTRADAY_VOL_TRIG)
+                    ovr = (INTRADAY_REGIME_OVERRIDES or {}).get(symU)
+                    if ovr:
+                        MOMTRIG = float(ovr.get("mom_trig", MOMTRIG))
+                        VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
+                    print(f"[CONFIG] {symU} using config: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
 
                 ismomentumregime = abs(mom1h) >= MOMTRIG or vol >= VOLTRIG
                 results["intraday_regime"] = "mom" if ismomentumregime else "mr"
@@ -473,6 +505,20 @@ def compute_signals(
                     results["intraday_model_used"] = model_used
                     results["intraday_quality_score"] = min(1.0, len(df_intra_resampled) / 120.0)
                     print(f"[SUCCESS] {symU} {model_used} ip={ip:.3f}")
+                
+                # ✅ LOG PREDICTION FOR MONITORING
+                    try:
+                        current_price = results.get("price") or fetch_latest_price(symU)
+                        if current_price and float(current_price) > 0:
+                            log_prediction(
+                                symbol=symU,
+                                mode=model_used,
+                                prob=float(ip),
+                                price=float(current_price)
+                            )
+                    except Exception as e:
+                        print(f"[WARN] Could not log prediction: {e}")
+                    
                 else:
                     print(f"[PREDICT_FAIL] {symU} {model_used} returned None")
 

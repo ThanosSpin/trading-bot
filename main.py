@@ -7,6 +7,7 @@ from strategy import compute_strategy_decisions
 from portfolio import PortfolioManager
 from trader import execute_trade, get_pdt_status
 from strategy import apply_position_limits
+from model_monitor import get_monitor, evaluate_predictions
 from account_cache import account_cache
 from config import (
     SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT,
@@ -109,14 +110,10 @@ def get_predictions(symbols, debug=True):
             intraday_weight=INTRADAY_WEIGHT,
             resample_to="15min",
         )
+
         # ✅ DEBUG
         print(f"[MAIN] {sym} regime={sig.get('intraday_regime')} model={sig.get('intraday_model_used')} ip={sig.get('intraday_prob')}")
-        # print(f"[DIAG] NVDA debug ")
-        # print(f"  intraday_rows: {sig.get('intraday_rows')}")
-        # print(f"  intraday_quality_score: {sig.get('intraday_quality_score')}")
-        # print(f"  allow_intraday: {sig.get('allow_intraday')}")
-        # print(f"  intraday_vol: {sig.get('intraday_vol')}")
-        # print("  ---")
+
 
         # ✅ log signal history for dashboard
         log_signal_snapshot(sym, sig)
@@ -131,8 +128,8 @@ def get_predictions(symbols, debug=True):
             print(f"Daily prob:         {sig.get('daily_prob')}")
             print(f"Intraday prob:      {sig.get('intraday_prob')}")
             print(f"Final combined prob:{sig.get('final_prob')}")
-            print(f"Intraday regime:    {sig.get('intraday_regime')}")  # ✅ NEW
-            print(f"Allow intraday:     {sig.get('allow_intraday')}")   # ✅ NEW
+            print(f"Intraday regime:    {sig.get('intraday_regime')}")
+            print(f"Allow intraday:     {sig.get('allow_intraday')}")
             print("------------------------------------\n")
 
 
@@ -154,13 +151,30 @@ def get_predictions(symbols, debug=True):
             "intraday_quality_score": sig.get("intraday_quality_score"),
             "intraday_vol": sig.get("intraday_vol"),
             "intraday_mom": sig.get("intraday_mom"),
-            "intraday_regime": sig.get("intraday_regime"),      # ✅ NEW
-            "allow_intraday": sig.get("allow_intraday"),        # ✅ NEW
-            "intraday_volume": sig.get("intraday_volume"),              # ✅ NEW
-            "intraday_volume_ratio": sig.get("intraday_volume_ratio"),  # ✅ NEW
+            "intraday_regime": sig.get("intraday_regime"),
+            "allow_intraday": sig.get("allow_intraday"),
+            "intraday_volume": sig.get("intraday_volume"),
+            "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
             "price": sig.get("price"),
         }
 
+    # ✅ EVALUATE PAST PREDICTIONS (monitoring)
+    print("\n📊 Evaluating past predictions...")
+    monitor = get_monitor()
+
+    for sym in symbols:
+        for mode in ['daily', 'intraday_mr', 'intraday_mom']:
+            try:
+                current_price = diagnostics.get(sym, {}).get('price', 0.0)
+
+                if current_price and float(current_price) > 0:
+                    result = evaluate_predictions(sym, mode, float(current_price))
+
+                    if result.get('evaluated_count', 0) > 0:
+                        print(f"  ✅ {sym}/{mode}: Evaluated {result['evaluated_count']} predictions")
+
+            except Exception as e:
+                pass  # Silent fail - don't break main loop
 
     return predictions, diagnostics
 
@@ -518,10 +532,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display

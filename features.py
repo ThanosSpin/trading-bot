@@ -1,6 +1,7 @@
 # features.py
 import pandas as pd
 import numpy as np
+from time_features import add_time_features
 
 # ============================================================================
 # MULTIINDEX → FLAT OHLCV COLUMN CLEANER
@@ -322,4 +323,86 @@ def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
     Build full advanced feature set for intraday data.
     Uses same core features as daily, plus extra time-of-day encodings.
     """
-    return _build_base_features(df, mode="intraday")
+    df = _build_base_features(df, mode="intraday")
+    
+    # ✅ ADD TIME FEATURES (only for intraday data with datetime index)
+    if isinstance(df.index, pd.DatetimeIndex):
+        df = add_time_features(df)
+    
+    return df
+
+# ============================================================
+# PATCH FOR features.py - TIME-OF-DAY FEATURES
+# ============================================================
+
+def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add time-of-day features that capture intraday behavioral patterns.
+
+    Market microstructure insights:
+    - Opening 30min: High volatility, news-driven, mean reversion
+    - Midday (10:30-15:00): Lower volume, trend continuation
+    - Closing hour: Volume surge, institutional flows, reversals
+
+    Args:
+        df: DataFrame with DatetimeIndex
+
+    Returns:
+        df with new time features added
+    """
+    df = df.copy()
+
+    # Extract time components
+    df['hour'] = df.index.hour
+    df['minute'] = df.index.minute
+
+    # Time as decimal (9:30 = 9.5, 16:00 = 16.0)
+    df['time_of_day'] = df['hour'] + df['minute'] / 60.0
+
+    # Distance from market open (9:30 AM = 0 minutes)
+    df['minutes_since_open'] = (df['time_of_day'] - 9.5) * 60
+    df['minutes_since_open'] = df['minutes_since_open'].clip(lower=0)  # Pre-market = 0
+
+    # Distance to market close (16:00)
+    df['minutes_to_close'] = (16.0 - df['time_of_day']) * 60
+    df['minutes_to_close'] = df['minutes_to_close'].clip(lower=0)  # After-hours = 0
+
+    # Session phase (categorical → one-hot encoded)
+    # Opening: 0-30 min, Midday: 30-330 min, Closing: last 60 min
+    def get_session_phase(minutes_since_open):
+        if minutes_since_open <= 30:
+            return 'opening'
+        elif minutes_since_open >= 330:  # 5.5 hours from open
+            return 'closing'
+        else:
+            return 'midday'
+
+    df['session_phase'] = df['minutes_since_open'].apply(get_session_phase)
+
+    # One-hot encode session phase
+    df['is_opening'] = (df['session_phase'] == 'opening').astype(int)
+    df['is_midday'] = (df['session_phase'] == 'midday').astype(int)
+    df['is_closing'] = (df['session_phase'] == 'closing').astype(int)
+
+    # Non-linear time effects (capture U-shaped volatility pattern)
+    # Volatility is high at open and close, low midday
+    import numpy as np
+    df['time_squared'] = df['minutes_since_open'] ** 2
+    df['time_cubed'] = df['minutes_since_open'] ** 3
+
+    # Sine/cosine encoding (captures cyclical nature of trading day)
+    # Full cycle = 390 minutes (6.5 hours)
+    df['time_sin'] = np.sin(2 * np.pi * df['minutes_since_open'] / 390)
+    df['time_cos'] = np.cos(2 * np.pi * df['minutes_since_open'] / 390)
+
+    # Lunch hour flag (12:00-13:00, low liquidity)
+    df['is_lunch_hour'] = ((df['time_of_day'] >= 12.0) & (df['time_of_day'] <= 13.0)).astype(int)
+
+    # First/last hour flags (extreme behavior periods)
+    df['is_first_hour'] = (df['minutes_since_open'] <= 60).astype(int)
+    df['is_last_hour'] = (df['minutes_to_close'] <= 60).astype(int)
+
+    # Drop intermediate columns
+    df = df.drop(columns=['hour', 'minute', 'session_phase'], errors='ignore')
+
+    return df
