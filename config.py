@@ -21,7 +21,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # Use App Password
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 # Trading config
-SYMBOL = ["NVDA", "AAPL", "ABBV"]  # symbol
+SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]  # symbol
 INITIAL_CAPITAL = 0
 
 # --------------------
@@ -77,7 +77,7 @@ INTRADAY_REGIME_OVERRIDES = {
 MOM_HOLD = 0.003   # 0.30%
 VOL_HOLD = 0.0035  # 0.35%
 
-TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY", "ABBV"]  # used by retrain_model.py
+TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY", "ABBV", "PLTR"]  # used by retrain_model.py
 
 # --- Risk management ---
 STOP_LOSS = 0.95        # sell if price falls 5% below last buy price
