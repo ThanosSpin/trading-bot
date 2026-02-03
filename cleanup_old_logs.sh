@@ -28,14 +28,24 @@ DELETED_SIZE=0
 while IFS= read -r -d '' file; do
     FOUND_COUNT=$((FOUND_COUNT + 1))
 
-    # Get file size before deletion
+    # Get file size before deletion (in bytes)
     SIZE=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
-    SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+
+    # Convert to MB using bash arithmetic (no bc needed)
+    SIZE_MB=$((SIZE / 1048576))
+    SIZE_KB=$((SIZE / 1024))
+
+    # Display in appropriate unit
+    if [ $SIZE_MB -gt 0 ]; then
+        SIZE_DISPLAY="${SIZE_MB} MB"
+    else
+        SIZE_DISPLAY="${SIZE_KB} KB"
+    fi
 
     # Get file modification date
     MOD_DATE=$(stat -f%Sm -t '%Y-%m-%d' "$file" 2>/dev/null || stat -c%y "$file" 2>/dev/null | cut -d' ' -f1)
 
-    echo "  ✅ Deleting: $(basename "$file") (${SIZE_MB} MB, last modified: $MOD_DATE)" | tee -a "$LOG_FILE"
+    echo "  ✅ Deleting: $(basename "$file") ($SIZE_DISPLAY, last modified: $MOD_DATE)" | tee -a "$LOG_FILE"
 
     rm -f "$file"
     DELETED_COUNT=$((DELETED_COUNT + 1))
@@ -46,8 +56,15 @@ done < <(find "$LOG_DIR" -maxdepth 1 -name "*.log" -type f -mtime +$DAYS_OLD -pr
 echo "------------------------------------------------------------" | tee -a "$LOG_FILE"
 
 if [ $DELETED_COUNT -gt 0 ]; then
-    TOTAL_MB=$(echo "scale=2; $DELETED_SIZE / 1048576" | bc)
-    echo "✅ Deleted $DELETED_COUNT file(s) (${TOTAL_MB} MB)" | tee -a "$LOG_FILE"
+    # Convert total size to MB
+    TOTAL_MB=$((DELETED_SIZE / 1048576))
+    TOTAL_KB=$((DELETED_SIZE / 1024))
+
+    if [ $TOTAL_MB -gt 0 ]; then
+        echo "✅ Deleted $DELETED_COUNT file(s) (${TOTAL_MB} MB)" | tee -a "$LOG_FILE"
+    else
+        echo "✅ Deleted $DELETED_COUNT file(s) (${TOTAL_KB} KB)" | tee -a "$LOG_FILE"
+    fi
 else
     echo "✅ No old log files to delete" | tee -a "$LOG_FILE"
 fi
