@@ -202,16 +202,22 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     # ========================================
     # ✅ 3. CLASS WEIGHTING (BEFORE FIT)
     # ========================================
-    if mode.startswith("intraday"):
-        n_neg = int((y_train == 0).sum())
-        n_pos = int((y_train == 1).sum())
+    # ✅ UPDATED: Apply to ALL modes (not just intraday)
+    n_neg = int((y_train == 0).sum())
+    n_pos = int((y_train == 1).sum())
+
+    if n_pos > 0 and n_neg > 0:
+        scale_pos_weight = n_neg / n_pos
         
-        if n_pos > 0 and n_neg > 0:
-            scale_pos_weight = n_neg / n_pos
+        # Only apply if there's significant imbalance (>1.2x difference)
+        if scale_pos_weight > 1.2 or scale_pos_weight < 0.83:
             model.set_params(scale_pos_weight=scale_pos_weight)
             print(f"[CLASS WEIGHT] {symbol}/{mode}: neg={n_neg} pos={n_pos} scale={scale_pos_weight:.2f}")
         else:
-            print(f"[CLASS WEIGHT] ⚠️ {symbol}/{mode}: Insufficient class samples")
+            print(f"[CLASS WEIGHT] {symbol}/{mode}: Balanced classes, no weighting needed")
+    else:
+        print(f"[CLASS WEIGHT] ⚠️ {symbol}/{mode}: Insufficient class samples")
+
 
     # -----------------------------
     # FIT
@@ -226,31 +232,25 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     # ========================================
     final_model = model  # Default: use uncalibrated model
 
-    if mode.startswith("intraday"):
-        print(f"[CALIBRATION] Applying Platt scaling for {symbol}/{mode}")
-        try:
-            import warnings
-            
-            # Suppress sklearn deprecation warning (cv='prefit' still works fine)
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=FutureWarning)
-                
-                calibrated_model = CalibratedClassifierCV(
-                    model, 
-                    method='sigmoid',
-                    cv='prefit',
-                    n_jobs=-1
-                )
-                
-                # Fit calibration on test set
-                calibrated_model.fit(X_test, y_test)
-                final_model = calibrated_model
-                print(f"[CALIBRATION] ✅ Successfully calibrated {symbol}/{mode}")
-            
-        except Exception as e:
-            print(f"[CALIBRATION] ⚠️ Failed to calibrate {symbol}/{mode}: {e}")
-            print(f"[CALIBRATION] Using uncalibrated model as fallback")
-            final_model = model
+    # ✅ UPDATED: Apply calibration to ALL modes
+    print(f"[CALIBRATION] Applying Platt scaling for {symbol}/{mode}")
+    try:
+        calibrated_model = CalibratedClassifierCV(
+            model, 
+            method='sigmoid',
+            cv='prefit',
+            n_jobs=-1
+        )
+        
+        # Fit calibration on test set
+        calibrated_model.fit(X_test, y_test)
+        final_model = calibrated_model
+        print(f"[CALIBRATION] ✅ Successfully calibrated {symbol}/{mode}")
+        
+    except Exception as e:
+        print(f"[CALIBRATION] ⚠️ Failed to calibrate {symbol}/{mode}: {e}")
+        print(f"[CALIBRATION] Using uncalibrated model as fallback")
+        final_model = model
 
 
     # -----------------------------
@@ -303,7 +303,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
         "mode": mode,
-        "calibrated": mode.startswith("intraday"),
+        "calibrated": True,
     }
     return artifact
 
