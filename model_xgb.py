@@ -1,6 +1,7 @@
 # model_xgb.py
 import os
 from datetime import datetime
+import warnings
 
 import joblib
 import numpy as np
@@ -27,6 +28,7 @@ from config import (
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+warnings.filterwarnings("ignore", message=".*cv='prefit'.*")
 
 # ---------------------------------------------------------
 # Utility
