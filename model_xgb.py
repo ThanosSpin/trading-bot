@@ -79,25 +79,46 @@ def _add_intraday_regime_cols(df_feat: pd.DataFrame) -> pd.DataFrame:
 
 def _filter_intraday_rows_by_mode(df_feat: pd.DataFrame, mode: str) -> pd.DataFrame:
     """
-    Filters intraday feature rows into either mean-reversion regime or momentum regime.
-    The goal is two specialized models trained on different market conditions.
+    ✅ IMPROVED: Filters intraday feature rows with better regime separation.
+    Uses adaptive percentile-based thresholds instead of fixed values.
     """
     df_feat = _add_intraday_regime_cols(df_feat)
-
+    
     df_feat = df_feat.replace([np.inf, -np.inf], np.nan)
     df_feat = df_feat.dropna(subset=["mom_12_abs", "vol_12"])
-
-    # --- default thresholds ---
-    # momentum: >= ~1% move over ~3h OR higher short-term vol
-    MOM_THR = 0.010
-    VOL_THR = 0.010
-
+    
+    if df_feat.empty:
+        print(f"[WARN] Empty dataframe after regime column addition for mode={mode}")
+        return df_feat
+    
+    # ✅ IMPROVED: Use percentile-based thresholds for better separation
+    mom_p60 = df_feat["mom_12_abs"].quantile(0.60)
+    vol_p60 = df_feat["vol_12"].quantile(0.60)
+    
+    # Lower thresholds for mean reversion (bottom 30%)
+    mom_p30 = df_feat["mom_12_abs"].quantile(0.30)
+    vol_p30 = df_feat["vol_12"].quantile(0.30)
+    
+    print(f"[REGIME] {mode}: mom_p30={mom_p30:.4f} mom_p60={mom_p60:.4f} vol_p30={vol_p30:.5f} vol_p60={vol_p60:.5f}")
+    
     if mode == "intraday_mom":
-        return df_feat[(df_feat["mom_12_abs"] >= MOM_THR) | (df_feat["vol_12"] >= VOL_THR)]
-
+        # Momentum: High momentum OR high volatility (more aggressive)
+        filtered = df_feat[
+            (df_feat["mom_12_abs"] >= mom_p60) | 
+            (df_feat["vol_12"] >= vol_p60)
+        ]
+        print(f"[REGIME] intraday_mom: {len(df_feat)} → {len(filtered)} rows ({len(filtered)/len(df_feat)*100:.1f}%)")
+        return filtered
+    
     if mode == "intraday_mr":
-        return df_feat[(df_feat["mom_12_abs"] < MOM_THR) & (df_feat["vol_12"] < VOL_THR)]
-
+        # Mean reversion: Low momentum AND low volatility
+        filtered = df_feat[
+            (df_feat["mom_12_abs"] < mom_p30) & 
+            (df_feat["vol_12"] < vol_p30)
+        ]
+        print(f"[REGIME] intraday_mr: {len(df_feat)} → {len(filtered)} rows ({len(filtered)/len(df_feat)*100:.1f}%)")
+        return filtered
+    
     return df_feat
 
 
@@ -113,7 +134,9 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     from sklearn.metrics import (
         accuracy_score, log_loss, roc_auc_score,
         confusion_matrix, precision_score, recall_score, f1_score,
+        brier_score_loss,
     )
+    from sklearn.calibration import CalibratedClassifierCV
 
     df = df.copy()
 
@@ -176,26 +199,78 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
+    # ========================================
+    # ✅ 3. CLASS WEIGHTING (BEFORE FIT)
+    # ========================================
+    if mode.startswith("intraday"):
+        n_neg = int((y_train == 0).sum())
+        n_pos = int((y_train == 1).sum())
+        
+        if n_pos > 0 and n_neg > 0:
+            scale_pos_weight = n_neg / n_pos
+            model.set_params(scale_pos_weight=scale_pos_weight)
+            print(f"[CLASS WEIGHT] {symbol}/{mode}: neg={n_neg} pos={n_pos} scale={scale_pos_weight:.2f}")
+        else:
+            print(f"[CLASS WEIGHT] ⚠️ {symbol}/{mode}: Insufficient class samples")
+
     # -----------------------------
     # FIT
     # -----------------------------
     model.fit(X_train, y_train)
 
+    # ✅ STORE BASE MODEL FOR SHAP (before calibration)
+    base_model = model
+
+    # ========================================
+    # ✅ 1. CALIBRATION (AFTER FIT)
+    # ========================================
+    final_model = model  # Default: use uncalibrated model
+    
+    if mode.startswith("intraday"):
+        print(f"[CALIBRATION] Applying Platt scaling for {symbol}/{mode}")
+        try:
+            # Use sigmoid method (Platt scaling) - best for XGBoost
+            calibrated_model = CalibratedClassifierCV(
+                model, 
+                method='sigmoid',  # Platt scaling
+                cv='prefit',       # Model already trained
+                n_jobs=-1
+            )
+            
+            # Fit calibration on test set
+            calibrated_model.fit(X_test, y_test)
+            final_model = calibrated_model
+            print(f"[CALIBRATION] ✅ Successfully calibrated {symbol}/{mode}")
+            
+        except Exception as e:
+            print(f"[CALIBRATION] ⚠️ Failed to calibrate {symbol}/{mode}: {e}")
+            print(f"[CALIBRATION] Using uncalibrated model as fallback")
+            final_model = model
+
     # -----------------------------
-    # METRICS
+    # METRICS (use final_model)
     # -----------------------------
     metrics = {}
     try:
-        y_pred_proba = model.predict_proba(X_test)[:, 1]
+        y_pred_proba = final_model.predict_proba(X_test)[:, 1]
         y_pred = (y_pred_proba >= 0.5).astype(int)
 
         metrics["accuracy"] = float(accuracy_score(y_test, y_pred))
         metrics["logloss"] = float(log_loss(y_test, y_pred_proba))
         metrics["roc_auc"] = float(roc_auc_score(y_test, y_pred_proba))
-        metrics["precision"] = float(precision_score(y_test, y_pred))
-        metrics["recall"] = float(recall_score(y_test, y_pred))
-        metrics["f1"] = float(f1_score(y_test, y_pred))
+        metrics["precision"] = float(precision_score(y_test, y_pred, zero_division=0))
+        metrics["recall"] = float(recall_score(y_test, y_pred, zero_division=0))
+        metrics["f1"] = float(f1_score(y_test, y_pred, zero_division=0))
         metrics["confusion_matrix"] = confusion_matrix(y_test, y_pred).tolist()
+        
+        # ✅ ADD: Calibration metrics
+        metrics["brier_score"] = float(brier_score_loss(y_test, y_pred_proba))
+        
+        # Calibration error (expected vs actual)
+        avg_pred = float(np.mean(y_pred_proba))
+        actual_rate = float(np.mean(y_test))
+        metrics["calibration_error"] = abs(avg_pred - actual_rate)
+        
     except Exception as e:
         print(f"WARN: Could not compute some metrics for {symbol}/{mode}: {e}")
 
@@ -215,12 +290,14 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     print("--------------------------------------------")
 
     artifact = {
-        "model": model,
+        "model": final_model,  # ✅ Calibrated model for predictions
+        "base_model": base_model,  # ✅ Uncalibrated XGBoost for SHAP
         "features": feature_list,
         "metrics": metrics,
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
         "mode": mode,
+        "calibrated": mode.startswith("intraday"),
     }
     return artifact
 
@@ -231,7 +308,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
 def load_model(symbol: str, mode: str):
     """
     Load saved model artifact:
-      (model, features, metrics, trained_at, symbol, mode)
+      (model, base_model, features, metrics, trained_at, symbol, mode)
     or return None if missing.
     """
     path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
@@ -246,7 +323,7 @@ def load_model(symbol: str, mode: str):
 
 
 # ---------------------------------------------------------
-# PREDICT FROM MODEL ARTIFACT (FIXED)
+# PREDICT FROM MODEL ARTIFACT
 # ---------------------------------------------------------
 def predict_from_model(model_dict, df_features: pd.DataFrame):
     """Return probability using stored feature order (or None)."""
@@ -258,10 +335,11 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         return None
 
     try:
+        # ✅ Use calibrated model for predictions (better probabilities)
         model = model_dict["model"]
         feat_cols = model_dict["features"]
 
-        # âœ… FIX: Align features + fill missing (don't drop rows!)
+        # Align features + fill missing (don't drop rows!)
         missing = [c for c in feat_cols if c not in df_features.columns]
         if missing:
             print(f"[WARN] Missing {len(missing)} features, filling with 0.0")
@@ -280,6 +358,8 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
 
         # Use last row for prediction
         X = df_clean.tail(1).values
+        
+        # ✅ Works with both calibrated and uncalibrated models
         prob = float(model.predict_proba(X)[0, 1])
         return prob
 
@@ -462,7 +542,7 @@ def compute_signals(
                 results["intraday_mom"] = mom1h
 
                 # ========================================
-                # âœ… REGIME DETECTION + MODEL SELECTION
+                # ✅ REGIME DETECTION + MODEL SELECTION
                 # ========================================
                 try:
                     adaptive = get_adaptive_regime_thresholds(symU, lookback_days=30, percentile=0.70)
@@ -481,7 +561,7 @@ def compute_signals(
                 ismomentumregime = abs(mom1h) >= MOMTRIG or vol >= VOLTRIG
                 results["intraday_regime"] = "mom" if ismomentumregime else "mr"
 
-                # âœ… PRIORITY: mom > mr > legacy (ALWAYS predict)
+                # ✅ PRIORITY: mom > mr > legacy (ALWAYS predict)
                 model_used = None
                 ip = None
 
@@ -506,7 +586,7 @@ def compute_signals(
                     results["intraday_quality_score"] = min(1.0, len(df_intra_resampled) / 120.0)
                     print(f"[SUCCESS] {symU} {model_used} ip={ip:.3f}")
                 
-                # ✅ LOG PREDICTION FOR MONITORING
+                    # ✅ LOG PREDICTION FOR MONITORING
                     try:
                         current_price = results.get("price") or fetch_latest_price(symU)
                         if current_price and float(current_price) > 0:

@@ -88,8 +88,8 @@ def train_daily_model_with_shap(sym: str):
         # Train initial model
         artifact_daily = train_model(df_daily, symbol=sym, mode="daily")
 
-        # Extract trained model
-        model = artifact_daily["model"]
+        # ✅ FIX: Use base_model for SHAP (fallback to model if not calibrated)
+        shap_model = artifact_daily.get("base_model", artifact_daily["model"])
 
         # Rebuild features for SHAP (match training pipeline)
         from features import build_daily_features
@@ -111,15 +111,15 @@ def train_daily_model_with_shap(sym: str):
         y_train = y.iloc[:train_end]
         y_test = y.iloc[val_end:]
 
-        # ✅ FIXED: Pass symbol and mode to SHAP
+        # ✅ FIXED: Use shap_model instead of model
         top_features, shap_vals, X_test_reduced = select_features_with_shap(
-            model=model,
+            model=shap_model,  # ✅ Use base_model for SHAP
             X_train=X_train,
             X_test=X_test,
             top_n=30,
             plot=True,
-            symbol=sym,      # ✅ From config
-            mode="daily"      # ✅ Explicit
+            symbol=sym,
+            mode="daily"
         )
 
         # Save artifact with top features
@@ -163,10 +163,9 @@ def train_intraday_models_with_shap(sym: str):
 
             # Train model
             artifact = train_model(df_intra, symbol=sym, mode=mode)
-            model = artifact["model"]
+            # ✅ FIX: Use base_model for SHAP (fallback to model if not calibrated)
+            shap_model = artifact.get("base_model", artifact["model"])
 
-
-            
             df_feat = build_intraday_features(df_intra)
             df_feat = create_target_label(df_feat, mode="intraday")
             df_feat = df_feat.dropna(subset=["target"])
@@ -187,15 +186,15 @@ def train_intraday_models_with_shap(sym: str):
             y_train = y.iloc[:split_idx]
             y_test = y.iloc[split_idx:]
 
-            # ✅ FIXED: Pass symbol and mode to SHAP
+            # ✅ FIXED: Use shap_model instead of model
             top_features, shap_vals, X_test_reduced = select_features_with_shap(
-                model=model,
+                model=shap_model,  # ✅ Use base_model for SHAP
                 X_train=X_train,
                 X_test=X_test,
                 top_n=30,
                 plot=True,
-                symbol=sym,      # ✅ From config
-                mode=mode         # ✅ intraday_mr or intraday_mom
+                symbol=sym,
+                mode=mode
             )
 
             # Save artifact with top features
@@ -221,8 +220,12 @@ def _filter_mr_regime(df_feat):
     df_feat["mom_12_abs"] = df_feat["ret_12"].abs()
     df_feat["vol_12"] = df_feat["Close"].pct_change().rolling(12).std()
 
+    # ✅ UPDATED: Use percentile-based thresholds (match model_xgb.py)
+    mom_p30 = df_feat["mom_12_abs"].quantile(0.30)
+    vol_p30 = df_feat["vol_12"].quantile(0.30)
+    
     # MR: low momentum AND low vol
-    mask = (df_feat["mom_12_abs"] < 0.010) & (df_feat["vol_12"] < 0.010)
+    mask = (df_feat["mom_12_abs"] < mom_p30) & (df_feat["vol_12"] < vol_p30)
     return df_feat[mask].drop(columns=["ret_12", "mom_12_abs", "vol_12"], errors='ignore')
 
 
@@ -233,8 +236,12 @@ def _filter_mom_regime(df_feat):
     df_feat["mom_12_abs"] = df_feat["ret_12"].abs()
     df_feat["vol_12"] = df_feat["Close"].pct_change().rolling(12).std()
 
+    # ✅ UPDATED: Use percentile-based thresholds (match model_xgb.py)
+    mom_p60 = df_feat["mom_12_abs"].quantile(0.60)
+    vol_p60 = df_feat["vol_12"].quantile(0.60)
+    
     # MOM: high momentum OR high vol
-    mask = (df_feat["mom_12_abs"] >= 0.010) | (df_feat["vol_12"] >= 0.010)
+    mask = (df_feat["mom_12_abs"] >= mom_p60) | (df_feat["vol_12"] >= vol_p60)
     return df_feat[mask].drop(columns=["ret_12", "mom_12_abs", "vol_12"], errors='ignore')
 
 
