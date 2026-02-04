@@ -225,27 +225,33 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily"):
     # ✅ 1. CALIBRATION (AFTER FIT)
     # ========================================
     final_model = model  # Default: use uncalibrated model
-    
+
     if mode.startswith("intraday"):
         print(f"[CALIBRATION] Applying Platt scaling for {symbol}/{mode}")
         try:
-            # Use sigmoid method (Platt scaling) - best for XGBoost
-            calibrated_model = CalibratedClassifierCV(
-                model, 
-                method='sigmoid',  # Platt scaling
-                cv='prefit',       # Model already trained
-                n_jobs=-1
-            )
+            import warnings
             
-            # Fit calibration on test set
-            calibrated_model.fit(X_test, y_test)
-            final_model = calibrated_model
-            print(f"[CALIBRATION] ✅ Successfully calibrated {symbol}/{mode}")
+            # Suppress sklearn deprecation warning (cv='prefit' still works fine)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning)
+                
+                calibrated_model = CalibratedClassifierCV(
+                    model, 
+                    method='sigmoid',
+                    cv='prefit',
+                    n_jobs=-1
+                )
+                
+                # Fit calibration on test set
+                calibrated_model.fit(X_test, y_test)
+                final_model = calibrated_model
+                print(f"[CALIBRATION] ✅ Successfully calibrated {symbol}/{mode}")
             
         except Exception as e:
             print(f"[CALIBRATION] ⚠️ Failed to calibrate {symbol}/{mode}: {e}")
             print(f"[CALIBRATION] Using uncalibrated model as fallback")
             final_model = model
+
 
     # -----------------------------
     # METRICS (use final_model)
