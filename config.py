@@ -110,6 +110,18 @@ PDT_EMERGENCY_STOP = 0.060       # 6.0% loss triggers emergency exit
 # Only allow at most N emergency day-trade exits per day
 PDT_EMERGENCY_MAX_PER_DAY = 1
 
+# ============================================================
+# PRE-MARKET SCANNER SETTINGS
+# ============================================================
+PRE_MARKET_ENABLED = True
+PRE_MARKET_MIN_PROB = 0.75          # Only queue orders with 75%+ conviction
+PRE_MARKET_MAX_ALLOCATION = 1.0     # Use 100% of available cash
+PRE_MARKET_LIMIT_BUFFER = 0.002     # Place limit 0.2% above last price for quick fill
+PRE_MARKET_SYMBOLS = SYMBOL         # Use same symbols as main bot
+
+# Time settings
+PRE_MARKET_SCAN_HOUR = 9            # Run at 9:00 AM (1.5h before market open)
+
 # Model path management
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
