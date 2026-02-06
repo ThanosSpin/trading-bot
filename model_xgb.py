@@ -589,10 +589,32 @@ def compute_signals(
                     print(f"[FAIL] {symU} NO MODELS LOADED AT ALL")
 
                 if ip is not None:
+                    # ========================================
+                    # ✅ MOMENTUM PROBABILITY BOOST (AFTER PREDICTION)
+                    # ========================================
+                    ip_original = float(ip)
+                    momentum_boost_applied = False
+                    
+                    # If strong momentum detected but model is too conservative, boost probability
+                    if results.get("intraday_regime") == "mom" and mom1h is not None:
+                        mom1h_val = float(mom1h)
+                        
+                        # ✅ LOWERED: Boost if momentum >0.5% but model says <55% (catches NVDA's 0.62%)
+                        if abs(mom1h_val) > 0.005 and ip_original < 0.55:
+                            # Scale boost: 0.5% mom = +2.5%, 1% mom = +5%, 2% mom = +10%
+                            boost_factor = min(0.15, abs(mom1h_val) * 5.0)
+                            ip_boosted = min(0.85, ip_original + boost_factor)
+                            
+                            print(f"[MOMENTUM BOOST PROB] {symU} mom={mom1h_val:.2%} -> prob {ip_original:.3f} → {ip_boosted:.3f} (+{boost_factor:.3f})")
+                            ip = ip_boosted
+                            momentum_boost_applied = True
+                    
                     results["intraday_prob"] = float(ip)
+                    results["intraday_prob_original"] = float(ip_original)
                     results["intraday_model_used"] = model_used
                     results["intraday_quality_score"] = min(1.0, len(df_intra_resampled) / 120.0)
-                    print(f"[SUCCESS] {symU} {model_used} ip={ip:.3f}")
+                    print(f"[SUCCESS] {symU} {model_used} ip={ip:.3f}" + (" (BOOSTED)" if momentum_boost_applied else ""))
+
                 
                     # ✅ LOG PREDICTION FOR MONITORING
                     try:
@@ -633,6 +655,9 @@ def compute_signals(
     dp = results["daily_prob"]
     ip = results["intraday_prob"]
 
+    ismomentumregime = abs(mom1h) >= MOMTRIG or vol >= VOLTRIG
+    results["intraday_regime"] = "mom" if ismomentumregime else "mr"
+
     # Extract before combine
     weight = float(intraday_weight)
     if not results["allow_intraday"] or ip is None:
@@ -658,8 +683,16 @@ def compute_signals(
 
     # Price momentum override (tuned for 15m)
     try:
-        if dp is not None and dp > 0.65 and mom1h > 0.0020:
-            weight = max(weight, 0.65)
+        # Strong momentum = price up >0.5% in last hour
+        if mom1h is not None and mom1h > 0.005:
+            weight = max(weight, 0.75)
+            print(f"[MOMENTUM BOOST] {symU} mom1h={mom1h:.2%} -> weight={weight:.2f}")
+        
+        # Extreme momentum = price up >1% in last hour
+        if mom1h is not None and mom1h > 0.010:
+            weight = min(0.90, weight + 0.15)
+            print(f"[MOMENTUM SURGE] {symU} mom1h={mom1h:.2%} -> weight={weight:.2f}")
+            
     except Exception:
         pass
 

@@ -164,57 +164,57 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     Intraday uses shorter windows so we don't require huge history to produce a row.
     """
     df = df.copy()
-
+    
     # -----------------------------
     # Core returns / ratios
     # -----------------------------
     df["return_1"] = df["Close"].pct_change(fill_method=None)
     df["return_5"] = df["Close"].pct_change(5, fill_method=None)
-
+    
     v = df["Volume"].replace(0, np.nan)
     df["volume_roc"] = v.pct_change(fill_method=None)
-
+    
     df["close_open_ratio"] = df["Close"] / df["Open"]
     df["high_low_ratio"] = df["High"] / df["Low"]
-
+    
     # Candle shape
     df["candle_body"] = df["Close"] - df["Open"]
     df["candle_range"] = df["High"] - df["Low"]
     df["upper_wick"] = df["High"] - df[["Close", "Open"]].max(axis=1)
     df["lower_wick"] = df[["Close", "Open"]].min(axis=1) - df["Low"]
-
+    
     cr = df["candle_range"].replace(0, np.nan)
     df["body_ratio"] = df["candle_body"] / cr
     df["upper_wick_ratio"] = df["upper_wick"] / cr
     df["lower_wick_ratio"] = df["lower_wick"] / cr
-
+    
     # -----------------------------
     # Window choices by mode
     # -----------------------------
     if mode == "intraday":
-        ma_windows = [3, 5, 10, 20]      # ✅ short windows
+        ma_windows = [3, 5, 10, 20]
         rsi_windows = [6, 10]
         vol_windows = [3, 6, 12]
-        warmup = 20                      # enough for 20 + indicator buffers
+        warmup = 20
     else:
         ma_windows = [5, 10, 20, 50]
         rsi_windows = [6, 14]
         vol_windows = [5, 15, 30]
-        warmup = 80                      # enough for 50 + buffers
-
+        warmup = 80
+    
     # -----------------------------
     # Moving averages
     # -----------------------------
     for win in ma_windows:
         df[f"ema_{win}"] = ema(df["Close"], win)
         df[f"sma_{win}"] = sma(df["Close"], win)
-
+    
     # -----------------------------
     # RSI
     # -----------------------------
     df[f"rsi_{rsi_windows[0]}"] = rsi(df["Close"], rsi_windows[0])
     df[f"rsi_{rsi_windows[1]}"] = rsi(df["Close"], rsi_windows[1])
-
+    
     # -----------------------------
     # MACD (faster for intraday)
     # -----------------------------
@@ -226,11 +226,11 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
         macd_hist = macd_line - macd_signal
     else:
         macd_line, macd_signal, macd_hist = macd(df["Close"])
-
+    
     df["macd"] = macd_line
     df["macd_signal"] = macd_signal
     df["macd_hist"] = macd_hist
-
+    
     # -----------------------------
     # Stochastic (safe denom)
     # -----------------------------
@@ -239,7 +239,7 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     denom = (high_max - low_min).replace(0, np.nan)
     df["stoch_k"] = (df["Close"] - low_min) / denom * 100
     df["stoch_d"] = df["stoch_k"].rolling(3).mean()
-
+    
     # -----------------------------
     # Bollinger (safe mid)
     # -----------------------------
@@ -249,53 +249,85 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     df["bb_upper"] = upper
     df["bb_lower"] = lower
     df["bb_width"] = (upper - lower) / mid_safe
-
+    
     # -----------------------------
     # ATR + volatility
     # -----------------------------
     df["atr"] = atr(df, length=14)
     for w in vol_windows:
         df[f"vol_{w}"] = df["return_1"].rolling(w).std()
-
+    
     # -----------------------------
     # OBV + lagged returns
     # -----------------------------
     df["obv"] = obv(df)
     for lag in [1, 2, 3, 4, 5]:
         df[f"lag_ret_{lag}"] = df["return_1"].shift(lag)
-
+    
     # -----------------------------
     # Time-of-day (only meaningful intraday, safe otherwise)
     # -----------------------------
     df = add_intraday_time_features(df)
-
+    
+    # ========================================
+    # ✅ NEW: LEADING MOMENTUM FEATURES
+    # ========================================
+    
+    # 1. Multi-period momentum (captures acceleration)
+    for period in [3, 5, 10, 20]:
+        df[f"momentum_{period}"] = df["Close"].pct_change(period, fill_method=None)
+    
+    # 2. Momentum acceleration (ROC of momentum = trend strength)
+    df["momentum_accel_5"] = df["momentum_5"].diff()
+    df["momentum_accel_10"] = df["momentum_10"].diff()
+    
+    # 3. Price position relative to recent range (0-100 scale)
+    for window in [10, 20]:
+        low_min = df["Low"].rolling(window).min()
+        high_max = df["High"].rolling(window).max()
+        range_denom = (high_max - low_min).replace(0, np.nan)
+        df[f"price_position_{window}"] = ((df["Close"] - low_min) / range_denom * 100)
+    
+    # 4. Volume-weighted momentum (strong moves need volume)
+    vol_norm = df["Volume"] / df["Volume"].rolling(20).mean()
+    df["vol_momentum_5"] = df["momentum_5"] * vol_norm
+    df["vol_momentum_10"] = df["momentum_10"] * vol_norm
+    
+    # 5. Breakout detection (price breaking above recent highs)
+    df["breakout_10"] = (df["Close"] > df["High"].rolling(10).max().shift(1)).astype(int)
+    df["breakout_20"] = (df["Close"] > df["High"].rolling(20).max().shift(1)).astype(int)
+    
+    # 6. Trend consistency (% of recent bars that are up)
+    df["trend_consistency_10"] = (df["Close"] > df["Close"].shift(1)).rolling(10).mean()
+    
     # =====================================================
     # Clean infinities / NaNs (but DON'T nuke everything)
     # =====================================================
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-
+    
     # Always require core price columns
     df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-
+    
+    
     # --- Dynamic warmup ---
-    # Need enough bars for the *largest* rolling window actually used.
+    
     if mode == "intraday":
-        # you use up to sma_20 / ema_20 / bollinger(20) / stoch(14) / atr(14)
+    
         required = 20
         extra_buffer = 2
     else:
         required = 50
         extra_buffer = 10
-
+    
     warmup = required + extra_buffer
-
-    # If we don't have enough data, DON'T wipe everything.
-    # Instead: keep what we can and just drop NaNs at the end.
+    
+    
     if len(df) <= warmup:
         return df.iloc[0:0]
-
+    
     # Normal case: trim warmup then drop remaining NaNs
     df = df.iloc[warmup:].dropna()
+    
     return df
 
 

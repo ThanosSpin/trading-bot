@@ -382,6 +382,74 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
     return make_decision("hold", 0, explain + "Within thresholds → HOLD.")
 
 
+# ============================================================
+# 🚀 MOMENTUM BREAKOUT DETECTION
+# ============================================================
+def check_momentum_breakout(sym: str, diagnostics: dict, preds: dict) -> tuple:
+    """
+    Detect strong momentum breakouts that model might underestimate.
+    Returns: (force_buy: bool, reason: str)
+    """
+    import pandas as pd
+    
+    d = diagnostics.get(sym, {})
+    prob = preds.get(sym, 0.0)
+    
+    # Get momentum metrics
+    mom = d.get("intraday_mom")
+    vol = d.get("intraday_vol")
+    price = d.get("price")
+    
+    if not all([mom is not None, price]):
+        return False, ""
+    
+    try:
+        mom = float(mom)
+        vol = float(vol) if vol else 0.0
+        price = float(price)
+        
+        # Fetch 50-day MA for trend context
+        df = fetch_historical_data(sym, period="3mo", interval="1d")
+        if df is None or len(df) < 50:
+            return False, ""
+        
+        # ✅ FIX: Extract scalar value from Series
+        close_series = df['Close']
+        if isinstance(close_series, pd.DataFrame):
+            close_series = close_series.iloc[:, 0]
+        
+        ma50_series = close_series.rolling(50).mean()
+        ma50 = float(ma50_series.iloc[-1])  # ✅ Convert to scalar
+        
+        # Calculate how far above MA50
+        above_ma = (price - ma50) / ma50
+        
+        # BREAKOUT CONDITIONS:
+        # 1. Price >3% above 50-day MA (established uptrend)
+        # 2. Intraday momentum >1% (strong continuation)
+        # 3. Model at least neutral (prob >= 0.45)
+        # 4. High volatility confirms real move (vol > 1.5%)
+        
+        if (
+            above_ma > 0.02 and      # ✅ LOWERED: 2% above MA50 (was 3%)
+            mom > 0.008 and          # ✅ LOWERED: 0.8% hourly momentum (was 1%)
+            prob >= 0.40 and         # ✅ LOWERED: Model prob >=40% (was 45%)
+            vol > 0.012):            # ✅ LOWERED: Vol >1.2% (was 1.5%)
+
+            
+            return True, (
+                f"[MOMENTUM BREAKOUT] {sym}: "
+                f"+{above_ma:.1%} above MA50, "
+                f"mom_1h={mom:.2%}, "
+                f"vol={vol:.2%}, "
+                f"model_prob={prob:.1%}"
+            )
+            
+    except Exception as e:
+        print(f"[WARN] Momentum breakout check failed for {sym}: {e}")
+    
+    return False, ""
+
 
 # ---------------------------------------------------------
 # NVDA-priority coordinator
@@ -1074,6 +1142,65 @@ def compute_strategy_decisions(
             decisions[spy_sym] = spy_candidate
         else:
             decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
+
+    
+        # ============================================================
+    # 🚀 MOMENTUM BREAKOUT OVERRIDE (before dip-buy)
+    # ============================================================
+    for sym in core_symbols:
+        force_buy, reason = check_momentum_breakout(sym, diagnostics, preds)
+        
+        if force_buy:
+            # Check if we can afford it
+            pm = pms[sym]
+            shares = float(pm.data.get("shares", 0.0))
+            
+            if shares > 0:
+                # Already holding - keep it
+                print(reason + " → HOLDING existing position")
+                continue
+            
+            cash = float(account_state.get("cash", 0.0))
+            price = float(prices.get(sym, 0.0))
+            
+            if price <= 0:
+                continue
+            
+            # Allocate 80% of cash for breakout (aggressive)
+            buy_qty = int((cash * 0.80) // price)
+            buy_qty = apply_position_limits(buy_qty, price, cash, sym)
+            
+            if buy_qty > 0:
+                decisions[sym] = make_decision(
+                    "buy",
+                    buy_qty,
+                    reason,
+                    momentum_override=True,
+                    priority_rank=1
+                )
+                print(f"✅ {reason} → BUY {buy_qty} shares")
+    
+    # ============================================================
+    # 🚨 EXTREME MOMENTUM OVERRIDE (>1.5% hourly move)
+    # ============================================================
+    for sym in core_symbols:
+        d = diagnostics.get(sym, {})
+        mom = d.get("intraday_mom")
+        prob = preds.get(sym, 0.0)
+        pm = pms[sym]
+        shares = float(pm.data.get("shares", 0.0))
+        
+        if mom is not None and float(mom) > 0.015:  # >1.5% hourly momentum
+            # If not holding and model is negative, override to neutral/buy
+            if shares <= 0 and prob < 0.50:
+                print(f"⚡ [EXTREME MOMENTUM] {sym} mom={float(mom):.2%} overriding prob {prob:.2%} → treating as neutral")
+                # Don't force sell on extreme upward momentum
+                if decisions.get(sym, {}).get("action") == "sell":
+                    decisions[sym] = make_decision(
+                        "hold", 0,
+                        f"{sym}: SELL blocked by extreme upward momentum (mom={float(mom):.2%})"
+                    )
+
 
     # ============================================================
     # 🔥 DIP-BUY OVERRIDE

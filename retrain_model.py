@@ -9,7 +9,7 @@ import joblib
 from data_loader import fetch_historical_data
 from model_xgb import train_model, MODEL_DIR
 from features import _clean_columns
-from config import TRAIN_SYMBOLS
+from config import TRAIN_SYMBOLS, SHAP_TOP_N
 from feature_selection import select_features_with_shap, retrain_with_selected_features
 
 # Rebuild features for SHAP
@@ -21,7 +21,7 @@ from target_labels import create_target_label
 # Settings
 # ---------------------------------------------------------
 MAX_BACKUPS = 6  # keep only last 6 backups
-LOOKBACK_YEARS = 2
+LOOKBACK_YEARS = 1
 DAILY_INTERVAL = "1d"
 
 INTRADAY_LOOKBACK_DAYS = 60
@@ -116,7 +116,7 @@ def train_daily_model_with_shap(sym: str):
             model=shap_model,  # ✅ Use base_model for SHAP
             X_train=X_train,
             X_test=X_test,
-            top_n=30,
+            top_n=SHAP_TOP_N,
             plot=True,
             symbol=sym,
             mode="daily"
@@ -191,7 +191,7 @@ def train_intraday_models_with_shap(sym: str):
                 model=shap_model,  # ✅ Use base_model for SHAP
                 X_train=X_train,
                 X_test=X_test,
-                top_n=30,
+                top_n=SHAP_TOP_N,
                 plot=True,
                 symbol=sym,
                 mode=mode
