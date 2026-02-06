@@ -33,7 +33,7 @@ RS_MARGIN = 0.05
 
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.55    # require strong confidence to buy
-SELL_THRESHOLD = 0.40   # require strong confidence to sell
+SELL_THRESHOLD = 0.45   # require strong confidence to sell
 
 # =========================
 # SPY fallback configuration
