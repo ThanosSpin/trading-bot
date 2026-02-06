@@ -114,7 +114,7 @@ PDT_EMERGENCY_MAX_PER_DAY = 1
 # PRE-MARKET SCANNER SETTINGS
 # ============================================================
 PRE_MARKET_ENABLED = True
-PRE_MARKET_MIN_PROB = 0.75          # Only queue orders with 75%+ conviction
+PRE_MARKET_MIN_PROB = 0.70          # Only queue orders with 75%+ conviction
 PRE_MARKET_MAX_ALLOCATION = 1.0     # Use 100% of available cash
 PRE_MARKET_LIMIT_BUFFER = 0.002     # Place limit 0.2% above last price for quick fill
 PRE_MARKET_SYMBOLS = SYMBOL         # Use same symbols as main bot
