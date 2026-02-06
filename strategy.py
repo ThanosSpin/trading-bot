@@ -832,12 +832,20 @@ def compute_strategy_decisions(
                 if sym == "NVDA":
                     continue
 
-
                 sh = live_shares(sym)
                 px = float(prices.get(sym, 0.0) or 0.0)
                 if sh <= 0 or px <= 0:
                     continue
 
+                # ✅ PDT CHECK: Don't sell if opened today
+                try:
+                    opened_today_qty = float(get_opened_today_qty(sym) or 0.0)
+                    if opened_today_qty >= sh:  # Entire position opened today
+                        print(f"[PDT BLOCK] Cannot sell {sym} to fund NVDA - entire position opened today ({sh} shares)")
+                        continue  # Skip this symbol, don't create SELL decision
+                except Exception as e:
+                    print(f"[WARN] PDT check failed for {sym}: {e}")
+                    # Fail safe - don't sell if we can't verify
 
                 sim_cash += sh * px
                 decisions[sym] = make_decision(
@@ -845,6 +853,7 @@ def compute_strategy_decisions(
                     int(sh),
                     f"{sym}: Sold to fund NVDA BUY (NVDA priority)."
                 )
+
 
 
                 # Only force-sell AAPL if NVDA BUY and AAPL is HOLD/SELL (not BUY)
@@ -927,13 +936,16 @@ def compute_strategy_decisions(
 
 
                 if aapl_sh > 0 and aapl_action in ("hold", "sell"):
-                    decisions["AAPL"] = make_decision("sell", int(aapl_sh), "AAPL: Sold to fund ABBV BUY (rotation).")
-                    decisions["ABBV"] = make_decision(
-                        "buy", 1,
-                        "ABBV PRIORITY BUY — recalc all-in after sells (AAPL rotation).",
-                        recalc_all_in=True,
-                        priority_rank=2,  # NVDA would be 1 if it existed here; this runs after sells
-                    )
+                    # ✅ PDT CHECK
+                    try:
+                        opened_today_qty = float(get_opened_today_qty("AAPL") or 0.0)
+                        if opened_today_qty >= aapl_sh:
+                            print(f"[PDT BLOCK] Cannot sell AAPL to fund ABBV - opened today")
+                        else:
+                            decisions["AAPL"] = make_decision("sell", int(aapl_sh), "AAPL: Sold to fund ABBV BUY (rotation).")
+                    except Exception as e:
+                        print(f"[WARN] PDT check failed for AAPL: {e}")
+
 
 
    # ---------------------------------------------------------
@@ -982,11 +994,20 @@ def compute_strategy_decisions(
         if nvda_wants_buy and aapl_is_not_buy:
             aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
             if aapl_sh > 0:
-                decisions["AAPL"] = make_decision(
-                    "sell",
-                    int(aapl_sh),
-                    "AAPL: Sold to fund NVDA rotation buy."
-                )
+                # ✅ PDT CHECK
+                try:
+                    opened_today_qty = float(get_opened_today_qty("AAPL") or 0.0)
+                    if opened_today_qty >= aapl_sh:
+                        print(f"[PDT BLOCK] Cannot rotate AAPL to fund NVDA - opened today")
+                    else:
+                        decisions["AAPL"] = make_decision(
+                            "sell",
+                            int(aapl_sh),
+                            "AAPL: Sold to fund NVDA rotation buy."
+                        )
+                except Exception as e:
+                    print(f"[WARN] PDT check failed for AAPL rotation: {e}")
+
 
 
             # mark NVDA as priority buy (main.py will recalc after sells)

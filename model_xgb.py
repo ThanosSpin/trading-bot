@@ -599,10 +599,13 @@ def compute_signals(
                     if results.get("intraday_regime") == "mom" and mom1h is not None:
                         mom1h_val = float(mom1h)
                         
-                        # ✅ LOWERED: Boost if momentum >0.5% but model says <55% (catches NVDA's 0.62%)
-                        if abs(mom1h_val) > 0.005 and ip_original < 0.55:
-                            # Scale boost: 0.5% mom = +2.5%, 1% mom = +5%, 2% mom = +10%
-                            boost_factor = min(0.15, abs(mom1h_val) * 5.0)
+                        # ✅ Scale boost more aggressively for momentum >1%
+                        if abs(mom1h_val) > 0.005 and ip_original < 0.60:  # Raised from 0.55
+                            if abs(mom1h_val) > 0.01:  # Extreme momentum (>1%)
+                                boost_factor = min(0.20, abs(mom1h_val) * 7.0)  # Up to 20% boost
+                            else:  # Moderate momentum (0.5-1%)
+                                boost_factor = min(0.15, abs(mom1h_val) * 5.0)
+
                             ip_boosted = min(0.85, ip_original + boost_factor)
                             
                             print(f"[MOMENTUM BOOST PROB] {symU} mom={mom1h_val:.2%} -> prob {ip_original:.3f} → {ip_boosted:.3f} (+{boost_factor:.3f})")
