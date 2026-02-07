@@ -24,6 +24,11 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]  # symbol
 INITIAL_CAPITAL = 0
 
+# --- Trading thresholds ---
+BUY_THRESHOLD = 0.55    # require strong confidence to buy
+SELL_THRESHOLD = 0.45   # require strong confidence to sell
+
+
 # --------------------
 # Model blending weights
 # --------------------
@@ -31,9 +36,8 @@ INTRADAY_WEIGHT = 0.65   # default intraday dominance
 MIN_INTRADAY_BARS_FOR_FEATURES = 25
 RS_MARGIN = 0.05
 
-# --- Trading thresholds ---
-BUY_THRESHOLD = 0.55    # require strong confidence to buy
-SELL_THRESHOLD = 0.45   # require strong confidence to sell
+# Model training configuration
+USE_MULTICLASS_MODELS = False  # Train 5-class models instead of binary
 
 # =========================
 # SPY fallback configuration

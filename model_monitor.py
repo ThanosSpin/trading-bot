@@ -14,51 +14,60 @@ from config import MODEL_DIR
 
 
 
-def log_prediction(
-    symbol: str,
-    mode: str,
-    predicted_prob: float,
-    actual_outcome: Optional[int] = None,
-    price: Optional[float] = None,
-    logs_dir: str = "logs"
-):
+def log_prediction(symbol: str, mode: str, predicted_prob: float, price: float, prediction_details: dict = None):
     """
-    Log a single prediction to CSV for later evaluation.
-
+    ✨ ENHANCED: Log predictions with optional multi-class details
+    
     Args:
-        symbol: Stock symbol (e.g., 'NVDA')
-        mode: Model mode ('daily', 'intraday_mr', 'intraday_mom')
-        predicted_prob: Model's predicted probability (0.0-1.0)
-        actual_outcome: Actual result (0=down, 1=up) - can be None initially
-        price: Current price at prediction time
-        logs_dir: Directory to store logs
-
-    Format: predictions_{SYMBOL}_{MODE}.csv
-    Columns: timestamp, symbol, mode, predicted_prob, actual_outcome, price
+        symbol: Stock symbol
+        mode: Model mode (daily, intraday_mr, intraday_mom)
+        predicted_prob: Final probability (0-1)
+        price: Current price
+        prediction_details: Optional dict with multi-class breakdown
     """
-    os.makedirs(logs_dir, exist_ok=True)
-
-    # File per symbol-mode combination
-    filename = f"predictions_{symbol.upper()}_{mode}.csv"
-    path = os.path.join(logs_dir, filename)
-
-    # Create row
-    row = {
-        'timestamp': pd.Timestamp.utcnow().isoformat(),
-        'symbol': symbol.upper(),
+    from datetime import datetime
+    import os
+    import pandas as pd
+    
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    log_file = os.path.join(log_dir, f"predictions_{symbol}.csv")
+    
+    # Build log entry
+    entry = {
+        'timestamp': datetime.now().isoformat(),
+        'symbol': symbol,
         'mode': mode,
-        'predicted_prob': float(predicted_prob),
-        'actual_outcome': actual_outcome if actual_outcome is not None else np.nan,
-        'price': float(price) if price is not None else np.nan
+        'predicted_prob': predicted_prob,
+        'price': price,
     }
-
+    
+    # ✨ NEW: Add multi-class details if available
+    if prediction_details and isinstance(prediction_details, dict):
+        entry['predicted_class'] = prediction_details.get('predicted_class')
+        entry['predicted_class_name'] = prediction_details.get('predicted_class_name')
+        entry['confidence'] = prediction_details.get('confidence')
+        entry['bullish_prob'] = prediction_details.get('bullish_prob')
+        entry['bearish_prob'] = prediction_details.get('bearish_prob')
+        entry['flat_prob'] = prediction_details.get('flat_prob')
+        
+        # Class breakdown
+        breakdown = prediction_details.get('class_breakdown', {})
+        entry['prob_strong_down'] = breakdown.get('strong_down')
+        entry['prob_weak_down'] = breakdown.get('weak_down')
+        entry['prob_flat'] = breakdown.get('flat')
+        entry['prob_weak_up'] = breakdown.get('weak_up')
+        entry['prob_strong_up'] = breakdown.get('strong_up')
+    
     # Append to CSV
-    df_row = pd.DataFrame([row])
-
-    if os.path.exists(path):
-        df_row.to_csv(path, mode='a', header=False, index=False)
+    df_entry = pd.DataFrame([entry])
+    
+    if os.path.exists(log_file):
+        df_entry.to_csv(log_file, mode='a', header=False, index=False)
     else:
-        df_row.to_csv(path, mode='w', header=True, index=False)
+        df_entry.to_csv(log_file, mode='w', header=True, index=False)
+
 
 
 def evaluate_predictions(

@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from time_features import add_time_features
 
+
 # ============================================================================
 # MULTIINDEX → FLAT OHLCV COLUMN CLEANER
 # ============================================================================
@@ -156,6 +157,35 @@ def add_intraday_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================================
+# ✅ NEW: CLEAN UNNAMED COLUMNS
+# ============================================================================
+def _remove_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove any unnamed or invalid column names.
+    This prevents XGBoost errors with empty column names.
+    """
+    df = df.copy()
+    
+    # Find unnamed/empty columns
+    unnamed_cols = []
+    for col in df.columns:
+        if col == '' or pd.isna(col) or str(col).strip() == '':
+            unnamed_cols.append(col)
+    
+    if unnamed_cols:
+        print(f"[WARN] Dropping {len(unnamed_cols)} unnamed columns from features")
+        df = df.drop(columns=unnamed_cols)
+    
+    # Remove duplicate column names
+    if df.columns.duplicated().any():
+        duplicated = df.columns[df.columns.duplicated()].tolist()
+        print(f"[WARN] Found duplicate columns: {duplicated}")
+        df = df.loc[:, ~df.columns.duplicated()]
+    
+    return df
+
+
+# ============================================================================
 # ADVANCED FEATURE BUILDER
 # ============================================================================
 def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame:
@@ -164,6 +194,15 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     Intraday uses shorter windows so we don't require huge history to produce a row.
     """
     df = df.copy()
+    
+    # ============================================================
+    # ✅ NEW: USE ENHANCED INDICATORS FROM indicators.py
+    # ============================================================
+    from indicators import add_indicators
+    
+    print(f"[FEATURES] Adding enhanced indicators...")
+    df = add_indicators(df)
+    print(f"[FEATURES] ✅ Enhanced indicators added")
     
     # -----------------------------
     # Core returns / ratios
@@ -180,8 +219,13 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     # Candle shape
     df["candle_body"] = df["Close"] - df["Open"]
     df["candle_range"] = df["High"] - df["Low"]
-    df["upper_wick"] = df["High"] - df[["Close", "Open"]].max(axis=1)
-    df["lower_wick"] = df[["Close", "Open"]].min(axis=1) - df["Low"]
+    
+    # ✅ FIX: Use .values to prevent unnamed columns from max/min operations
+    close_open_max = np.maximum(df["Close"].values, df["Open"].values)
+    close_open_min = np.minimum(df["Close"].values, df["Open"].values)
+    
+    df["upper_wick"] = df["High"] - close_open_max
+    df["lower_wick"] = close_open_min - df["Low"]
     
     cr = df["candle_range"].replace(0, np.nan)
     df["body_ratio"] = df["candle_body"] / cr
@@ -193,74 +237,41 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     # -----------------------------
     if mode == "intraday":
         ma_windows = [3, 5, 10, 20]
-        rsi_windows = [6, 10]
+        
         vol_windows = [3, 6, 12]
         warmup = 20
     else:
         ma_windows = [5, 10, 20, 50]
-        rsi_windows = [6, 14]
+        
         vol_windows = [5, 15, 30]
         warmup = 80
     
     # -----------------------------
-    # Moving averages
+    # Additional moving averages (complement indicators.py)
     # -----------------------------
     for win in ma_windows:
-        df[f"ema_{win}"] = ema(df["Close"], win)
-        df[f"sma_{win}"] = sma(df["Close"], win)
+        # Only add if not already present from indicators.py
+        if f"ema_{win}" not in df.columns:
+            df[f"ema_{win}"] = ema(df["Close"], win)
+        if f"sma_{win}" not in df.columns:
+            df[f"sma_{win}"] = sma(df["Close"], win)
+    
+    # ✅ REMOVED: RSI, MACD, Stochastic, Bollinger - now from indicators.py
     
     # -----------------------------
-    # RSI
+    # ATR + volatility (if not already present)
     # -----------------------------
-    df[f"rsi_{rsi_windows[0]}"] = rsi(df["Close"], rsi_windows[0])
-    df[f"rsi_{rsi_windows[1]}"] = rsi(df["Close"], rsi_windows[1])
-    
-    # -----------------------------
-    # MACD (faster for intraday)
-    # -----------------------------
-    if mode == "intraday":
-        fast = ema(df["Close"], 8)
-        slow = ema(df["Close"], 18)
-        macd_line = fast - slow
-        macd_signal = ema(macd_line, 6)
-        macd_hist = macd_line - macd_signal
-    else:
-        macd_line, macd_signal, macd_hist = macd(df["Close"])
-    
-    df["macd"] = macd_line
-    df["macd_signal"] = macd_signal
-    df["macd_hist"] = macd_hist
-    
-    # -----------------------------
-    # Stochastic (safe denom)
-    # -----------------------------
-    low_min = df["Low"].rolling(14).min()
-    high_max = df["High"].rolling(14).max()
-    denom = (high_max - low_min).replace(0, np.nan)
-    df["stoch_k"] = (df["Close"] - low_min) / denom * 100
-    df["stoch_d"] = df["stoch_k"].rolling(3).mean()
-    
-    # -----------------------------
-    # Bollinger (safe mid)
-    # -----------------------------
-    mid, upper, lower = bollinger(df["Close"], length=20, num_std=2)
-    mid_safe = mid.replace(0, np.nan)
-    df["bb_mid"] = mid
-    df["bb_upper"] = upper
-    df["bb_lower"] = lower
-    df["bb_width"] = (upper - lower) / mid_safe
-    
-    # -----------------------------
-    # ATR + volatility
-    # -----------------------------
-    df["atr"] = atr(df, length=14)
+    if "atr" not in df.columns:
+        df["atr"] = atr(df, length=14)
     for w in vol_windows:
         df[f"vol_{w}"] = df["return_1"].rolling(w).std()
     
     # -----------------------------
     # OBV + lagged returns
     # -----------------------------
-    df["obv"] = obv(df)
+    if "obv" not in df.columns:
+        df["obv"] = obv(df)
+    
     for lag in [1, 2, 3, 4, 5]:
         df[f"lag_ret_{lag}"] = df["return_1"].shift(lag)
     
@@ -270,7 +281,7 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     df = add_intraday_time_features(df)
     
     # ========================================
-    # ✅ NEW: LEADING MOMENTUM FEATURES
+    # ✅ ENHANCED: LEADING MOMENTUM FEATURES
     # ========================================
     
     # 1. Multi-period momentum (captures acceleration)
@@ -294,8 +305,11 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     df["vol_momentum_10"] = df["momentum_10"] * vol_norm
     
     # 5. Breakout detection (price breaking above recent highs)
-    df["breakout_10"] = (df["Close"] > df["High"].rolling(10).max().shift(1)).astype(int)
-    df["breakout_20"] = (df["Close"] > df["High"].rolling(20).max().shift(1)).astype(int)
+    
+    high_10_max = df["High"].rolling(10).max().shift(1)
+    high_20_max = df["High"].rolling(20).max().shift(1)
+    df["breakout_10"] = (df["Close"] > high_10_max).astype(int)
+    df["breakout_20"] = (df["Close"] > high_20_max).astype(int)
     
     # 6. Trend consistency (% of recent bars that are up)
     df["trend_consistency_10"] = (df["Close"] > df["Close"].shift(1)).rolling(10).mean()
@@ -308,11 +322,11 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     # Always require core price columns
     df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
     
-    
+
     # --- Dynamic warmup ---
-    
+
     if mode == "intraday":
-    
+
         required = 20
         extra_buffer = 2
     else:
@@ -321,14 +335,18 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     
     warmup = required + extra_buffer
     
-    
+
     if len(df) <= warmup:
         return df.iloc[0:0]
     
     # Normal case: trim warmup then drop remaining NaNs
     df = df.iloc[warmup:].dropna()
     
+    # ✅ CRITICAL: Remove any unnamed columns before returning
+    df = _remove_unnamed_columns(df)
+    
     return df
+
 
 
 # ============================================================================
@@ -337,6 +355,10 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
 def _build_base_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame:
     df = _fix_ohlcv(df)
     df = add_advanced_features(df, mode=mode)
+    
+    # ✅ SAFETY: Final check for unnamed columns
+    df = _remove_unnamed_columns(df)
+    
     return df
 
 
@@ -347,7 +369,12 @@ def build_daily_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build full advanced feature set for daily data.
     """
-    return _build_base_features(df, mode="daily")
+    result = _build_base_features(df, mode="daily")
+    
+    # ✅ FINAL SAFETY CHECK
+    result = _remove_unnamed_columns(result)
+    
+    return result
 
 
 def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -361,10 +388,14 @@ def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.index, pd.DatetimeIndex):
         df = add_time_features(df)
     
+    # ✅ FINAL SAFETY CHECK
+    df = _remove_unnamed_columns(df)
+    
     return df
 
+
 # ============================================================
-# PATCH FOR features.py - TIME-OF-DAY FEATURES
+# TIME-OF-DAY FEATURES (Enhanced version)
 # ============================================================
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -382,6 +413,9 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         df with new time features added
     """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    
     df = df.copy()
 
     # Extract time components
@@ -400,7 +434,7 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     df['minutes_to_close'] = df['minutes_to_close'].clip(lower=0)  # After-hours = 0
 
     # Session phase (categorical → one-hot encoded)
-    # Opening: 0-30 min, Midday: 30-330 min, Closing: last 60 min
+
     def get_session_phase(minutes_since_open):
         if minutes_since_open <= 30:
             return 'opening'
@@ -417,13 +451,12 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     df['is_closing'] = (df['session_phase'] == 'closing').astype(int)
 
     # Non-linear time effects (capture U-shaped volatility pattern)
-    # Volatility is high at open and close, low midday
-    import numpy as np
+
     df['time_squared'] = df['minutes_since_open'] ** 2
     df['time_cubed'] = df['minutes_since_open'] ** 3
 
     # Sine/cosine encoding (captures cyclical nature of trading day)
-    # Full cycle = 390 minutes (6.5 hours)
+
     df['time_sin'] = np.sin(2 * np.pi * df['minutes_since_open'] / 390)
     df['time_cos'] = np.cos(2 * np.pi * df['minutes_since_open'] / 390)
 
@@ -436,5 +469,8 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Drop intermediate columns
     df = df.drop(columns=['hour', 'minute', 'session_phase'], errors='ignore')
+    
+    # ✅ SAFETY: Clean any unnamed columns that may have been created
+    df = _remove_unnamed_columns(df)
 
     return df
