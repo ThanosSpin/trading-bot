@@ -124,8 +124,7 @@ def get_predictions(symbols, debug=True):
                     symbol=sym,
                     mode='daily',
                     predicted_prob=float(sig.get('daily_prob')),
-                    actual_outcome=None,
-                    price=float(sig.get('price')) if sig.get('price') else None
+                    price=float(sig.get('price')) if sig.get('price') else None,
                 )
         except Exception as e:
             print(f"[WARN] Could not log daily prediction: {e}")
@@ -138,8 +137,7 @@ def get_predictions(symbols, debug=True):
                     symbol=sym,
                     mode=intraday_mode,
                     predicted_prob=float(sig.get('intraday_prob')),
-                    actual_outcome=None,
-                    price=float(sig.get('price')) if sig.get('price') else None
+                    price=float(sig.get('price')) if sig.get('price') else None,
                 )
         except Exception as e:
             print(f"[WARN] Could not log intraday prediction: {e}")
@@ -573,10 +571,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display
