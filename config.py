@@ -84,7 +84,7 @@ VOL_HOLD = 0.0035  # 0.35%
 TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY", "ABBV", "PLTR"]  # used by retrain_model.py
 
 # Feature selection
-SHAP_TOP_N = 20  # Number of features to keep after SHAP selection
+SHAP_TOP_N = 40  # Number of features to keep after SHAP selection
 
 # --- Risk management ---
 STOP_LOSS = 0.95        # sell if price falls 5% below last buy price

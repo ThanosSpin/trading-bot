@@ -193,7 +193,7 @@ def train_daily_model_with_shap(sym: str):
                     model=shap_model,
                     X_train=X_train,
                     X_test=X_test,
-                    top_n=SHAP_TOP_N,
+                    top_n=None,
                     plot=True,
                     symbol=sym,
                     mode="daily"
@@ -275,7 +275,7 @@ def train_intraday_models_with_shap(sym: str):
                         model=shap_model,
                         X_train=X_train,
                         X_test=X_test,
-                        top_n=SHAP_TOP_N,
+                        top_n=None,
                         plot=True,
                         symbol=sym,
                         mode=mode
