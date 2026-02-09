@@ -197,7 +197,7 @@ def scan_and_queue_orders():
     print(f"📊 Scanning {len(symbols)} symbols for high-conviction signals...")
     
     # ✅ ENHANCED: Show thresholds for both BUY and SELL
-    min_sell_prob = getattr(PRE_MARKET_MIN_SELL_PROB, 0.35)
+    min_sell_prob = PRE_MARKET_MIN_SELL_PROB if 'PRE_MARKET_MIN_SELL_PROB' in dir() else 0.45
     print(f"🎯 BUY Threshold:  Probability >= {PRE_MARKET_MIN_PROB:.0%}")
     if allow_short:
         print(f"🎯 SELL Threshold: Probability <= {min_sell_prob:.0%}\n")
@@ -301,7 +301,7 @@ def scan_and_queue_orders():
                     continue
                 
                 # Calculate position size for short (use buying power, not cash)
-                short_allocation = getattr(PRE_MARKET_SHORT_ALLOCATION, 0.10)
+                short_allocation = PRE_MARKET_SHORT_ALLOCATION if 'PRE_MARKET_SHORT_ALLOCATION' in dir() else 0.10
                 allocation = buying_power * short_allocation
                 max_qty = int(allocation // price)
                 
