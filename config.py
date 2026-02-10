@@ -25,7 +25,7 @@ SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]  # symbol
 INITIAL_CAPITAL = 0
 
 # --- Trading thresholds ---
-BUY_THRESHOLD = 0.53    # require strong confidence to buy
+BUY_THRESHOLD = 0.55    # require strong confidence to buy
 SELL_THRESHOLD = 0.47   # require strong confidence to sell
 
 
