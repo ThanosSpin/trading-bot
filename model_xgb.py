@@ -1641,7 +1641,26 @@ def compute_signals(
         results["final_prob"] = float(dp)
     else:
         results["final_prob"] = float(weight * ip + (1 - weight) * dp)
-    
+
+    # ============================================================
+    # EMERGENCY: Block contradictory momentum signals
+    # ============================================================
+    mom1h = results.get("intraday_mom")
+    if mom1h is not None and ip is not None:
+        mom1h_val = float(mom1h)
+        
+        # If momentum is strongly negative but intraday predicts bullish
+        if mom1h_val < -0.01 and ip > 0.60:  # -1% momentum but 60%+ bullish pred
+            print(f"[CONTRADICTION] {symU}: mom={mom1h_val:.2%} but ip={ip:.3f} - capping final_prob at 0.52")
+            results["final_prob"] = min(results["final_prob"], 0.52)  # Force neutral
+            results["contradiction_flagged"] = True
+        
+        # If momentum is strongly positive but intraday predicts bearish
+        elif mom1h_val > 0.01 and ip < 0.40:  # +1% momentum but <40% bearish pred
+            print(f"[CONTRADICTION] {symU}: mom={mom1h_val:.2%} but ip={ip:.3f} - flooring final_prob at 0.48")
+            results["final_prob"] = max(results["final_prob"], 0.48)  # Force neutral
+            results["contradiction_flagged"] = True
+        
     # ✨ NEW: Final signal description
     results["final_signal"] = get_signal_details(results["final_prob"])
     

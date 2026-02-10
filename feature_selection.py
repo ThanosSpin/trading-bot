@@ -155,7 +155,9 @@ def select_features_with_shap(
     
     # ✅ WARNING: Check if top features are too concentrated
     top_10_importance = feature_importance.head(10)["shap_importance"].sum()
-    top_10_pct = top_10_importance / total_importance * 100
+    # 🔧 FIX: Add zero-check before division
+    if total_importance > 1e-10:  # Not zero or near-zero
+        top_10_pct = top_10_importance / total_importance * 100
     
     if top_10_pct > 80:
         print(f"\n⚠️ WARNING: Top 10 features account for {top_10_pct:.1f}% of importance")

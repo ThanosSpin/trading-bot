@@ -73,6 +73,11 @@ INTRADAY_REGIME_OVERRIDES = {
         "mom_trig": 0.0035,   # NVDA needs stronger push to be "momentum"
         "vol_trig": 0.0032,
     },
+    "PLTR": {
+        "mom_trig": 999.0,      # ✅ Effectively disable momentum regime
+        "vol_trig": 999.0,      # Force PLTR to always use mean-reversion or legacy model
+        "force_mr": True,       # Optional: force mean-reversion model instead
+    },
     # You can add more later:
     # "AAPL": {"mom_trig": 0.0022, "vol_trig": 0.0028},
 }
