@@ -257,6 +257,27 @@ def load_signal_history(sym: str) -> Optional[pd.DataFrame]:
 # PORTFOLIO SUMMARY
 # -------------------------------------------------
 st.header("Portfolio Summary")
+
+try:
+    from account_cache import account_cache
+    account_cache.invalidate()
+    account = account_cache.get_account()
+    
+    total_equity = float(account.get("equity", 0.0))
+    total_cash = float(account.get("cash", 0.0))
+    buying_power = float(account.get("buying_power", 0.0))
+    
+    # Top-level KPIs
+    k1, k2, k3 = st.columns(3)
+    k1.metric("💼 Total Equity", f"${total_equity:,.2f}")
+    k2.metric("💵 Cash Available", f"${total_cash:,.2f}")
+    k3.metric("💪 Buying Power", f"${buying_power:,.2f}")
+    
+    st.divider()
+    
+except Exception as e:
+    st.error(f"Error fetching account data: {e}")
+
 for sym in symbols:
     try:
         live = get_live_portfolio(sym)
