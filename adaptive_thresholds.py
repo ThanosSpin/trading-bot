@@ -9,6 +9,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, Optional
+from config import INTRADAY_REGIME_OVERRIDES
+from data_loader import fetch_historical_data
 
 # Cache thresholds to avoid repeated API calls
 _THRESHOLD_CACHE = {}
@@ -45,10 +47,31 @@ def get_adaptive_regime_thresholds(
         >>> print(thresholds)
         {'mom_trig': 0.0045, 'vol_trig': 0.0038, 'calculated_at': '2026-02-03T11:46:00', 'sample_size': 2340}
     """
-    from data_loader import fetch_historical_data
 
+    
     cache_key = f"{sym}_{lookback_days}_{percentile}_{interval}"
 
+    # ✅ NEW: Check for config override BEFORE doing anything else
+    try:
+        from config import INTRADAY_REGIME_OVERRIDES
+        ovr = INTRADAY_REGIME_OVERRIDES.get(sym, {})
+        
+        if ovr.get("disable_adaptive", False):
+            print(f"[ADAPTIVE] {sym}: Adaptive disabled via config override")
+            result = {
+                'mom_trig': float(ovr.get("mom_trig", 0.0050)),
+                'vol_trig': float(ovr.get("vol_trig", 0.0035)),
+                'calculated_at': datetime.now().isoformat(),
+                'sample_size': 0,
+                'percentile': percentile,
+                'lookback_days': lookback_days,
+                'source': 'config_override'
+            }
+            print(f"[ADAPTIVE] {sym} using config: mom={result['mom_trig']:.4f} vol={result['vol_trig']:.4f}")
+            return result
+    except ImportError:
+        pass  # Config doesn't have INTRADAY_REGIME_OVERRIDES yet
+    
     # Check cache
     if not force_refresh and cache_key in _THRESHOLD_CACHE:
         cached = _THRESHOLD_CACHE[cache_key]

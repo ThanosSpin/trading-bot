@@ -76,7 +76,7 @@ INTRADAY_REGIME_OVERRIDES = {
     "PLTR": {
         "mom_trig": 999.0,      # ✅ Effectively disable momentum regime
         "vol_trig": 999.0,      # Force PLTR to always use mean-reversion or legacy model
-        "force_mr": True,       # Optional: force mean-reversion model instead
+        "disable_adaptive": True,  # Skip adaptive calculation
     },
     # You can add more later:
     # "AAPL": {"mom_trig": 0.0022, "vol_trig": 0.0028},
