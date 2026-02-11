@@ -78,6 +78,10 @@ INTRADAY_REGIME_OVERRIDES = {
         "vol_trig": 999.0,      # Force PLTR to always use mean-reversion or legacy model
         "disable_adaptive": True,  # Skip adaptive calculation
     },
+    "SPY": {
+        "mom_trig": 0.0030,  # Higher threshold
+        "vol_trig": 0.0020,
+    },
     # You can add more later:
     # "AAPL": {"mom_trig": 0.0022, "vol_trig": 0.0028},
 }
