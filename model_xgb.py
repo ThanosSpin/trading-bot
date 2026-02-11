@@ -1489,6 +1489,15 @@ def compute_signals(
                         ip = 1.0 - ip
                         print(f"[HOTFIX] {symU} inverted momentum model: {ip_original:.3f} → {ip:.3f}")
 
+                    # ⚠️ SPY-specific: Cap extreme predictions
+                    if symU == "SPY" and model_used == "intraday_mom":
+                        # Clamp SPY intraday to reasonable range
+                        if ip > 0.70:
+                            print(f"[SPY CAP] Capping {ip:.3f} → 0.70")
+                            ip = 0.70
+                        elif ip < 0.30:
+                            print(f"[SPY CAP] Flooring {ip:.3f} → 0.30")
+                            ip = 0.30
 
                     results["intraday_prob"] = float(ip)
                     results["intraday_prob_original"] = float(ip_original)
