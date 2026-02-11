@@ -1482,12 +1482,12 @@ def compute_signals(
                             ip = ip_boosted
                             momentum_boost_applied = True
                     
-                    # ⚠️ HOTFIX: Momentum models learned mean-reversion patterns
-                    # Temporarily invert until retrained with regime-filtered data
-                    if model_used == "intraday_mom":
-                        ip_original = ip
-                        ip = 1.0 - ip
-                        print(f"[HOTFIX] {symU} inverted momentum model: {ip_original:.3f} → {ip:.3f}")
+                    # # ⚠️ HOTFIX: Momentum models learned mean-reversion patterns
+                    # # Temporarily invert until retrained with regime-filtered data
+                    # if model_used == "intraday_mom":
+                    #     ip_original = ip
+                    #     ip = 1.0 - ip
+                    #     print(f"[HOTFIX] {symU} inverted momentum model: {ip_original:.3f} → {ip:.3f}")
 
                     # ⚠️ SPY-specific: Cap extreme predictions
                     if symU == "SPY" and model_used == "intraday_mom":

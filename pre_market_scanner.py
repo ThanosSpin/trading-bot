@@ -4,7 +4,9 @@ Pre-Market Scanner
 Runs before market open to identify high-probability opportunities
 and queue limit orders for market open execution.
 
-✨ ENHANCED: Now supports both BUY and SELL (short) signals
+✨ ENHANCED: Now supports both BUY and SELL signals
+- BUY: Opens new long positions on high conviction signals
+- SELL: Closes existing long positions OR shorts (if margin enabled)
 
 Usage: python pre_market_scanner.py
 Schedule: cron at 8:00 AM weekdays
@@ -19,6 +21,7 @@ from data_loader import fetch_latest_price
 from account_cache import account_cache
 from market import is_trading_day
 from trader import api
+from pdt_tracker import get_opened_today_qty
 
 from config import (
     PRE_MARKET_ENABLED,
@@ -51,7 +54,7 @@ def send_notification(title: str, message: str):
 def get_open_orders(symbol: str = None):
     """Get list of open orders, optionally filtered by symbol"""
     try:
-
+        
         orders = api.list_orders(
             status='open',
             symbols=symbol if symbol else None
@@ -99,11 +102,11 @@ def check_margin_account():
         account = account_cache.get_account()
         
         # Check account type
-        account_type = account.get('account_blocked', False)
-        if account_type:
+        account_blocked = account.get('account_blocked', False)
+        if account_blocked:
             return False, 0.0
         
-        # Check equity (need $2,000+ for margin)[web:68]
+        # Check equity (need $2,000+ for margin)
         equity = float(account.get('equity', 0))
         
         # Alpaca requires $2,000 minimum for margin/short selling
@@ -131,7 +134,7 @@ def is_shortable(symbol: str) -> bool:
         # Get asset info
         asset = api.get_asset(symbol)
         
-        # Check if shortable (Alpaca only supports ETB stocks)[web:68]
+        # Check if shortable (Alpaca only supports ETB stocks)
         shortable = getattr(asset, 'easy_to_borrow', False)
         
         if not shortable:
@@ -148,7 +151,7 @@ def scan_and_queue_orders():
     """
     Main scanner function:
     1. Compute signals for all symbols
-    2. Identify high-conviction opportunities (prob >= 75% for BUY, prob <= 25% for SELL)
+    2. Identify high-conviction opportunities
     3. Queue limit orders for market open
     """
     
@@ -170,17 +173,17 @@ def scan_and_queue_orders():
     cancel_existing_premarket_orders()
     
     # Check margin account (for short selling)
-    allow_short = getattr(PRE_MARKET_ALLOW_SHORT_SELLING, '__bool__', lambda: False)()
+    allow_short = PRE_MARKET_ALLOW_SHORT_SELLING
     is_margin, account_equity = check_margin_account()
     
     if allow_short and not is_margin:
         print(f"\n⚠️ Short selling enabled but margin not available")
         if account_equity > 0:
             print(f"   Account equity: ${account_equity:,.2f} (need $2,000+ for margin)")
-        print(f"   Only BUY signals will be processed\n")
+        print(f"   Will close existing positions but not open new shorts\n")
         allow_short = False
     elif allow_short:
-        print(f"\n✅ Margin account enabled - both BUY and SELL signals active")
+        print(f"\n✅ Margin account enabled - short selling available")
         print(f"   Account equity: ${account_equity:,.2f}\n")
     
     # Get symbols
@@ -196,14 +199,13 @@ def scan_and_queue_orders():
     print(f"💪 Buying Power: ${buying_power:,.2f}")
     print(f"📊 Scanning {len(symbols)} symbols for high-conviction signals...")
     
-    # ✅ ENHANCED: Show thresholds for both BUY and SELL
-    min_sell_prob = PRE_MARKET_MIN_SELL_PROB if 'PRE_MARKET_MIN_SELL_PROB' in dir() else 0.45
+    # Show thresholds
+    min_sell_prob = PRE_MARKET_MIN_SELL_PROB
     print(f"🎯 BUY Threshold:  Probability >= {PRE_MARKET_MIN_PROB:.0%}")
-    if allow_short:
-        print(f"🎯 SELL Threshold: Probability <= {min_sell_prob:.0%}\n")
-    else:
-        print()
+
+    print(f"🎯 SELL Threshold: Probability <= {min_sell_prob:.0%}\n")
     
+
     queued_orders = []
     
     for sym in symbols:
@@ -254,7 +256,7 @@ def scan_and_queue_orders():
                 print(f"     Quantity: {max_qty} shares")
                 print(f"     Limit Price: ${limit_price:.2f}")
                 print(f"     Total Value: ${max_qty * limit_price:,.2f}")
-                
+
                 # Submit BUY order
                 try:
 
@@ -290,66 +292,195 @@ def scan_and_queue_orders():
                     traceback.print_exc()
             
             # ============================================================
-            # SELL SIGNAL (Low probability - short selling)
+            # SELL SIGNAL (Low probability)
             # ============================================================
-            elif allow_short and prob <= min_sell_prob:
+            elif prob <= min_sell_prob:
                 print(f"\n  🎯 HIGH CONVICTION SELL SIGNAL!")
                 
-                # Check if symbol is shortable
-                if not is_shortable(sym):
-                    print(f"  ⚠️ {sym} not available for short selling - skipping")
-                    continue
-                
-                # Calculate position size for short (use buying power, not cash)
-                short_allocation = PRE_MARKET_SHORT_ALLOCATION if 'PRE_MARKET_SHORT_ALLOCATION' in dir() else 0.10
-                allocation = buying_power * short_allocation
-                max_qty = int(allocation // price)
-                
-                if max_qty <= 0:
-                    print(f"  ⚠️ Insufficient buying power for even 1 share")
-                    continue
-                
-                # Set limit price slightly below to ensure fill at open (for short)
-                # Note: For shorting, we want to sell at current or lower price
-                limit_price = round(price * (1 - PRE_MARKET_LIMIT_BUFFER), 2)
-                
-                print(f"  📋 Preparing SHORT limit order:")
-                print(f"     Quantity: {max_qty} shares")
-                print(f"     Limit Price: ${limit_price:.2f} (short sell)")
-                print(f"     Total Value: ${max_qty * limit_price:,.2f}")
-                
-                # Submit SHORT order
+                # Check if we currently hold this stock
                 try:
-                    order = api.submit_order(
-                        symbol=sym,
-                        qty=max_qty,
-                        side='sell',  # 'sell' = short sell for Alpaca[web:65]
-                        type='limit',
-                        time_in_force='day',
-                        limit_price=limit_price
-                    )
+                    position = api.get_position(sym)
+                    current_qty = int(float(position.qty))
                     
-                    queued_orders.append({
-                        'symbol': sym,
-                        'side': 'SELL',
-                        'qty': max_qty,
-                        'limit_price': limit_price,
-                        'probability': prob,
-                        'daily_prob': daily_prob,
-                        'intraday_prob': intraday_prob,
-                        'order_id': order.id,
-                        'estimated_value': max_qty * limit_price
-                    })
-                    
-                    print(f"  ✅ SHORT order queued! Order ID: {order.id}")
-                    
-                    # Update buying power (shorting uses margin)
-                    buying_power -= (max_qty * limit_price)
-                    
-                except Exception as e:
-                    print(f"  ❌ Failed to submit SHORT order: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    if current_qty > 0:
+                        print(f"  📦 Current position: {current_qty} shares")
+                        
+                        # ✅ PDT CHECK: Don't sell if position opened today
+                        try:
+                            opened_today = float(get_opened_today_qty(sym) or 0.0)
+                            
+                            if opened_today >= current_qty:
+                                print(f"  🚫 PDT BLOCK: All {current_qty} shares opened today")
+                                print(f"     Cannot sell - would create day trade")
+                                print(f"     Will hold until tomorrow")
+                                continue
+                            elif opened_today > 0:
+                                # Partial position opened today
+                                sellable_qty = int(current_qty - opened_today)
+                                print(f"  ⚠️ PDT WARNING: {int(opened_today)} shares opened today")
+                                print(f"     Can only sell {sellable_qty} overnight shares")
+                                current_qty = sellable_qty
+                                
+                                if current_qty <= 0:
+                                    print(f"     No sellable shares - skipping")
+                                    continue
+                                    
+                        except Exception as e:
+                            print(f"  ⚠️ Could not check PDT status: {e}")
+                            print(f"     Proceeding with caution...")
+                        
+                        # Set limit price slightly below current for quick fill
+                        limit_price = round(price * (1 - PRE_MARKET_LIMIT_BUFFER), 2)
+                        
+                        print(f"  📋 Preparing SELL limit order (close position):")
+                        print(f"     Quantity: {current_qty} shares")
+                        print(f"     Limit Price: ${limit_price:.2f}")
+                        print(f"     Total Value: ${current_qty * limit_price:,.2f}")
+                        
+                        # Submit SELL order to close position
+                        try:
+                            order = api.submit_order(
+                                symbol=sym,
+                                qty=current_qty,
+                                side='sell',
+                                type='limit',
+                                time_in_force='day',
+                                limit_price=limit_price
+                            )
+                            
+                            queued_orders.append({
+                                'symbol': sym,
+                                'side': 'SELL',
+                                'qty': current_qty,
+                                'limit_price': limit_price,
+                                'probability': prob,
+                                'daily_prob': daily_prob,
+                                'intraday_prob': intraday_prob,
+                                'order_id': order.id,
+                                'estimated_value': current_qty * limit_price,
+                                'action': 'CLOSE'
+                            })
+                            
+                            print(f"  ✅ SELL order queued! Order ID: {order.id}")
+                            
+                        except Exception as e:
+                            print(f"  ❌ Failed to submit SELL order: {e}")
+                            
+                            # Check if it's PDT-related
+                            if 'pattern day trading' in str(e).lower():
+                                print(f"  🚫 PDT PROTECTION: Cannot sell position opened today")
+                            else:
+                                import traceback
+                                traceback.print_exc()
+                                
+                    else:
+                        # No position - try to short if margin enabled
+                        if allow_short:
+                            if not is_shortable(sym):
+                                print(f"  ⚠️ No position in {sym} and not shortable - skipping")
+                                continue
+                            
+                            # Calculate position size for short
+                            short_allocation = PRE_MARKET_SHORT_ALLOCATION
+                            allocation = buying_power * short_allocation
+                            max_qty = int(allocation // price)
+                            
+                            if max_qty <= 0:
+                                print(f"  ⚠️ Insufficient buying power for even 1 share")
+                                continue
+                            
+                            limit_price = round(price * (1 - PRE_MARKET_LIMIT_BUFFER), 2)
+                            
+                            print(f"  📋 Preparing SHORT limit order:")
+                            print(f"     Quantity: {max_qty} shares")
+                            print(f"     Limit Price: ${limit_price:.2f} (short sell)")
+                            print(f"     Total Value: ${max_qty * limit_price:,.2f}")
+                            
+                            # Submit SHORT order
+                            try:
+                                order = api.submit_order(
+                                    symbol=sym,
+                                    qty=max_qty,
+                                    side='sell',
+                                    type='limit',
+                                    time_in_force='day',
+                                    limit_price=limit_price
+                                )
+                                
+                                queued_orders.append({
+                                    'symbol': sym,
+                                    'side': 'SELL',
+                                    'qty': max_qty,
+                                    'limit_price': limit_price,
+                                    'probability': prob,
+                                    'daily_prob': daily_prob,
+                                    'intraday_prob': intraday_prob,
+                                    'order_id': order.id,
+                                    'estimated_value': max_qty * limit_price,
+                                    'action': 'SHORT'
+                                })
+                                
+                                print(f"  ✅ SHORT order queued! Order ID: {order.id}")
+                                
+                                # Update buying power
+                                buying_power -= (max_qty * limit_price)
+                                
+                            except Exception as e:
+                                print(f"  ❌ Failed to submit SHORT order: {e}")
+                                import traceback
+                                traceback.print_exc()
+                        else:
+                            print(f"  ℹ️ No position in {sym} - nothing to sell")
+                            print(f"     (Short selling disabled: need $2,000+ equity)")
+                
+                except Exception:
+                    # Position doesn't exist
+                    if allow_short:
+                        if not is_shortable(sym):
+                            print(f"  ℹ️ No position in {sym} and not shortable - skipping")
+                            continue
+                        
+                        # Try to short (same logic as above)
+                        short_allocation = PRE_MARKET_SHORT_ALLOCATION
+                        allocation = buying_power * short_allocation
+                        max_qty = int(allocation // price)
+                        
+                        if max_qty > 0:
+                            limit_price = round(price * (1 - PRE_MARKET_LIMIT_BUFFER), 2)
+                            
+                            print(f"  📋 Preparing SHORT limit order:")
+                            print(f"     Quantity: {max_qty} shares")
+                            print(f"     Limit Price: ${limit_price:.2f}")
+                            
+                            try:
+                                order = api.submit_order(
+                                    symbol=sym,
+                                    qty=max_qty,
+                                    side='sell',
+                                    type='limit',
+                                    time_in_force='day',
+                                    limit_price=limit_price
+                                )
+                                
+                                queued_orders.append({
+                                    'symbol': sym,
+                                    'side': 'SELL',
+                                    'qty': max_qty,
+                                    'limit_price': limit_price,
+                                    'probability': prob,
+                                    'daily_prob': daily_prob,
+                                    'intraday_prob': intraday_prob,
+                                    'order_id': order.id,
+                                    'estimated_value': max_qty * limit_price,
+                                    'action': 'SHORT'
+                                })
+                                
+                                print(f"  ✅ SHORT order queued! Order ID: {order.id}")
+                                
+                            except Exception as e:
+                                print(f"  ❌ Failed to submit SHORT order: {e}")
+                    else:
+                        print(f"  ℹ️ No position in {sym} - nothing to sell")
             
             else:
                 # Neutral signal
@@ -368,25 +499,32 @@ def scan_and_queue_orders():
     print(f"{'='*80}")
     
     if queued_orders:
-        # Count by side
+        # Count by side and action
         buy_orders = [o for o in queued_orders if o['side'] == 'BUY']
-        sell_orders = [o for o in queued_orders if o['side'] == 'SELL']
+        sell_close_orders = [o for o in queued_orders if o['side'] == 'SELL' and o.get('action') == 'CLOSE']
+        sell_short_orders = [o for o in queued_orders if o['side'] == 'SELL' and o.get('action') == 'SHORT']
         
         print(f"\n✅ Queued {len(queued_orders)} pre-market order(s):")
         print(f"   🟢 {len(buy_orders)} BUY order(s)")
-        print(f"   🔴 {len(sell_orders)} SELL (short) order(s)\n")
+        print(f"   🔴 {len(sell_close_orders)} SELL (close position) order(s)")
+        if sell_short_orders:
+            print(f"   🔴 {len(sell_short_orders)} SELL (short) order(s)")
+        print()
         
         total_buy_value = 0
         total_sell_value = 0
+        
         for order in queued_orders:
             daily = order['daily_prob']
             intraday = order['intraday_prob']
             prob_str = f"D:{daily:.1%} I:{intraday:.1%}" if daily and intraday else f"{order['probability']:.1%}"
             
             side_emoji = "🟢" if order['side'] == 'BUY' else "🔴"
+            action_str = order.get('action', '')
+            action_label = f" ({action_str})" if action_str else ""
             
             print(f"  {side_emoji} {order['symbol']}")
-            print(f"     Signal: {order['side']} (Probability: {order['probability']:.1%})")
+            print(f"     Signal: {order['side']}{action_label} (Probability: {order['probability']:.1%})")
             print(f"     Breakdown: {prob_str}")
             print(f"     Order: {order['side']} {order['qty']} @ ${order['limit_price']:.2f}")
             print(f"     Value: ${order['estimated_value']:,.2f}")
@@ -409,9 +547,14 @@ def scan_and_queue_orders():
             for order in buy_orders:
                 notification_msg += f"  {order['symbol']}: {order['qty']} @ ${order['limit_price']:.2f} ({order['probability']:.1%})\n"
         
-        if sell_orders:
-            notification_msg += f"\n🔴 SELL (Short) Orders ({len(sell_orders)}):\n"
-            for order in sell_orders:
+        if sell_close_orders:
+            notification_msg += f"\n🔴 SELL (Close) Orders ({len(sell_close_orders)}):\n"
+            for order in sell_close_orders:
+                notification_msg += f"  {order['symbol']}: {order['qty']} @ ${order['limit_price']:.2f} ({order['probability']:.1%})\n"
+        
+        if sell_short_orders:
+            notification_msg += f"\n🔴 SELL (Short) Orders ({len(sell_short_orders)}):\n"
+            for order in sell_short_orders:
                 notification_msg += f"  {order['symbol']}: {order['qty']} @ ${order['limit_price']:.2f} ({order['probability']:.1%})\n"
         
         notification_msg += f"\nTotal Value: BUY ${total_buy_value:,.2f}"

@@ -135,7 +135,7 @@ PRE_MARKET_MAX_ALLOCATION = 1.0     # Use 100% of available cash
 PRE_MARKET_LIMIT_BUFFER = 0.002     # Place limit 0.2% above last price for quick fill
 PRE_MARKET_SYMBOLS = SYMBOL         # Use same symbols as main bot
 PRE_MARKET_ALLOW_SHORT_SELLING = True  # Enable short selling
-PRE_MARKET_MIN_SELL_PROB = 0.45        # Sell if prob < 45%
+PRE_MARKET_MIN_SELL_PROB = 0.47        # Sell if prob < 45%
 PRE_MARKET_SHORT_ALLOCATION = 0.10     # Max 10% per short position
 
 
