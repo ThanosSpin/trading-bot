@@ -1463,16 +1463,22 @@ def compute_signals(
                     if results.get("intraday_regime") == "mom" and mom1h is not None:
                         mom1h_val = float(mom1h)
                         
-                        # ✅ Scale boost more aggressively for momentum >1%
-                        if abs(mom1h_val) > 0.005 and ip_original < 0.60:  # Raised from 0.55
-                            if abs(mom1h_val) > 0.01:  # Extreme momentum (>1%)
-                                boost_factor = min(0.20, abs(mom1h_val) * 7.0)  # Up to 20% boost
-                            else:  # Moderate momentum (0.5-1%)
-                                boost_factor = min(0.15, abs(mom1h_val) * 5.0)
-
-                            ip_boosted = min(0.85, ip_original + boost_factor)
+                        # ✅ CORRECTED: Boost in DIRECTION of momentum
+                        if abs(mom1h_val) > 0.005 and 0.30 < ip_original < 0.70:  # Only boost near-neutral signals
                             
-                            print(f"[MOMENTUM BOOST PROB] {symU} mom={mom1h_val:.2%} -> prob {ip_original:.3f} → {ip_boosted:.3f} (+{boost_factor:.3f})")
+                            # Calculate boost magnitude based on momentum strength
+                            if abs(mom1h_val) > 0.01:  # Extreme momentum (>1%)
+                                boost_magnitude = min(0.20, abs(mom1h_val) * 7.0)  # Up to 20% boost
+                            else:  # Moderate momentum (0.5-1%)
+                                boost_magnitude = min(0.15, abs(mom1h_val) * 5.0)
+                            
+                            # ✅ CRITICAL FIX: Apply boost in DIRECTION of momentum
+                            if mom1h_val > 0:  # Positive momentum → boost UP
+                                ip_boosted = min(0.85, ip_original + boost_magnitude)
+                                print(f"[MOMENTUM BOOST PROB] {symU} mom={mom1h_val:.2%} (UP) -> prob {ip_original:.3f} → {ip_boosted:.3f} (+{boost_magnitude:.3f})")
+                            else:  # Negative momentum → push DOWN
+                                ip_boosted = max(0.15, ip_original - boost_magnitude)
+                                print(f"[MOMENTUM BOOST PROB] {symU} mom={mom1h_val:.2%} (DOWN) -> prob {ip_original:.3f} → {ip_boosted:.3f} (-{boost_magnitude:.3f})")
                             ip = ip_boosted
                             momentum_boost_applied = True
                     
