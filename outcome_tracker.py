@@ -53,9 +53,9 @@ def get_price_at_time(symbol: str, target_time: pd.Timestamp, tolerance_minutes:
         # Make sure target_time is timezone-aware
         if target_time.tzinfo is None:
             target_time = target_time.tz_localize('UTC')
+        
 
-
-
+        
         # Fetch intraday data
         df = fetch_historical_data(
             symbol,
@@ -70,23 +70,23 @@ def get_price_at_time(symbol: str, target_time: pd.Timestamp, tolerance_minutes:
         if df.index.tzinfo is None:
             df.index = df.index.tz_localize('UTC')
         
-        # ✅ Create Series for time differences
+        # Create Series for time differences
         time_diffs = pd.Series(
             np.abs((df.index - target_time).total_seconds()),
             index=df.index
         )
         
-        # ✅ Get the index label of minimum (datetime, not integer)
+        # Get the index label of minimum
         closest_time = time_diffs.idxmin()
         min_diff_seconds = time_diffs[closest_time]
         
         # Check if within tolerance
         if min_diff_seconds <= tolerance_minutes * 60:
-            # ✅ Use .loc[] with the datetime index
-            price = float(df.loc[closest_time, 'Close'])
+            # ✅ Use .at[] which always returns scalar
+            price = float(df.at[closest_time, 'Close'])
             return price
         else:
-            
+
             return None
             
     except Exception as e:
