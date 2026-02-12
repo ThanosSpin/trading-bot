@@ -53,16 +53,14 @@ def get_price_at_time(symbol: str, target_time: pd.Timestamp, tolerance_minutes:
         # Make sure target_time is timezone-aware
         if target_time.tzinfo is None:
             target_time = target_time.tz_localize('UTC')
-        
-        # Calculate date range to fetch
-        start_date = target_time - pd.Timedelta(days=1)
-        end_date = target_time + pd.Timedelta(days=1)
-        
+
+
+
         # Fetch intraday data
         df = fetch_historical_data(
             symbol,
-            period="5d",  # Get 5 days to ensure coverage
-            interval="1m"  # Use 1-minute for precision
+            period="5d",
+            interval="1m"
         )
         
         if df is None or len(df) == 0:
@@ -72,22 +70,23 @@ def get_price_at_time(symbol: str, target_time: pd.Timestamp, tolerance_minutes:
         if df.index.tzinfo is None:
             df.index = df.index.tz_localize('UTC')
         
-        # Find closest timestamp within tolerance
+        # ✅ Create Series for time differences
         time_diffs = pd.Series(
-            (df.index - target_time).total_seconds(),
+            np.abs((df.index - target_time).total_seconds()),
             index=df.index
-        ).abs()
-        min_diff_idx = time_diffs.idxmin()
-        min_diff_seconds = time_diffs.loc[min_diff_idx]
+        )
+        
+        # ✅ Get the index label of minimum (datetime, not integer)
+        closest_time = time_diffs.idxmin()
+        min_diff_seconds = time_diffs[closest_time]
         
         # Check if within tolerance
         if min_diff_seconds <= tolerance_minutes * 60:
-            # ✅ SIMPLEST:
-            price = float(df.at[min_diff_idx, 'Close'])
-
+            # ✅ Use .loc[] with the datetime index
+            price = float(df.loc[closest_time, 'Close'])
             return price
         else:
-            # print(f"[WARN] {symbol}: No price within {tolerance_minutes}min of {target_time}")
+            
             return None
             
     except Exception as e:
