@@ -105,6 +105,7 @@ def analyze_time_of_day_performance(symbol: str, model_type: str, lookback_days:
             return df
         
         # Binarize predictions (>0.5 = predict up)
+        df_valid = df_valid.copy()  # Make explicit copy
         df_valid['pred_binary'] = (df_valid['predicted_prob'] > 0.5).astype(int)
         df_valid['correct'] = (df_valid['pred_binary'] == df_valid['actual_outcome']).astype(int)
         
