@@ -143,6 +143,8 @@ PRE_MARKET_SHORT_ALLOCATION = 0.10     # Max 10% per short position
 # Time settings
 PRE_MARKET_SCAN_HOUR = 9            # Run at 9:00 AM (1.5h before market open)
 
+LIMIT_BUFFER_PCT = 0.01
+
 # Model path management
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")

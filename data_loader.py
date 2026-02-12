@@ -123,33 +123,114 @@ def fetch_historical_data(
 # ============================================================
 # LATEST PRICE (Yahoo Finance fallback)
 # ============================================================
-def fetch_latest_price(symbol: str) -> Optional[float]:
+def fetch_latest_price(symbol: str, prefer_yfinance=False) -> Optional[float]:
+    """
+    Fetch the latest real-time price for a symbol.
+    
+    Args:
+        symbol: Stock symbol
+        prefer_yfinance: If True, skip Alpaca and use yfinance (better for pre-market)
+    
+    Returns:
+        Latest price or None
+    """
     sym = str(symbol).upper().strip()
+    
+    print(f"[DEBUG fetch_latest_price] Called for {sym} (prefer_yfinance={prefer_yfinance})")
+    
+    # During pre-market, Alpaca often returns stale data (yesterday's close)
+    # Skip to yfinance for real-time pre-market prices
+    if not prefer_yfinance:
+        # 1) Try Alpaca first (no Yahoo rate limits)
+        try:
+            print(f"[DEBUG] Trying Alpaca API for {sym}...")
+            bar = alpaca_api.get_latest_bar(sym)
+            
+            if bar:
+                # Check bar timestamp to see if it's stale
+                bar_time = getattr(bar, 't', None)
+                if bar_time:
+                    from datetime import datetime, timezone
+                    now_utc = datetime.now(timezone.utc)
+                    age_hours = (now_utc - bar_time).total_seconds() / 3600
+                    print(f"[DEBUG] Alpaca bar timestamp: {bar_time}")
+                    print(f"[DEBUG] Bar age: {age_hours:.1f} hours")
+                    
+                    # If bar is more than 12 hours old, it's from yesterday
+                    if age_hours > 12:
+                        print(f"[WARN] Alpaca bar is {age_hours:.1f}h old (stale) - skipping to yfinance")
+                    else:
+                        # Fresh data from Alpaca
+                        if getattr(bar, "c", None) is not None:
+                            price = float(bar.c)
+                            print(f"[DEBUG] ✅ Alpaca price (bar.c): ${price:.2f}")
+                            return price
+                        
+                        if getattr(bar, "close", None) is not None:
+                            price = float(bar.close)
+                            print(f"[DEBUG] ✅ Alpaca price (bar.close): ${price:.2f}")
+                            return price
+                else:
+                    # No timestamp - try to use it anyway
+                    if getattr(bar, "c", None) is not None:
+                        price = float(bar.c)
+                        print(f"[DEBUG] ⚠️ Alpaca price (no timestamp): ${price:.2f}")
+                        return price
+                    
+                    if getattr(bar, "close", None) is not None:
+                        price = float(bar.close)
+                        print(f"[DEBUG] ⚠️ Alpaca price (no timestamp): ${price:.2f}")
+                        return price
+                
+                print(f"[WARN] Alpaca bar exists but has no .c or .close")
+            else:
+                print(f"[WARN] Alpaca returned None/empty bar")
+                
+        except Exception as e:
+            print(f"[WARN] Alpaca latest price failed for {sym}: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print(f"[DEBUG] Skipping Alpaca (prefer_yfinance=True)")
 
-    # 1) Alpaca first (no Yahoo rate limits)
+    # 2) Fallback: yfinance (real-time data, works in pre-market)
     try:
-        bar = alpaca_api.get_latest_bar(sym)
-        if bar and getattr(bar, "c", None) is not None:
-            return float(bar.c)
-        if bar and getattr(bar, "close", None) is not None:
-            return float(bar.close)
-    except Exception as e:
-        print(f"[WARN] Alpaca latest price failed for {sym}: {e}")
-
-    # 2) Fallback: yfinance (can rate-limit)
-    try:
+        print(f"[DEBUG] Trying yfinance for {sym}...")
+        
+        # Use 1d period, 1m interval to get most recent tick
         data = yf.download(sym, period="1d", interval="1m", progress=False, auto_adjust=True)
+        
         if data is None or data.empty:
+            print(f"[WARN] yfinance returned None/empty for {sym}")
             return None
         
+        print(f"[DEBUG] yfinance returned {len(data)} bars")
+        
+        # Get last close price
         last_close = data["Close"].iloc[-1]
+        
+        # Handle MultiIndex (sometimes yfinance returns this)
         if isinstance(last_close, pd.Series):
             last_close = last_close.iloc[0]
-        return float(last_close)
+        
+        price = float(last_close)
+        
+        # Get timestamp of last bar
+        last_time = data.index[-1]
+        print(f"[DEBUG] Last bar timestamp: {last_time}")
+        print(f"[DEBUG] ✅ yfinance price: ${price:.2f}")
+        
+        return price
     
     except Exception as e:
-        print(f"[ERROR] fetch_latest_price {sym}: {e}")
+        print(f"[ERROR] yfinance fetch_latest_price for {sym}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
+    
+    print(f"[ERROR] All methods failed for {sym}")
+    return None
+
 
 
 # ============================================================
