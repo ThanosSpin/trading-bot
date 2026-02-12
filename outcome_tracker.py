@@ -73,13 +73,18 @@ def get_price_at_time(symbol: str, target_time: pd.Timestamp, tolerance_minutes:
             df.index = df.index.tz_localize('UTC')
         
         # Find closest timestamp within tolerance
-        time_diffs = (df.index - target_time).total_seconds().abs()
+        time_diffs = pd.Series(
+            (df.index - target_time).total_seconds(),
+            index=df.index
+        ).abs()
         min_diff_idx = time_diffs.idxmin()
         min_diff_seconds = time_diffs.loc[min_diff_idx]
         
         # Check if within tolerance
         if min_diff_seconds <= tolerance_minutes * 60:
-            price = float(df.loc[min_diff_idx, 'Close'])
+            # ✅ SIMPLEST:
+            price = float(df.at[min_diff_idx, 'Close'])
+
             return price
         else:
             # print(f"[WARN] {symbol}: No price within {tolerance_minutes}min of {target_time}")
