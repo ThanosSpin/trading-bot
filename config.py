@@ -6,6 +6,7 @@ load_dotenv()
 
 # Base data folder
 DATA_DIR = "data"
+LOGS_DIR = 'logs'
 
 # API keys
 API_KEY = os.getenv("ALPACA_API_KEY")
@@ -74,9 +75,9 @@ INTRADAY_REGIME_OVERRIDES = {
         "vol_trig": 0.0032,
     },
     "PLTR": {
-        "mom_trig": 999.0,      # ✅ Effectively disable momentum regime
-        "vol_trig": 999.0,      # Force PLTR to always use mean-reversion or legacy model
-        "disable_adaptive": True,  # Skip adaptive calculation
+        # "mom_trig": 999.0,      # ✅ Effectively disable momentum regime
+        # "vol_trig": 999.0,      # Force PLTR to always use mean-reversion or legacy model
+        # "disable_adaptive": True,  # Skip adaptive calculation
     },
     "SPY": {
         "mom_trig": 0.0030,  # Higher threshold

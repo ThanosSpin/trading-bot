@@ -42,6 +42,48 @@ def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+# ============================================================================
+# Clean Columns
+# ============================================================================
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean DataFrame column names by removing special characters.
+    Ensures compatibility with XGBoost and other ML libraries.
+    Handles both regular Index and MultiIndex columns.
+    
+    Args:
+        df: Input DataFrame
+        
+    Returns:
+        DataFrame with cleaned column names
+    """
+    df = df.copy()
+    
+    # Handle MultiIndex columns (from yfinance multi-ticker downloads)
+    if isinstance(df.columns, pd.MultiIndex):
+        # Flatten MultiIndex to single level
+        df.columns = ['_'.join(str(i) for i in col).strip('_') for col in df.columns]
+    
+    # Now clean the column names (works for both regular and flattened MultiIndex)
+    df.columns = df.columns.astype(str)  # Ensure all are strings
+    
+    # Remove special characters that cause issues with XGBoost
+    df.columns = df.columns.str.replace('[', '_', regex=False)
+    df.columns = df.columns.str.replace(']', '_', regex=False)
+    df.columns = df.columns.str.replace('<', '_', regex=False)
+    df.columns = df.columns.str.replace('>', '_', regex=False)
+    df.columns = df.columns.str.replace(' ', '_', regex=False)
+    df.columns = df.columns.str.replace(',', '_', regex=False)
+    df.columns = df.columns.str.replace('(', '_', regex=False)
+    df.columns = df.columns.str.replace(')', '_', regex=False)
+    
+    # Remove duplicate underscores and trim
+    df.columns = df.columns.str.replace('__+', '_', regex=True)
+    df.columns = df.columns.str.strip('_')
+    
+    return df
+
+
 
 # ============================================================================
 # FORCE ALL OHLCV TO 1D FLOAT SERIES

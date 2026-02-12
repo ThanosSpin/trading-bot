@@ -58,18 +58,20 @@ def fetch_historical_data(
     if not period and not years:
         raise ValueError("Either 'years' or 'period' must be provided.")
 
-    # ✅ cache TTL: daily can be cached long; intraday shorter
-    # (tune if you want)
+    # cache TTL
     if interval == "1d":
-        ttl_sec = 6 * 60 * 60      # 6 hours
+        ttl_sec = 6 * 60 * 60
     else:
-        ttl_sec = 5 * 60           # 5 minutes
+        ttl_sec = 5 * 60
 
     cpath = _cache_path(symbol, period, years, interval)
 
     # 1) Try cache first
     cached = _read_cache(cpath, ttl_sec)
     if cached is not None:
+        # ✅ ADDED: Ensure cached data is also clean
+        if isinstance(cached.columns, pd.MultiIndex):
+            cached.columns = cached.columns.get_level_values(0)
         return cached
 
     # 2) Fetch with retries/backoff
@@ -83,7 +85,7 @@ def fetch_historical_data(
                     interval=interval,
                     progress=False,
                     auto_adjust=True,
-                    threads=False,   # ✅ helps with rate limiting
+                    threads=False,
                 )
             else:
                 df = yf.download(
@@ -99,13 +101,17 @@ def fetch_historical_data(
                 print(f"[WARN] Empty data for {symbol} (period={period or str(years)+'y'}, interval={interval})")
                 return None
 
+            # ✅ ADDED: Fix MultiIndex if present
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
             # Save cache and return
             _write_cache(cpath, df)
             return df
 
         except Exception as e:
             last_err = e
-            # backoff: 2, 4, 8, 16, 32 seconds
+            
             sleep_s = 2 ** (attempt + 1)
             print(f"[WARN] Daily data fetch failed for {symbol} (attempt {attempt+1}/5): {e} — sleeping {sleep_s}s")
             time.sleep(sleep_s)

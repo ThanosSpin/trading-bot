@@ -1325,8 +1325,7 @@ def compute_signals(
     # -------------------------
     df_intra_resampled = None
     df_feat_intra = None
-    vol = None
-    mom1h = None
+
 
     try:
         # Adaptive lookback
@@ -1380,152 +1379,160 @@ def compute_signals(
             results["intraday_prob"] = None
             results["intraday_quality_score"] = 0.0
         else:
-            df_feat_intra = build_intraday_features(df_intra_resampled)
+            # ✅ EXTRACT CLOSE PRICE SERIES (do this ONCE)
+            close = df_intra_resampled["Close"]
+            close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
+            close = close.dropna()
 
-            if df_feat_intra is None or df_feat_intra.empty:
+            # Update price
+            try:
+                if len(close) > 0:
+                    results["price"] = float(close.iloc[-1])
+            except Exception:
+                pass
+
+            # ✅ CALCULATE REGIME METRICS (do this ONCE)
+            vol = None
+            mom1h = None
+
+            if len(close) >= 12:
+                vol = close.pct_change().rolling(12).std().iloc[-1]
+                results["intraday_vol"] = float(vol) if not pd.isna(vol) else None
+
+            if len(close) >= 4:
+                mom1h = close.pct_change(4).iloc[-1]
+                results["intraday_mom"] = float(mom1h) if not pd.isna(mom1h) else None
+
+            # ✅ GET THRESHOLDS (adaptive or config)
+            try:
+                adaptive = get_adaptive_regime_thresholds(symU, lookback_days=30, percentile=0.70)
+                MOMTRIG = float(adaptive['mom_trig'])
+                VOLTRIG = float(adaptive['vol_trig'])
+                print(f"[ADAPTIVE] {symU} using adaptive: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
+            except Exception:
+                MOMTRIG = float(INTRADAY_MOM_TRIG)
+                VOLTRIG = float(INTRADAY_VOL_TRIG)
+                ovr = (INTRADAY_REGIME_OVERRIDES or {}).get(symU)
+                if ovr:
+                    MOMTRIG = float(ovr.get("mom_trig", MOMTRIG))
+                    VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
+                print(f"[CONFIG] {symU} using config: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
+
+            # ✅ SELECT MODEL BASED ON REGIME (do this ONCE)
+            active_model = None
+            model_used = None
+            if vol is not None and mom1h is not None:
+                # Decision logic
+                if abs(mom1h) >= MOMTRIG or vol >= VOLTRIG:
+                    active_model = model_intra_mom
+                    results["intraday_regime"] = "mom"
+                    model_used = "intraday_mom"
+                    print(f"[REGIME] {symU}: MOMENTUM (mom={mom1h:.4f}, vol={vol:.5f})")
+                else:
+                    active_model = model_intra_mr
+                    results["intraday_regime"] = "mr"
+                    model_used = "intraday_mr"
+                    print(f"[REGIME] {symU}: MEAN-REVERSION (mom={mom1h:.4f}, vol={vol:.5f})")
+
+            # Fallback if regime detection fails or models not loaded
+            if active_model is None:
+                if model_intra_mom is not None:
+                    active_model = model_intra_mom
+                    model_used = "intraday_mom"
+                elif model_intra_mr is not None:
+                    active_model = model_intra_mr
+                    model_used = "intraday_mr"
+                elif model_intraday_legacy is not None:
+                    active_model = model_intraday_legacy
+                    model_used = "intraday"
+                
+                print(f"[FALLBACK] {symU}: Using {model_used}")
+
+            # ✅ BUILD FEATURES AND PREDICT
+            if active_model is None:
+                print(f"[FAIL] {symU}: NO MODELS LOADED AT ALL")
                 results["allow_intraday"] = False
                 results["intraday_prob"] = None
                 results["intraday_quality_score"] = 0.0
             else:
-                # -------------------------
-                # COMPUTE VOL/MOM
-                # -------------------------
-                close = df_intra_resampled["Close"]
-                close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
-                close = close.dropna()
+                df_feat_intra = build_intraday_features(df_intra_resampled)
 
-                # BEST price source = last intraday close
-                try:
-                    if len(close) > 0:
-                        results["price"] = float(close.iloc[-1])
-                except Exception:
-                    pass
-
-                rets = close.pct_change().dropna()
-                vol = float(rets.std() if len(rets) >= 3 else 0.0)
-                mom1h = float((close.iloc[-1] / close.iloc[-5] - 1.0) if len(close) >= 5 else 0.0)
-
-                results["intraday_vol"] = vol
-                results["intraday_mom"] = mom1h
-
-                # ========================================
-                # ✅ REGIME DETECTION + MODEL SELECTION
-                # ========================================
-                try:
-                    adaptive = get_adaptive_regime_thresholds(symU, lookback_days=30, percentile=0.70)
-                    MOMTRIG = float(adaptive['mom_trig'])
-                    VOLTRIG = float(adaptive['vol_trig'])
-                    print(f"[ADAPTIVE] {symU} using adaptive: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
-                except Exception as e:
-                    MOMTRIG = float(INTRADAY_MOM_TRIG)
-                    VOLTRIG = float(INTRADAY_VOL_TRIG)
-                    ovr = (INTRADAY_REGIME_OVERRIDES or {}).get(symU)
-                    if ovr:
-                        MOMTRIG = float(ovr.get("mom_trig", MOMTRIG))
-                        VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
-                    print(f"[CONFIG] {symU} using config: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
-
-                ismomentumregime = abs(mom1h) >= MOMTRIG or vol >= VOLTRIG
-                results["intraday_regime"] = "mom" if ismomentumregime else "mr"
-
-                # ✅ PRIORITY: mom > mr > legacy (ALWAYS predict)
-                model_used = None
-                intraday_prediction = None
-
-                if model_intra_mom is not None and ismomentumregime:
-                    print(f"[TRY] {symU} mom model_intra_mom")
-                    intraday_prediction = predict_from_model(model_intra_mom, df_feat_intra)
-                    model_used = "intraday_mom"
-                elif model_intra_mr is not None:
-                    print(f"[TRY] {symU} mr model_intra_mr")
-                    intraday_prediction = predict_from_model(model_intra_mr, df_feat_intra)
-                    model_used = "intraday_mr"
-                elif model_intraday_legacy is not None:
-                    print(f"[TRY] {symU} legacy model_intraday_legacy")
-                    intraday_prediction = predict_from_model(model_intraday_legacy, df_feat_intra)
-                    model_used = "intraday"
+                if df_feat_intra is None or df_feat_intra.empty:
+                    results["allow_intraday"] = False
+                    results["intraday_prob"] = None
+                    results["intraday_quality_score"] = 0.0
                 else:
-                    print(f"[FAIL] {symU} NO MODELS LOADED AT ALL")
-
-                # ✨ ENHANCED: Store full prediction and extract probability
-                results["intraday_prediction"] = intraday_prediction
-                ip = get_final_prob(intraday_prediction)
-                results["intraday_signal"] = get_signal_details(intraday_prediction)
-
-                if ip is not None:
-                    # ========================================
-                    # ✅ MOMENTUM PROBABILITY BOOST (AFTER PREDICTION)
-                    # ========================================
-                    ip_original = float(ip)
-                    momentum_boost_applied = False
+                    # ✅ PREDICT WITH CHOSEN MODEL
+                    print(f"[TRY] {symU} using {model_used}")
+                    intraday_prediction = predict_from_model(active_model, df_feat_intra)
                     
-                    # If strong momentum detected but model is too conservative, boost probability
-                    if results.get("intraday_regime") == "mom" and mom1h is not None:
-                        mom1h_val = float(mom1h)
-                        
-                        # ✅ CORRECTED: Boost in DIRECTION of momentum
-                        if abs(mom1h_val) > 0.005 and 0.30 < ip_original < 0.70:  # Only boost near-neutral signals
-                            
-                            # Calculate boost magnitude based on momentum strength
-                            if abs(mom1h_val) > 0.01:  # Extreme momentum (>1%)
-                                boost_magnitude = min(0.20, abs(mom1h_val) * 7.0)  # Up to 20% boost
-                            else:  # Moderate momentum (0.5-1%)
-                                boost_magnitude = min(0.15, abs(mom1h_val) * 5.0)
-                            
-                            # ✅ CRITICAL FIX: Apply boost in DIRECTION of momentum
-                            if mom1h_val > 0:  # Positive momentum → boost UP
-                                ip_boosted = min(0.85, ip_original + boost_magnitude)
-                                print(f"[MOMENTUM BOOST PROB] {symU} mom={mom1h_val:.2%} (UP) -> prob {ip_original:.3f} → {ip_boosted:.3f} (+{boost_magnitude:.3f})")
-                            else:  # Negative momentum → push DOWN
-                                ip_boosted = max(0.15, ip_original - boost_magnitude)
-                                print(f"[MOMENTUM BOOST PROB] {symU} mom={mom1h_val:.2%} (DOWN) -> prob {ip_original:.3f} → {ip_boosted:.3f} (-{boost_magnitude:.3f})")
-                            ip = ip_boosted
-                            momentum_boost_applied = True
-                    
-                    # # ⚠️ HOTFIX: Momentum models learned mean-reversion patterns
-                    # # Temporarily invert until retrained with regime-filtered data
-                    # if model_used == "intraday_mom":
-                    #     ip_original = ip
-                    #     ip = 1.0 - ip
-                    #     print(f"[HOTFIX] {symU} inverted momentum model: {ip_original:.3f} → {ip:.3f}")
-
-                    # ⚠️ SPY-specific: Cap extreme predictions
-                    if symU == "SPY" and model_used == "intraday_mom":
-                        # Clamp SPY intraday to reasonable range
-                        if ip > 0.70:
-                            print(f"[SPY CAP] Capping {ip:.3f} → 0.70")
-                            ip = 0.70
-                        elif ip < 0.30:
-                            print(f"[SPY CAP] Flooring {ip:.3f} → 0.30")
-                            ip = 0.30
-
-                    results["intraday_prob"] = float(ip)
-                    results["intraday_prob_original"] = float(ip_original)
+                    results["intraday_prediction"] = intraday_prediction
                     results["intraday_model_used"] = model_used
-                    results["intraday_quality_score"] = min(1.0, len(df_intra_resampled) / 120.0)
+                    results["intraday_signal"] = get_signal_details(intraday_prediction)
+                    
+                    ip = get_final_prob(intraday_prediction)
 
-                    
-                    # ✨ ENHANCED: Print detailed signal info
-                    boost_str = " (BOOSTED)" if momentum_boost_applied else ""
-                    signal_str = results.get("intraday_signal", "")
-                    print(f"[SUCCESS] {symU} {model_used} ip={ip:.3f}{boost_str} | {signal_str}")
-                
-                    # ✅ LOG PREDICTION FOR MONITORING
-                    try:
-                        current_price = results.get("price") or fetch_latest_price(symU)
-                        if current_price and float(current_price) > 0:
-                            log_prediction(
-                                symbol=symU,
-                                mode=model_used,
-                                predicted_prob=float(ip),
-                                price=float(current_price),
-                                prediction_details=intraday_prediction if isinstance(intraday_prediction, dict) else None  # ✅ FIXED
-                            )
-                    except Exception as e:
-                        print(f"[WARN] Could not log prediction: {e}")
-                    
-                else:
-                    print(f"[PREDICT_FAIL] {symU} {model_used} returned None")
+                    if ip is not None:
+
+                        ip_original = float(ip)
+                        momentum_boost_applied = False
+                        
+                        # ========================================
+                        # ✅ MOMENTUM PROBABILITY BOOST
+                        # ========================================
+                        if results.get("intraday_regime") == "mom" and mom1h is not None:
+                            mom1h_val = float(mom1h)
+                            
+                            # Only boost near-neutral signals
+                            if abs(mom1h_val) > 0.005 and 0.30 < ip_original < 0.70:
+                                
+                                # Calculate boost magnitude
+                                if abs(mom1h_val) > 0.01:  # Extreme momentum (>1%)
+                                    boost_magnitude = min(0.20, abs(mom1h_val) * 7.0)
+                                else:  # Moderate momentum (0.5-1%)
+                                    boost_magnitude = min(0.15, abs(mom1h_val) * 5.0)
+                                
+                                # Apply boost in DIRECTION of momentum
+                                if mom1h_val > 0:  # Positive momentum → boost UP
+                                    ip = min(0.85, ip_original + boost_magnitude)
+                                    print(f"[MOMENTUM BOOST] {symU} mom={mom1h_val:.2%} (UP) -> prob {ip_original:.3f} → {ip:.3f}")
+                                else:  # Negative momentum → push DOWN
+                                    ip = max(0.15, ip_original - boost_magnitude)
+                                    print(f"[MOMENTUM BOOST] {symU} mom={mom1h_val:.2%} (DOWN) -> prob {ip_original:.3f} → {ip:.3f}")
+                                
+                                momentum_boost_applied = True
+                        
+                        # ⚠️ SPY-specific: Cap extreme predictions
+                        if symU == "SPY" and model_used == "intraday_mom":
+                            if ip > 0.70:
+                                print(f"[SPY CAP] Capping {ip:.3f} → 0.70")
+                                ip = 0.70
+                            elif ip < 0.30:
+                                print(f"[SPY CAP] Flooring {ip:.3f} → 0.30")
+                                ip = 0.30
+
+                        results["intraday_prob"] = float(ip)
+                        results["intraday_prob_original"] = float(ip_original)
+                        results["intraday_quality_score"] = min(1.0, len(df_intra_resampled) / 120.0)
+                        boost_str = " (BOOSTED)" if momentum_boost_applied else ""
+                        print(f"[SUCCESS] {symU} {model_used} ip={ip:.3f}{boost_str}")
+                        
+                        # ✅ LOG PREDICTION
+                        try:
+                            current_price = results.get("price") or fetch_latest_price(symU)
+                            if current_price and float(current_price) > 0:
+                                log_prediction(
+                                    symbol=symU,
+                                    mode=model_used,
+                                    predicted_prob=float(ip),
+                                    price=float(current_price),
+                                    prediction_details=intraday_prediction if isinstance(intraday_prediction, dict) else None
+                                )
+                        except Exception as e:
+                            print(f"[WARN] Could not log prediction: {e}")
+                        
+                    else:
+                        print(f"[PREDICT_FAIL] {symU} {model_used} returned None")
 
     except Exception as e:
         print(f"[ERROR] Intraday prediction error: {e}")
@@ -1534,6 +1541,7 @@ def compute_signals(
         results["allow_intraday"] = False
         results["intraday_prob"] = None
         results["intraday_quality_score"] = 0.0
+
 
     # -------------------------
     # PRICE FALLBACK
