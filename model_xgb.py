@@ -875,6 +875,62 @@ def load_model(symbol: str, mode: str):
         print(f"[ERROR] load_model({symbol}, {mode}): {e}")
         return None
 
+def find_matching_feature(feature_name: str, available_features: list) -> str:
+    """
+    Case-insensitive feature matching with intelligent fallbacks.
+    Handles version drift between trained models and current feature sets.
+    
+    Args:
+        feature_name: Target feature from trained model (e.g., "RSI_14")
+        available_features: List of features in current dataframe
+    
+    Returns:
+        Matched feature name from available_features, or None if no match
+    """
+    if not feature_name or not available_features:
+        return None
+    
+    feature_lower = str(feature_name).lower().strip()
+    
+    # STAGE 1: Exact match (case-insensitive)
+    for feat in available_features:
+        if str(feat).lower().strip() == feature_lower:
+            return feat
+    
+    # STAGE 2: Normalized match (remove underscores/spaces)
+    feature_normalized = feature_lower.replace("_", "").replace(" ", "")
+    
+    for feat in available_features:
+        feat_normalized = str(feat).lower().strip().replace("_", "").replace(" ", "")
+        if feature_normalized == feat_normalized:
+            return feat
+    
+    # STAGE 3: Partial match (substring)
+    for feat in available_features:
+        feat_lower = str(feat).lower().strip()
+        if feature_lower in feat_lower or feat_lower in feature_lower:
+            if feature_lower in feat_lower:
+                return feat
+    
+    # STAGE 4: Token-based match (split by underscore)
+    feature_tokens = set(feature_lower.split("_"))
+    best_match = None
+    best_score = 0
+    
+    for feat in available_features:
+        feat_tokens = set(str(feat).lower().strip().split("_"))
+        common = feature_tokens & feat_tokens
+        score = len(common)
+        
+        if score > best_score and score >= 2:
+            best_score = score
+            best_match = feat
+    
+    if best_match:
+        return best_match
+    
+    # STAGE 5: No match found
+    return None
 
 # ---------------------------------------------------------
 # ✨ ENHANCED: PREDICT FROM MODEL ARTIFACT (MULTI-CLASS SUPPORT)
