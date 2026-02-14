@@ -1,7 +1,7 @@
 # features.py
 import pandas as pd
 import numpy as np
-from time_features import add_time_features
+from predictive_model.time_features import add_time_features
 
 
 # ============================================================================

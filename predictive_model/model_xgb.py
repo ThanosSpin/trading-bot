@@ -9,12 +9,12 @@ import pandas as pd
 import traceback
 from xgboost import XGBClassifier
 
-from features import build_daily_features, build_intraday_features
-from data_loader import fetch_historical_data, fetch_intraday_history, fetch_latest_price
-from target_labels import create_target_label, backtest_threshold
-from trading_metrics import calculate_financial_metrics, print_trading_report
-from adaptive_thresholds import get_adaptive_regime_thresholds
-from model_monitor import log_prediction, evaluate_predictions
+from predictive_model.features import build_daily_features, build_intraday_features
+from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history, fetch_latest_price
+from predictive_model.target_labels import create_target_label, backtest_threshold
+from predictive_model.trading_metrics import calculate_financial_metrics, print_trading_report
+from predictive_model.adaptive_thresholds import get_adaptive_regime_thresholds
+from predictive_model.model_monitor import log_prediction, evaluate_predictions
 from sklearn.metrics import (
     accuracy_score, log_loss, roc_auc_score,
     confusion_matrix, precision_score, recall_score, f1_score,

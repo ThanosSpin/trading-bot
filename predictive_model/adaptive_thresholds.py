@@ -9,8 +9,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, Optional
-from config import INTRADAY_REGIME_OVERRIDES
-from data_loader import fetch_historical_data
+from config.config import INTRADAY_REGIME_OVERRIDES
+from predictive_model.data_loader import fetch_historical_data
 
 # Cache thresholds to avoid repeated API calls
 _THRESHOLD_CACHE = {}
