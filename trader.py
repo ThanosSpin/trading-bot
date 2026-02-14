@@ -15,7 +15,7 @@ from config.config import (
     USE_LIVE_TRADING
 )
 from market import is_market_open, is_trading_day
-from data_loader import fetch_latest_price
+from predictive_model.data_loader import fetch_latest_price
 from portfolio import PortfolioManager
 
 

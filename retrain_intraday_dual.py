@@ -15,7 +15,7 @@ from datetime import datetime
 import joblib
 import traceback
 
-from data_loader import fetch_historical_data
+from predictive_model.data_loader import fetch_historical_data
 from predictive_model.features import _clean_columns
 from predictive_model.model_xgb import train_model, MODEL_DIR
 from config.config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS

@@ -1,7 +1,7 @@
 # main.py
 #!/usr/bin/env python
 import time
-from data_loader import fetch_historical_data, fetch_latest_price
+from predictive_model.data_loader import fetch_historical_data, fetch_latest_price
 from market import is_market_open, debug_market
 from predictive_model.model_xgb import compute_signals
 from strategy import compute_strategy_decisions

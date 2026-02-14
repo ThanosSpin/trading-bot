@@ -20,14 +20,14 @@ import joblib
 
 # Import your existing modules
 try:
-    from data_loader import fetch_historical_data
+    from predictive_model.data_loader import fetch_historical_data
     from predictive_model.features import build_intraday_features, clean_columns
     from predictive_model.model_xgb import train_model
     from config.config import SYMBOL
     
     # Try to import directory configs, use defaults if missing
     try:
-        from config import LOGS_DIR, MODEL_DIR
+        from config.config import LOGS_DIR, MODEL_DIR
     except ImportError:
         LOGS_DIR = 'logs'
         MODEL_DIR = 'models'

@@ -7,7 +7,7 @@ from market import is_market_open, is_trading_day
 from strategy_multi import should_trade
 from updated_model_xgb import load_model, predict_next  # or dynamically select model per symbol
 from portfolio_multi import load_portfolio, update_portfolio, portfolio_value
-from data_loader import fetch_historical_data, fetch_latest_price
+from predictive_model.data_loader import fetch_historical_data, fetch_latest_price
 
 # Alpaca API instance
 api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')

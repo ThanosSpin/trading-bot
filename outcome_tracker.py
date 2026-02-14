@@ -21,7 +21,7 @@ import argparse
 
 # Import your existing modules
 try:
-    from data_loader import fetch_historical_data
+    from predictive_model.data_loader import fetch_historical_data
     from config.config import SYMBOL, LOGS_DIR
 except ImportError:
     print("[WARN] Could not import from data_loader or config")

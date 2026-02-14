@@ -17,7 +17,7 @@ import os
 import sys
 from datetime import datetime
 from config import TRAIN_SYMBOLS, MODEL_DIR, SPY_SYMBOL
-from data_loader import fetch_historical_data, fetch_intraday_history
+from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
 from predictive_model.model_xgb import train_model
 import joblib
 import traceback

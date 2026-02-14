@@ -337,7 +337,7 @@ def add_indicators_minimal(df: pd.DataFrame) -> pd.DataFrame:
 
 if __name__ == "__main__":
     # Test the enhanced indicators
-    from data_loader import fetch_historical_data
+    from predictive_model.data_loader import fetch_historical_data
     
     print("\n" + "="*60)
     print("TESTING ENHANCED INDICATORS")

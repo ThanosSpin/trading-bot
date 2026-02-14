@@ -4,7 +4,7 @@ import pandas as pd
 import pickle
 import os
 
-from data_loader import fetch_historical_data
+from predictive_model.data_loader import fetch_historical_data
 from config.config import get_model_path, SYMBOL
 
 

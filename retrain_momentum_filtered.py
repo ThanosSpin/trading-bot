@@ -13,7 +13,7 @@ import os
 # Add parent directory to path if needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data_loader import fetch_historical_data
+from predictive_model.data_loader import fetch_historical_data
 from predictive_model.model_xgb import train_model
 
 

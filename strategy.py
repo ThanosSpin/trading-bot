@@ -7,7 +7,7 @@ from config.config import (
     MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB
 )
 from portfolio import PortfolioManager
-from data_loader import fetch_latest_price, fetch_historical_data
+from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
 from trader import get_pdt_status
 from pdt_tracker import get_opened_today_qty
 from account_cache import account_cache
@@ -23,7 +23,7 @@ def detect_afterhours_dip(sym: str, threshold: float = 0.015) -> bool:
     Compares current pre-market price vs yesterday's close.
     """
     try:
-        from data_loader import fetch_historical_data, fetch_latest_price
+        from predictive_model.data_loader import fetch_historical_data, fetch_latest_price
 
         # Get yesterday's close
         df = fetch_historical_data(sym, period="5d", interval="1d")

@@ -27,7 +27,7 @@ from datetime import datetime
 import joblib
 
 # ✅ UPDATED: Use new imports
-from data_loader import fetch_historical_data, fetch_intraday_history
+from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
 from predictive_model.model_xgb import train_model, MODEL_DIR
 from config.config import TRAIN_SYMBOLS, SHAP_TOP_N, USE_MULTICLASS_MODELS
 

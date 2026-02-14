@@ -202,7 +202,7 @@ def print_target_distribution(df: pd.DataFrame, target_col: str = 'Target_multic
 
 if __name__ == "__main__":
     # Demo/Test
-    from data_loader import fetch_historical_data
+    from predictive_model.data_loader import fetch_historical_data
     
     print("\n" + "="*80)
     print("TARGET ENGINEERING DEMO")

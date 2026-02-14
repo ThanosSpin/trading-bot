@@ -17,7 +17,7 @@ import sys
 from datetime import datetime, timezone
 
 from predictive_model.model_xgb import compute_signals
-from data_loader import fetch_latest_price
+from predictive_model.data_loader import fetch_latest_price
 from account_cache import account_cache
 from market import is_trading_day
 from trader import api
@@ -77,7 +77,7 @@ def submit_order_smart(symbol, side, qty, current_price, limit_buffer_pct=LIMIT_
         try:
             # Import utilities
             from order_utils import get_market_session
-            from data_loader import fetch_latest_price
+            from predictive_model.data_loader import fetch_latest_price
             
             # Check if we're in extended hours (pre-market, after-hours, or closed)
             session = get_market_session()

@@ -23,7 +23,7 @@ from portfolio import (
 )
 from trader import get_pdt_status
 from predictive_model.model_xgb import compute_signals
-from data_loader import fetch_historical_data, fetch_intraday_history
+from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
 
 
 # -------------------------------------------------

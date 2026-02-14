@@ -236,7 +236,7 @@ def evaluate_cv_performance(
 
 if __name__ == "__main__":
     # Demo
-    from data_loader import fetch_historical_data
+    from predictive_model.data_loader import fetch_historical_data
     
     print("\n" + "="*80)
     print("TIME SERIES CROSS-VALIDATION DEMO")
