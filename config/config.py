@@ -158,5 +158,5 @@ PORTFOLIO_PATH = "data/portfolio.json"
 LOG_FILE = "logs/trading_bot.log"
 
 # Other configs
-USE_LIVE_TRADING = True  # Switch to True to go live
+USE_LIVE_TRADING = False  # Switch to True to go live
 TIMEZONE = "US/Eastern"
