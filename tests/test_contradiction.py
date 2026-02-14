@@ -7,7 +7,7 @@ Run after implementing Fix #5.
 
 def test_contradiction_detection():
     try:
-        from model_xgb import detect_contradiction
+        from predictive_model.model_xgb import detect_contradiction
     except ImportError:
         print("❌ detect_contradiction() not found in model_xgb.py")
         print("   You need to add it first (Step 1 of Fix #5)")
