@@ -22,7 +22,7 @@ from sklearn.metrics import (
 )
 from sklearn.calibration import CalibratedClassifierCV
 
-from config import (
+from config.config import (
     INTRADAY_WEIGHT,
     MIN_INTRADAY_BARS_FOR_FEATURES,
     INTRADAY_MOM_TRIG,

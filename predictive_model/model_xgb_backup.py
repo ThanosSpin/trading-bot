@@ -12,7 +12,7 @@ from data_loader import fetch_historical_data, fetch_intraday_history, fetch_lat
 from target_labels import create_target_label, backtest_threshold
 from trading_metrics import calculate_financial_metrics, print_trading_report
 
-from config import (
+from config.config import (
     INTRADAY_WEIGHT,
     MIN_INTRADAY_BARS_FOR_FEATURES,
     INTRADAY_MOM_TRIG,

@@ -10,7 +10,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, Tuple, Optional
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
-from config import MODEL_DIR
+from config.config import MODEL_DIR
 
 
 
