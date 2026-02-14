@@ -1,5 +1,5 @@
 # pdt_guardrails.py
-from pdt_tracker import get_opened_today_qty
+from pdt.pdt_tracker import get_opened_today_qty
 
 def max_sell_allowed(api, symbol: str, requested_qty: float, pdt_status: dict, emergency: bool = False) -> float:
     """
