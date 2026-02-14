@@ -7,8 +7,8 @@ Run this to check if any models need retraining.
 
 import argparse
 from datetime import datetime
-from model_monitor import ModelMonitor
-from config import SYMBOL
+from predictive_model.model_monitor import ModelMonitor
+from config.config import SYMBOL
 
 
 def main():

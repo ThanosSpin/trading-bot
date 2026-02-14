@@ -1,7 +1,7 @@
 import os
 import json
 import csv
-from config import SYMBOL, PORTFOLIO_PATH
+from config.config import SYMBOL, PORTFOLIO_PATH
 
 OLD_PORTFOLIO_FILE = PORTFOLIO_PATH   # e.g., data/portfolio.json
 OLD_TRADE_LOG = "data/trade_log.csv"

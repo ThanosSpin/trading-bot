@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime
 import pytz
 
-from config import PORTFOLIO_PATH, TIMEZONE
+from config.config import PORTFOLIO_PATH, TIMEZONE
 from broker import api_market
 from account_cache import account_cache
 

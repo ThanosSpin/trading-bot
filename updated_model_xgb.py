@@ -4,7 +4,7 @@ import pandas as pd
 import pickle
 import os
 from datetime import datetime
-from config_multi import get_model_path, MODEL_DIR
+from config.config_multi import get_model_path, MODEL_DIR
 
 def prepare_features(df):
     """

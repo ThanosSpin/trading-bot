@@ -5,7 +5,7 @@ import pandas_market_calendars as mcal
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api import REST
     
-from config import (
+from config.config import (
     TIMEZONE,
     API_MARKET_KEY,
     API_MARKET_SECRET,

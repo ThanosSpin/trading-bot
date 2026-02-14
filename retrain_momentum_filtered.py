@@ -14,7 +14,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_loader import fetch_historical_data
-from model_xgb import train_model
+from predictive_model.model_xgb import train_model
 
 
 def retrain_momentum_model(symbol, period="60d"):  # ← Changed from 6mo to 60d

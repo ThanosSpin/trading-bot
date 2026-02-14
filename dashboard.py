@@ -15,14 +15,14 @@ import joblib
 import plotly.graph_objects as go
 
 
-from config import TIMEZONE, SYMBOL, MODEL_DIR, SPY_SYMBOL, INTRADAY_WEIGHT
+from config.config import TIMEZONE, SYMBOL, MODEL_DIR, SPY_SYMBOL, INTRADAY_WEIGHT
 from portfolio import (
     get_trade_log_file,
     get_daily_portfolio_file,
     get_live_portfolio
 )
 from trader import get_pdt_status
-from model_xgb import compute_signals
+from predictive_model.model_xgb import compute_signals
 from data_loader import fetch_historical_data, fetch_intraday_history
 
 

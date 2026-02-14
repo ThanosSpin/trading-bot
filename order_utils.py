@@ -3,7 +3,7 @@ Order utility functions for pre-market vs market hours trading
 """
 
 from datetime import datetime, time
-from config import LIMIT_BUFFER_PCT
+from config.config import LIMIT_BUFFER_PCT
 import pytz
 
 

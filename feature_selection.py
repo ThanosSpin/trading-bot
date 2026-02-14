@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 # ✅ Auto-detect models directory
 try:
-    from model_xgb import MODEL_DIR
+    from predictive_model.model_xgb import MODEL_DIR
 except ImportError:
     try:
         from config import MODEL_DIR

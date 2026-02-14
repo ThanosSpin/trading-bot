@@ -13,9 +13,9 @@ Features:
 import os
 import shutil
 from datetime import datetime
-from model_monitor import get_monitor
+from predictive_model.model_monitor import get_monitor
 from retrain_model import train_intraday_models_with_shap, train_daily_model_with_shap
-from config import TRAIN_SYMBOLS
+from config.config import TRAIN_SYMBOLS
 
 
 # ============================================================

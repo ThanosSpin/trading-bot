@@ -5,7 +5,7 @@ import pickle
 import os
 
 from data_loader import fetch_historical_data
-from config import get_model_path, SYMBOL
+from config.config import get_model_path, SYMBOL
 
 
 def train_model(df, symbol):

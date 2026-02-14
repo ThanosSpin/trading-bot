@@ -14,7 +14,7 @@ from pathlib import Path
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BOT_DIR)
 
-from model_monitor import ModelMonitor
+from predictive_model.model_monitor import ModelMonitor
 
 
 def cleanup_logs_directory(logs_dir: str = "logs", days_to_keep: int = 30):

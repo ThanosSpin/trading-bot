@@ -3,14 +3,14 @@
 import time
 from data_loader import fetch_historical_data, fetch_latest_price
 from market import is_market_open, debug_market
-from model_xgb import compute_signals
+from predictive_model.model_xgb import compute_signals
 from strategy import compute_strategy_decisions
 from portfolio import PortfolioManager
 from trader import execute_trade, get_pdt_status
 from strategy import apply_position_limits
-from model_monitor import get_monitor, evaluate_predictions, log_prediction
+from predictive_model.model_monitor import get_monitor, evaluate_predictions, log_prediction
 from account_cache import account_cache
-from config import (
+from config.config import (
     SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE
@@ -571,10 +571,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display

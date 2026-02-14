@@ -6,7 +6,7 @@ import pytz
 from datetime import datetime
 
 from trader import api as api_market   # ✅ use updated Alpaca client
-from config import SYMBOL, TIMEZONE, PORTFOLIO_PATH, SPY_SYMBOL
+from config.config import SYMBOL, TIMEZONE, PORTFOLIO_PATH, SPY_SYMBOL
 
 
 # -----------------------------

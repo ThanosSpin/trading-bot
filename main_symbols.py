@@ -1,5 +1,5 @@
 # main.py
-from config_multi import SYMBOL
+from config.config_multi import SYMBOL
 from data_loader_multi import fetch_historical_data, fetch_latest_price
 from updated_model_xgb import load_model, predict_next
 from strategy_multi import should_trade

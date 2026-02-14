@@ -1,7 +1,7 @@
 # data_loader.py
 import yfinance as yf
 import pandas as pd
-from config_multi import SYMBOL, LOOKBACK_YEARS, INTERVAL
+from config.config_multi import SYMBOL, LOOKBACK_YEARS, INTERVAL
 
 
 def fetch_historical_data(symbol, years=LOOKBACK_YEARS, interval=INTERVAL):

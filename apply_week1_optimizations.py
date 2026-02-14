@@ -18,10 +18,10 @@ import sys
 from datetime import datetime
 from config import TRAIN_SYMBOLS, MODEL_DIR, SPY_SYMBOL
 from data_loader import fetch_historical_data, fetch_intraday_history
-from model_xgb import train_model
+from predictive_model.model_xgb import train_model
 import joblib
 import traceback
-from config import USE_MULTICLASS_MODELS
+from config.config import USE_MULTICLASS_MODELS
 
 # ============================================================
 # CONFIGURATION

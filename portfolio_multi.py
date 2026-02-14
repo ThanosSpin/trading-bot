@@ -6,7 +6,7 @@ import csv
 import pytz
 from datetime import datetime
 import matplotlib.pyplot as plt
-from config_multi import TIMEZONE, INITIAL_CAPITAL, USE_LIVE_TRADING, API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
+from config.config_multi import TIMEZONE, INITIAL_CAPITAL, USE_LIVE_TRADING, API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
 import alpaca_trade_api as tradeapi
 
 api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL)

@@ -22,8 +22,8 @@ import joblib
 try:
     from data_loader import fetch_historical_data
     from features import build_intraday_features, clean_columns
-    from model_xgb import train_model
-    from config import SYMBOL
+    from predictive_model.model_xgb import train_model
+    from config.config import SYMBOL
     
     # Try to import directory configs, use defaults if missing
     try:

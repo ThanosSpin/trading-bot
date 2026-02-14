@@ -4,7 +4,7 @@ import smtplib
 import json
 import os
 from email.message import EmailMessage
-from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
+from config.config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
 
 
 BALANCE_FILE = "data/last_balance.json"

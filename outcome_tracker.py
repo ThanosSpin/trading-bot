@@ -22,11 +22,11 @@ import argparse
 # Import your existing modules
 try:
     from data_loader import fetch_historical_data
-    from config import SYMBOLS, LOGS_DIR
+    from config.config import SYMBOL, LOGS_DIR
 except ImportError:
     print("[WARN] Could not import from data_loader or config")
     print("      Using fallback configuration")
-    SYMBOLS = ['NVDA', 'AAPL', 'ABBV', 'PLTR', 'SPY']
+    SYMBOL = ['NVDA', 'AAPL', 'ABBV', 'PLTR', 'SPY']
     LOGS_DIR = 'logs'
 
 # Ensure logs directory exists
@@ -55,7 +55,7 @@ def get_price_at_time(symbol: str, target_time: pd.Timestamp, tolerance_minutes:
             target_time = target_time.tz_localize('UTC')
         
 
-        
+
         # Fetch intraday data
         df = fetch_historical_data(
             symbol,
@@ -231,7 +231,7 @@ def update_all_outcomes(symbols: list = None, lookback_hours: int = None):
         Total number of outcomes updated
     """
     if symbols is None:
-        symbols = SYMBOLS
+        symbols = SYMBOL
     
     model_types = ['intraday_mom', 'intraday_mr']
     

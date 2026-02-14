@@ -28,8 +28,8 @@ import joblib
 
 # ✅ UPDATED: Use new imports
 from data_loader import fetch_historical_data, fetch_intraday_history
-from model_xgb import train_model, MODEL_DIR
-from config import TRAIN_SYMBOLS, SHAP_TOP_N, USE_MULTICLASS_MODELS
+from predictive_model.model_xgb import train_model, MODEL_DIR
+from config.config import TRAIN_SYMBOLS, SHAP_TOP_N, USE_MULTICLASS_MODELS
 
 # ✅ NEW: Check if SHAP is available
 try:
