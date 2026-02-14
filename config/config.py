@@ -1,5 +1,7 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -146,8 +148,9 @@ PRE_MARKET_SCAN_HOUR = 9            # Run at 9:00 AM (1.5h before market open)
 LIMIT_BUFFER_PCT = 0.01
 
 # Model path management
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(BASE_DIR, "models")
+SCRIPT_DIR = Path(__file__).resolve().parent  # config/
+BASE_DIR = SCRIPT_DIR.parent  # Go up to project root
+MODEL_DIR = BASE_DIR / "models"
 def get_model_path(symbol):
     """Return the model path for a given symbol."""
     os.makedirs(MODEL_DIR, exist_ok=True)
