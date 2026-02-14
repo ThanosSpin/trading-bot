@@ -8,7 +8,7 @@ recommendations for retraining.
 
 import os
 import joblib
-from config import MODEL_DIR, TRAIN_SYMBOLS
+from config.config import MODEL_DIR, TRAIN_SYMBOLS
 from tabulate import tabulate
 from datetime import datetime
 import pandas as pd
