@@ -53,7 +53,7 @@ def get_adaptive_regime_thresholds(
 
     # ✅ NEW: Check for config override BEFORE doing anything else
     try:
-        from config import INTRADAY_REGIME_OVERRIDES
+        from config.config import INTRADAY_REGIME_OVERRIDES
         ovr = INTRADAY_REGIME_OVERRIDES.get(sym, {})
         
         if ovr.get("disable_adaptive", False):
