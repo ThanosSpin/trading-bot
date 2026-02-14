@@ -9,7 +9,7 @@ from config.config import (
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
 from trader import get_pdt_status
-from pdt_tracker import get_opened_today_qty
+from pdt.pdt_tracker import get_opened_today_qty
 from account_cache import account_cache
 
 

@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 from alpaca_client import api  # NOTE: you also re-init api below; keep one source if possible
-from pdt_guardrails import max_sell_allowed
-from pdt_tracker import add_opened_today, reduce_opened_today, get_opened_today_qty
+from pdt.pdt_guardrails import max_sell_allowed
+from pdt.pdt_tracker import add_opened_today, reduce_opened_today, get_opened_today_qty
 
 from config.config import (
     API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL,

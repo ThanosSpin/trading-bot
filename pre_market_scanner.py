@@ -21,7 +21,7 @@ from predictive_model.data_loader import fetch_latest_price
 from account_cache import account_cache
 from market import is_trading_day
 from trader import api
-from pdt_tracker import get_opened_today_qty
+from pdt.pdt_tracker import get_opened_today_qty
 from order_utils import get_order_params, print_market_status, get_market_session
 
 from config.config import (
