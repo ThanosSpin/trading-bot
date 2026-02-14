@@ -3,7 +3,7 @@ import alpaca_trade_api as tradeapi
 from datetime import datetime, timedelta
 import pytz
 from collections import defaultdict
-from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
+from config.config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
 from trader import estimate_daytrade_count
 
 
