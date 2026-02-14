@@ -21,7 +21,7 @@ import joblib
 # Import your existing modules
 try:
     from data_loader import fetch_historical_data
-    from features import build_intraday_features, clean_columns
+    from predictive_model.features import build_intraday_features, clean_columns
     from predictive_model.model_xgb import train_model
     from config.config import SYMBOL
     

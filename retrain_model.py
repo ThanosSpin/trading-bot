@@ -33,7 +33,7 @@ from config.config import TRAIN_SYMBOLS, SHAP_TOP_N, USE_MULTICLASS_MODELS
 
 # ✅ NEW: Check if SHAP is available
 try:
-    from feature_selection import select_features_with_shap
+    from predictive_model.feature_selection import select_features_with_shap
     SHAP_AVAILABLE = True
 except ImportError:
     print("⚠️  SHAP not available - feature selection will be skipped")
@@ -117,10 +117,10 @@ def rebuild_features_for_shap(df, symbol: str, mode: str):
     
     # Build features based on mode
     if mode == "daily":
-        from features import build_daily_features
+        from predictive_model.features import build_daily_features
         df_feat = build_daily_features(df)
     else:  # intraday modes
-        from features import build_intraday_features
+        from predictive_model.features import build_intraday_features
         df_feat = build_intraday_features(df)
         
         # Apply regime filtering
