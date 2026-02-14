@@ -1268,6 +1268,58 @@ def get_signal_details(prediction) -> str:
     
     return "Unknown signal type"
 
+# ================================================================================
+# SOLUTION: MOVE CONTRADICTION CHECK BEFORE BLENDING
+# ================================================================================
+def detect_contradiction(daily_prob, intraday_prob, momentum=None, symbol="", verbose=True):
+    """
+    Detect contradictions between daily and intraday signals.
+    Returns dict with 'contradiction', 'reason', 'severity' keys.
+    """
+    if daily_prob is None or intraday_prob is None:
+        return {'contradiction': False, 'reason': 'Missing data', 'severity': 'low'}
+
+    # Thresholds
+    BULLISH_THRESHOLD = 0.55
+    BEARISH_THRESHOLD = 0.45
+
+    daily_bullish = daily_prob > BULLISH_THRESHOLD
+    daily_bearish = daily_prob < BEARISH_THRESHOLD
+    intraday_bullish = intraday_prob > BULLISH_THRESHOLD
+    intraday_bearish = intraday_prob < BEARISH_THRESHOLD
+
+    # Check disagreement
+    models_disagree = (
+        (daily_bullish and intraday_bearish) or 
+        (daily_bearish and intraday_bullish)
+    )
+
+    if not models_disagree:
+        return {'contradiction': False, 'reason': 'Models agree', 'severity': 'low'}
+
+    # TYPE 1: Strong momentum + disagreement
+    if momentum is not None and abs(momentum) > 0.01:  # >1% move
+        reason = (
+            f"{symbol}: Strong momentum ({momentum:+.2%}) but models disagree - "
+            f"daily={daily_prob:.2f}, intraday={intraday_prob:.2f}"
+        )
+        if verbose:
+            print(f"[CONTRADICTION] {reason}")
+        return {'contradiction': True, 'reason': reason, 'severity': 'high'}
+
+    # TYPE 2: Extreme disagreement
+    extreme_disagree = (
+        (daily_prob > 0.65 and intraday_prob < 0.35) or
+        (daily_prob < 0.35 and intraday_prob > 0.65)
+    )
+
+    if extreme_disagree:
+        reason = f"{symbol}: Extreme disagreement - daily={daily_prob:.2f}, intraday={intraday_prob:.2f}"
+        if verbose:
+            print(f"[CONTRADICTION] {reason}")
+        return {'contradiction': True, 'reason': reason, 'severity': 'medium'}
+
+    return {'contradiction': False, 'reason': 'Mild disagreement', 'severity': 'low'}
 
 # ---------------------------------------------------------
 # COMPUTE SIGNALS (MAIN ENTRY POINT)
@@ -1622,22 +1674,6 @@ def compute_signals(
     if mom1h is None:
         mom1h = float(results.get("intraday_mom") or 0.0)
 
-    # Get thresholds for regime detection
-    try:
-        adaptive = get_adaptive_regime_thresholds(symU, lookback_days=30, percentile=0.70)
-        MOMTRIG = float(adaptive['mom_trig'])
-        VOLTRIG = float(adaptive['vol_trig'])
-    except:
-        MOMTRIG = float(INTRADAY_MOM_TRIG)
-        VOLTRIG = float(INTRADAY_VOL_TRIG)
-        ovr = (INTRADAY_REGIME_OVERRIDES or {}).get(symU)
-        if ovr:
-            MOMTRIG = float(ovr.get("mom_trig", MOMTRIG))
-            VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
-
-    ismomentumregime = abs(mom1h) >= MOMTRIG or vol >= VOLTRIG
-    results["intraday_regime"] = "mom" if ismomentumregime else "mr"
-
     # Calculate weight
     weight = float(intraday_weight)
     if not results["allow_intraday"] or ip is None:
@@ -1720,14 +1756,99 @@ def compute_signals(
     # -------------------------
     # FINAL PROB
     # -------------------------
+    # ========================================================================
+    # ✅ ENHANCED: CONTRADICTION-AWARE BLENDING
+    # ========================================================================
+
+    dp = results["daily_prob"]
+    ip = results["intraday_prob"]
+
+    # Calculate initial weight
+    if not results["allow_intraday"] or ip is None:
+        weight = 0.0
+    else:
+        q = float(results.get("intraday_quality_score", 1.0) or 0.0)
+        weight = float(intraday_weight) * q
+
+    original_weight = weight  # Store for logging
+
+    # ✅ CHECK CONTRADICTION FIRST (before blending)
+    if dp is not None and ip is not None:
+        mom1h = results.get("intraday_mom")
+
+        contradiction = detect_contradiction(
+            daily_prob=dp,
+            intraday_prob=ip,
+            momentum=mom1h,
+            symbol=symU,
+            verbose=True
+        )
+
+        if contradiction['contradiction']:
+            # Zero out intraday influence
+            print(f"[WARN] {symU}: Contradiction detected - zeroing intraday weight (was {weight:.2f})")
+            print(f"       Reason: {contradiction['reason']}")
+            weight = 0.0
+            results["contradiction_detected"] = True
+            results["contradiction_reason"] = contradiction['reason']
+            results["contradiction_severity"] = contradiction['severity']
+        else:
+            results["contradiction_detected"] = False
+    else:
+        results["contradiction_detected"] = False
+
+    # Store weights
+    results["intraday_weight_original"] = original_weight
+    results["intraday_weight_used"] = weight
+
+    # ✅ NOW BLEND with adjusted weight
     if dp is None and ip is None:
         results["final_prob"] = None
     elif dp is None:
         results["final_prob"] = float(ip)
-    elif ip is None or weight == 0.0:
+    elif ip is None or weight <= 0.0:
         results["final_prob"] = float(dp)
     else:
+        # Normal blending (weight may be 0 if contradiction detected)
         results["final_prob"] = float(weight * ip + (1 - weight) * dp)
+
+    # ========================================================================
+    # ✅ ADDITIONAL WEIGHT ADJUSTMENTS (Optional - keep your existing logic)
+    # ========================================================================
+
+    # Strong momentum boost
+    if mom1h is not None and mom1h >= 0.005:
+        weight = max(weight, 0.75)
+        print(f"[MOMENTUM BOOST] {symU}: mom={mom1h:.2%} -> weight={weight:.2f}")
+
+    # Extreme momentum surge
+    if mom1h is not None and mom1h >= 0.010:
+        weight = min(0.90, weight + 0.15)
+        print(f"[MOMENTUM SURGE] {symU}: mom={mom1h:.2%} -> weight={weight:.2f}")
+
+    # Volatility adjustment
+    vol = results.get("intraday_vol")
+    if vol is not None:
+        if vol >= 0.025:
+            weight = min(0.90, weight + 0.20)
+        elif vol <= 0.008 and symU == "SPY":
+            weight = max(0.30, weight - 0.20)
+
+    # Strong daily continuation override
+    try:
+        if dp is not None and ip is not None and dp > 0.78 and ip < 0.25 and mom1h and mom1h < -0.005:
+            weight = max(weight, 0.70)
+    except:
+        pass
+
+    # Recalculate final_prob if weight was adjusted
+    if weight != results["intraday_weight_used"]:
+        print(f"[WEIGHT ADJUSTED] {symU}: {results['intraday_weight_used']:.2f} -> {weight:.2f}")
+        results["intraday_weight_used"] = weight
+
+        # Recalculate blending
+        if dp is not None and ip is not None and weight > 0.0:
+            results["final_prob"] = float(weight * ip + (1 - weight) * dp)
 
     # ============================================================
     # EMERGENCY: Block contradictory momentum signals
@@ -1736,22 +1857,19 @@ def compute_signals(
     if mom1h is not None and ip is not None:
         mom1h_val = float(mom1h)
         
-        # If momentum is strongly negative but intraday predicts bullish
-        if mom1h_val < -0.01 and ip > 0.60:  # -1% momentum but 60%+ bullish pred
-            print(f"[CONTRADICTION] {symU}: mom={mom1h_val:.2%} but ip={ip:.3f} - capping final_prob at 0.52")
-            results["final_prob"] = min(results["final_prob"], 0.52)  # Force neutral
-            results["contradiction_flagged"] = True
-        
-        # If momentum is strongly positive but intraday predicts bearish
-        elif mom1h_val > 0.01 and ip < 0.40:  # +1% momentum but <40% bearish pred
-            print(f"[CONTRADICTION] {symU}: mom={mom1h_val:.2%} but ip={ip:.3f} - flooring final_prob at 0.48")
-            results["final_prob"] = max(results["final_prob"], 0.48)  # Force neutral
-            results["contradiction_flagged"] = True
-        
     # ✨ NEW: Final signal description
     results["final_signal"] = get_signal_details(results["final_prob"])
     
     print(f"[FINAL] {symU} final_prob={fmt(results['final_prob'])} | {results.get('final_signal', '')}")
+
+        # ✅ Final contradiction logging
+    if results.get("contradiction_detected"):
+        print(f"\n⚠️ [{symU}] CONTRADICTION SUMMARY")
+        print(f"   Daily prob: {dp:.2f}")
+        print(f"   Intraday prob: {ip:.2f}")
+        print(f"   Momentum: {results.get('intraday_mom', 'N/A')}")
+        print(f"   Weight: {original_weight:.2f} -> {weight:.2f} (zeroed)")
+        print(f"   Final prob: {results['final_prob']:.2f} (using daily only)\n")
 
     return results
 
