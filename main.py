@@ -748,19 +748,27 @@ def verify_trading_config():
 # Entry Point
 # ===============================================================
 def main():
+    
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
     verify_trading_config() 
 
+ # Wait for confirmation if live trading
+    if USE_LIVE_TRADING:
+        print("⚠️  Starting LIVE trading in 10 seconds...")
+        print("   Press Ctrl+C to abort")
+        time.sleep(10)
+    
+    print("🚀 Trading bot started\n")
 
     # Always show market diagnostics first
     print("\n🔧 Running market diagnostics...")
     debug_market()
 
 
-    # # Optional market-hours guard
-    # if not is_market_open():
-    #     print("⏳ Market is closed. Exiting.")
-    #     return
+    # Optional market-hours guard
+    if not is_market_open():
+        print("⏳ Market is closed. Exiting.")
+        return
 
 
     # PDT Display
