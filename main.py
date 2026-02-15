@@ -558,6 +558,156 @@ def process_all_symbols(symbols):
     print_signal_diagnostics(decisions, diagnostics)
 
 
+# ================================================================================
+# PORTFOLIO RECONCILIATION
+# ================================================================================
+
+def reconcile_portfolio_state(symbol: str, verbose: bool = False):
+    """
+    Compare local portfolio state vs Alpaca truth.
+    Auto-correct to Alpaca if drift detected.
+
+    Args:
+        symbol: Stock symbol to reconcile
+        verbose: If True, log even when no drift
+
+    Returns:
+        dict: {
+            'drift_detected': bool,
+            'local_shares': float,
+            'alpaca_shares': float,
+            'corrected': bool
+        }
+    """
+    from portfolio import PortfolioManager
+    from account_cache import account_cache
+
+    result = {
+        'drift_detected': False,
+        'local_shares': 0.0,
+        'alpaca_shares': 0.0,
+        'corrected': False
+    }
+
+    try:
+        # Get local portfolio state
+        pm = PortfolioManager(symbol)
+        pm.refresh_live()  # Syncs Alpaca → local (but might be stale)
+
+        local_shares = float(pm.data.get("shares", 0.0))
+        local_avg_price = float(pm.data.get("avg_price", 0.0))
+
+        # Get Alpaca truth
+        pos = account_cache.get_position(symbol)
+        alpaca_shares = float(getattr(pos, "qty", 0) if pos else 0)
+        alpaca_avg_price = float(getattr(pos, "avg_entry_price", 0) if pos else 0)
+
+        result['local_shares'] = local_shares
+        result['alpaca_shares'] = alpaca_shares
+
+        # Check for drift in shares
+        if alpaca_shares > 0:
+            share_diff = abs(local_shares - alpaca_shares)
+            share_drift_pct = share_diff / alpaca_shares
+
+            if share_drift_pct > 0.05:  # >5% drift
+                result['drift_detected'] = True
+
+                print(f"⚠️ [{symbol}] SHARE DRIFT DETECTED")
+                print(f"   Local:  {local_shares:g} shares @ ${local_avg_price:.2f}")
+                print(f"   Alpaca: {alpaca_shares:g} shares @ ${alpaca_avg_price:.2f}")
+                print(f"   Drift:  {share_drift_pct:.1%} ({share_diff:g} shares)")
+
+                # Auto-correct to Alpaca truth
+                pm.data["shares"] = alpaca_shares
+                pm.data["avg_price"] = alpaca_avg_price
+                pm.save()
+
+                result['corrected'] = True
+
+                print(f"   ✅ Auto-corrected to Alpaca: {alpaca_shares:g} shares @ ${alpaca_avg_price:.2f}")
+
+                # Log to trade log for audit trail
+                pm.log_trade(
+                    action="RECONCILE",
+                    price=alpaca_avg_price,
+                    qty=alpaca_shares - local_shares,
+                    notes=f"Auto-correction: drift {share_drift_pct:.1%}"
+                )
+
+            elif verbose:
+                print(f"✅ [{symbol}] Portfolio in sync: {alpaca_shares:g} shares")
+
+        elif local_shares > 0:
+            # Alpaca shows 0, but local shows shares (position was closed)
+            result['drift_detected'] = True
+
+            print(f"⚠️ [{symbol}] POSITION CLOSED EXTERNALLY")
+            print(f"   Local:  {local_shares:g} shares")
+            print(f"   Alpaca: 0 shares (position closed)")
+
+            # Reset local to 0
+            pm.data["shares"] = 0
+            pm.data["cash"] = pm.data.get("cash", 0) + (local_shares * local_avg_price)
+            pm.save()
+
+            result['corrected'] = True
+
+            print(f"   ✅ Local portfolio reset to 0")
+
+            pm.log_trade(
+                action="RECONCILE",
+                price=local_avg_price,
+                qty=-local_shares,
+                notes="Position closed externally (not by bot)"
+            )
+
+        elif verbose:
+            print(f"✅ [{symbol}] No position (local and Alpaca agree)")
+
+        return result
+
+    except Exception as e:
+        print(f"❌ [{symbol}] Reconciliation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return result
+
+
+def reconcile_all_symbols(symbols: list, verbose: bool = False):
+    """
+    Reconcile portfolio state for all symbols.
+
+    Returns:
+        dict: Summary of reconciliation results
+    """
+    print("\n" + "="*60)
+    print("🔄 PORTFOLIO RECONCILIATION")
+    print("="*60)
+
+    results = {
+        'total': len(symbols),
+        'drifts_detected': 0,
+        'corrected': 0,
+        'failed': 0
+    }
+
+    for sym in symbols:
+        result = reconcile_portfolio_state(sym, verbose=verbose)
+
+        if result['drift_detected']:
+            results['drifts_detected'] += 1
+        if result['corrected']:
+            results['corrected'] += 1
+
+    print("\n" + "="*60)
+    print(f"Reconciliation complete:")
+    print(f"  Total symbols: {results['total']}")
+    print(f"  Drifts detected: {results['drifts_detected']}")
+    print(f"  Auto-corrected: {results['corrected']}")
+    print("="*60 + "\n")
+
+    return results
 
 # ===============================================================
 # Entry Point
@@ -571,10 +721,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display
@@ -590,6 +740,12 @@ def main():
     except Exception:
         pass
 
+    # ✅ NEW: Add these 8 lines
+    print("\n🔄 Reconciling portfolios with Alpaca...")
+    try:
+        reconcile_all_symbols(symbols, verbose=False)
+    except Exception as e:
+        print(f"⚠️ Reconciliation failed (continuing anyway): {e}")
 
     process_all_symbols(symbols)
 
