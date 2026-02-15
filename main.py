@@ -754,7 +754,7 @@ def main():
 
  # Wait for confirmation if live trading
     if USE_LIVE_TRADING:
-        print("⚠️  Starting LIVE trading in 10 seconds...")
+        print("⚠️  Starting LIVE trading in 5 seconds...")
         print("   Press Ctrl+C to abort")
         time.sleep(5)
     
