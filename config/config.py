@@ -28,6 +28,16 @@ SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]  # symbol
 PAPER_TRADE_SYMBOLS = ['PLTR']  # paper trade symbol
 INITIAL_CAPITAL = 0
 
+# Optional: Documentation for paper trades
+PAPER_TRADE_NOTES = {
+    'PLTR': {
+        'start_date': '2026-02-15',
+        'reason': '4 trades, 0% win rate, -$91.18 loss',
+        'review_date': '2026-03-01',
+        'criteria': '>40% win rate, >20 trades, <$10 avg loss',
+    }
+}
+
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.55    # require strong confidence to buy
 SELL_THRESHOLD = 0.47   # require strong confidence to sell

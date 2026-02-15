@@ -13,7 +13,8 @@ from account_cache import account_cache
 from config.config import (
     SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
-    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE
+    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE,
+    PAPER_TRADE_SYMBOLS, USE_LIVE_TRADING, PAPER_TRADE_NOTES
 )
 from market import is_market_open, is_trading_day
 import os, csv
@@ -709,11 +710,46 @@ def reconcile_all_symbols(symbols: list, verbose: bool = False):
 
     return results
 
+def verify_trading_config():
+    """
+    Verify trading configuration on startup.
+    Shows which symbols are live vs paper.
+    """
+    print("\n" + "="*70)
+    print("🔧 TRADING CONFIGURATION")
+    print("="*70)
+    
+    print(f"\n📊 Global Mode: {'LIVE TRADING' if USE_LIVE_TRADING else 'SIMULATION'}")
+    
+    if USE_LIVE_TRADING:
+        print(f"\n✅ Live Trading Symbols:")
+        for symbol in SYMBOL:
+            if symbol.upper() not in [s.upper() for s in PAPER_TRADE_SYMBOLS]:
+                print(f"   🟢 {symbol} → LIVE")
+        
+        if PAPER_TRADE_SYMBOLS:
+            print(f"\n📝 Paper Trading Symbols:")
+            for symbol in PAPER_TRADE_SYMBOLS:
+                print(f"   📝 {symbol} → PAPER ONLY")
+                
+                # Show notes if available
+                if symbol in PAPER_TRADE_NOTES:
+                    notes = PAPER_TRADE_NOTES[symbol]
+                    print(f"      Reason: {notes.get('reason', 'N/A')}")
+                    print(f"      Review: {notes.get('review_date', 'N/A')}")
+    else:
+        print(f"\n📝 All symbols in simulation mode:")
+        for symbol in SYMBOL:
+            print(f"   📝 {symbol}")
+    
+    print("\n" + "="*70 + "\n")
+
 # ===============================================================
 # Entry Point
 # ===============================================================
 def main():
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
+    verify_trading_config() 
 
 
     # Always show market diagnostics first
