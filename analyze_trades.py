@@ -64,16 +64,19 @@ def load_trade_logs(symbol=None, days=None):
                     break
 
             if timestamp_col:
-                # ✅ FIX: Use format='ISO8601' for flexible parsing
+                # ✅ FIX: Use format='ISO8601' and handle timezone-aware datetimes
                 try:
-                    df['timestamp'] = pd.to_datetime(df[timestamp_col], format='ISO8601')
+                    df['timestamp'] = pd.to_datetime(df[timestamp_col], format='ISO8601', utc=True)
                 except:
                     # Fallback to infer format
                     try:
-                        df['timestamp'] = pd.to_datetime(df[timestamp_col], format='mixed')
+                        df['timestamp'] = pd.to_datetime(df[timestamp_col], format='mixed', utc=True)
                     except:
-                        # Last resort - let pandas infer
+                        # Last resort - let pandas infer, then convert to UTC
                         df['timestamp'] = pd.to_datetime(df[timestamp_col], errors='coerce')
+                        if df['timestamp'].dt.tz is None:
+                            # If timezone-naive, localize to UTC
+                            df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
 
             # Extract symbol from filename if not in data
             if 'symbol' not in df.columns:
@@ -91,7 +94,8 @@ def load_trade_logs(symbol=None, days=None):
 
     # Filter by days if specified
     if days and 'timestamp' in df.columns:
-        cutoff = datetime.now() - timedelta(days=days)
+        # ✅ FIX: Make cutoff timezone-aware to match dataframe
+        cutoff = pd.Timestamp.now(tz='UTC') - timedelta(days=days)
         df = df[df['timestamp'] >= cutoff]
 
     return df
