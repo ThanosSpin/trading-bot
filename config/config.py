@@ -25,6 +25,7 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 # Trading config
 SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]  # symbol
+PAPER_TRADE_SYMBOLS = ['PLTR']  # paper trade symbol
 INITIAL_CAPITAL = 0
 
 # --- Trading thresholds ---

@@ -12,7 +12,7 @@ from pdt.pdt_tracker import add_opened_today, reduce_opened_today, get_opened_to
 
 from config.config import (
     API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL,
-    USE_LIVE_TRADING
+    USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS
 )
 from market import is_market_open, is_trading_day
 from predictive_model.data_loader import fetch_latest_price
@@ -154,6 +154,57 @@ def _get_live_price(symbol):
 
 
 # =====================================================================
+# Log paper trade
+# =====================================================================
+def log_paper_trade(symbol, action, quantity, price, decision=None):
+    """
+    Log paper trades to a separate CSV file for analysis.
+    """
+    import csv
+    from datetime import datetime
+    import os
+    
+    filename = f'paper_trades_{symbol}.csv'
+    file_exists = os.path.exists(filename)
+    
+    try:
+        with open(filename, 'a', newline='') as f:
+            writer = csv.writer(f)
+            
+            # Write header if new file
+            if not file_exists:
+                writer.writerow([
+                    'timestamp',
+                    'symbol',
+                    'action',
+                    'qty',
+                    'price',
+                    'value',
+                    'signal',
+                    'mode'
+                ])
+            
+            # Extract signal if available
+            signal = None
+            if decision and isinstance(decision, dict):
+                signal = decision.get('final_signal') or decision.get('signal')
+            
+            # Write trade record
+            writer.writerow([
+                datetime.now().isoformat(),
+                symbol,
+                action.upper(),
+                quantity,
+                price,
+                quantity * price,
+                signal if signal is not None else '',
+                'PAPER'
+            ])
+            
+    except Exception as e:
+        print(f"[WARN] Failed to log paper trade for {symbol}: {e}")
+
+# =====================================================================
 # ORDER EXECUTION
 # =====================================================================
 def execute_trade(action, quantity, symbol, decision=None):
@@ -161,6 +212,7 @@ def execute_trade(action, quantity, symbol, decision=None):
     Execute a BUY/SELL.
     In simulation: use fetch_latest_price.
     In live mode: submits actual orders.
+    Per-symbol paper trading: respects PAPER_TRADE_SYMBOLS even if USE_LIVE_TRADING=True.
     """
     symU = str(symbol).upper().strip()
     action = (action or "").lower().strip()
@@ -179,20 +231,35 @@ def execute_trade(action, quantity, symbol, decision=None):
     if not is_trading_day() or not is_market_open():
         print(f"⏳ Market closed → skipping {action.upper()} {symU}.")
         return 0.0, None
-
+    
     # -------------------------------------------------------
-    # SIMULATED TRADING
+    # CHECK: Per-Symbol Paper Trading Override
     # -------------------------------------------------------
-    if not USE_LIVE_TRADING:
+    # If this symbol is in PAPER_TRADE_SYMBOLS, force paper mode
+    # even if USE_LIVE_TRADING=True
+    is_paper_symbol = symU in [s.upper() for s in PAPER_TRADE_SYMBOLS]
+    
+    # -------------------------------------------------------
+    # SIMULATED/PAPER TRADING
+    # -------------------------------------------------------
+    if not USE_LIVE_TRADING or is_paper_symbol:
         price = fetch_latest_price(symU)
         if price:
-            print(f"[SIM] {action.upper()} {quantity:g} {symU} @ {price}")
+            mode = "[PAPER]" if is_paper_symbol else "[SIM]"
+            print(f"{mode} {action.upper()} {quantity:g} {symU} @ {price}")
+            
+            # Log paper trades separately for analysis
+            if is_paper_symbol:
+                log_paper_trade(symU, action, quantity, price, decision)
+            
             return quantity, float(price)
-        print(f"[SIM WARN] No price for {symU}")
+        
+        mode = "PAPER" if is_paper_symbol else "SIM"
+        print(f"[{mode} WARN] No price for {symU}")
         return 0.0, None
 
     # -------------------------------------------------------
-    # LIVE TRADING
+    # LIVE TRADING (only if not in PAPER_TRADE_SYMBOLS)
     # -------------------------------------------------------
     try:
         acct = api.get_account()
@@ -247,7 +314,7 @@ def execute_trade(action, quantity, symbol, decision=None):
             type="market",
             time_in_force="gtc",
         )
-        print(f"[LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})")
+        print(f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})")
 
         time.sleep(2)
         result = api.get_order(order.id)
@@ -259,7 +326,7 @@ def execute_trade(action, quantity, symbol, decision=None):
             print(f"[LIVE] Order for {symU} not filled yet.")
             return 0.0, None
 
-        print(f"[LIVE] Filled {filled_qty} {symU} @ {filled_price}")
+        print(f"🟢 [LIVE] Filled {filled_qty} {symU} @ {filled_price}")
 
         # Track shares opened today (PDT tracker)
         if action == "buy":
