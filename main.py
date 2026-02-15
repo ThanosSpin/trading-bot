@@ -756,7 +756,7 @@ def main():
     if USE_LIVE_TRADING:
         print("⚠️  Starting LIVE trading in 10 seconds...")
         print("   Press Ctrl+C to abort")
-        time.sleep(10)
+        time.sleep(5)
     
     print("🚀 Trading bot started\n")
 
