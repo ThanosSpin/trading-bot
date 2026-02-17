@@ -4,7 +4,8 @@ from config.config import (
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
     PDT_TIERING_ENABLED, PDT_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
-    MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB
+    MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB,
+    PYRAMID_THRESHOLD
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
@@ -348,10 +349,39 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
     # If already in a position, don't pyramid by default (prevents confusing "BUY but no cash")
     if shares > 0 and prob_up >= BUY_THRESHOLD:
-        return make_decision(
-            "hold", 0,
-            explain + f"HOLD — already in position (shares={shares:g}); pyramiding disabled."
-        )
+        if prob_up < PYRAMID_THRESHOLD:
+            return make_decision(
+                "hold", 0,
+                explain + f"HOLD — already in position (shares={shares:g}); "
+                f"pyramiding requires prob≥{PYRAMID_THRESHOLD:.2f} (current={prob_up:.3f})."
+            )
+        
+        # Pyramiding allowed - calculate quantity based on available cash
+        # Use same allocation logic as new positions
+        if total_symbols == 1:
+            max_invest = cash
+        elif total_symbols == 2:
+            max_invest = cash * RISK_FRACTION if concurrent_buys == 2 else cash
+        else:
+            max_invest = cash * RISK_FRACTION
+        
+        affordable = int(cash // price)
+        target = int(max_invest // price)
+        qty = min(affordable, target)
+        
+        # Apply position limits
+        qty = apply_position_limits(qty, price, cash, symbol)
+        
+        if qty > 0:
+            return make_decision(
+                "buy", qty,
+                explain + f"PYRAMID BUY — adding to position (current={shares:g}, new={qty}, prob={prob_up:.3f})."
+            )
+        else:
+            return make_decision(
+                "hold", 0,
+                explain + f"HOLD — pyramiding signal but insufficient cash (available=${cash:.2f})."
+            )
 
 
     # BUY

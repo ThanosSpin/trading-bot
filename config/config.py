@@ -41,7 +41,7 @@ PAPER_TRADE_NOTES = {
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.55    # require strong confidence to buy
 SELL_THRESHOLD = 0.47   # require strong confidence to sell
-
+PYRAMID_THRESHOLD = 0.65 
 
 # --------------------
 # Model blending weights
@@ -172,5 +172,5 @@ PORTFOLIO_PATH = "data/portfolio.json"
 LOG_FILE = "logs/trading_bot.log"
 
 # Other configs
-USE_LIVE_TRADING = True  # Switch to True to go live
+USE_LIVE_TRADING = False  # Switch to True to go live
 TIMEZONE = "US/Eastern"
