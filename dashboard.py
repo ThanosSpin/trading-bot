@@ -140,10 +140,14 @@ def _has_position(sym: str) -> bool:
 spy = SPY_SYMBOL.upper()
 
 
-# Auto-include SPY if relevant, or via toggle
-if include_spy or spy in symbols or _has_model(spy) or _has_position(spy):
+# Only include SPY when explicitly requested
+if include_spy:
     if spy not in symbols:
         symbols.append(spy)
+else:
+    # Ensure SPY is removed when checkbox is off
+    symbols = [s for s in symbols if s != spy]
+
 tz = pytz.timezone(TIMEZONE)
 
 
@@ -582,6 +586,17 @@ else:
     latest = latest[["symbol", "dp", "ip", "divergence", "weight", "model"]].sort_values("symbol")
     st.dataframe(latest, use_container_width=True)
 
+    # --- Trace visibility controls
+    trace_options = ["Price", "Final prob", "Intraday prob", "Daily prob", "BUY", "SELL"]
+    default_traces = ["Price", "Final prob", "BUY", "SELL"]
+
+    visible_traces = st.multiselect(
+        f"Show traces for {sym}",
+        options=trace_options,
+        default=default_traces,
+        key=f"trace_selector_{sym}",
+    )
+
 
     # plot divergence over time
     fig = go.Figure()
@@ -655,28 +670,64 @@ if show_compare and model_compare:
     # Accuracy Chart
     with colA:
         st.subheader("Accuracy Comparison")
-        fig, ax = plt.subplots(figsize=(5, 3))
+        fig, ax = plt.subplots(figsize=(8, 4))
+        
         for mode in ["Daily", "Intraday"]:
             sub = df_chart[df_chart["Mode"] == mode]
-            ax.bar(sub["Symbol"] + " (" + mode + ")", sub["Accuracy"])
+            bars = ax.bar(sub["Symbol"] + " (" + mode + ")", sub["Accuracy"])
+            
+            # Add value labels inside bars
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2.,
+                    height + 0.01,  # Slightly above bar
+                    f'{height:.0%}',  # Format as percentage
+                    ha='center',
+                    va='bottom',
+                    fontsize=8,
+                    fontweight='bold'
+                )
+        
         ax.set_ylim(0, 1)
         ax.set_ylabel("Accuracy")
-        ax.set_xticklabels(sub["Symbol"], rotation=45)
+ 
         ax.grid(True, alpha=0.2)
+        ax.tick_params(axis='x', labelsize=8, rotation=45)
+        plt.tight_layout()
         st.pyplot(fig)
 
 
     # Logloss Chart
     with colB:
         st.subheader("Logloss Comparison")
-        fig, ax = plt.subplots(figsize=(5, 3))
+        fig, ax = plt.subplots(figsize=(8, 4))
+        
         for mode in ["Daily", "Intraday"]:
             sub = df_chart[df_chart["Mode"] == mode]
-            ax.bar(sub["Symbol"] + " (" + mode + ")", sub["Logloss"])
-        ax.set_ylabel("Logloss")
-        ax.set_xticklabels(sub["Symbol"], rotation=45)
+            bars = ax.bar(sub["Symbol"] + " (" + mode + ")", sub["Logloss"])
+            
+            # LogLoss labels (raw value + context)
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2.,
+                    height + 0.001,
+                    f'{height:.3f}',  # Raw LogLoss (3 decimals)
+                    ha='center',
+                    va='bottom',
+                    fontsize=8,
+                    fontweight='bold'
+                )
+        
+        ax.set_ylabel("Logloss (lower = better)")
+        ax.axhline(y=0.693, color='red', linestyle='--', alpha=0.7, label='Random (0.693)')
+        ax.legend()
         ax.grid(True, alpha=0.2)
+        ax.tick_params(axis='x', labelsize=8, rotation=45)
+        plt.tight_layout()
         st.pyplot(fig)
+
 
 
 # Price charts
@@ -969,7 +1020,7 @@ for sym in symbols:
 
 
     # ---- PRICE (left axis)
-    if "price" in df.columns:
+    if "Price" in visible_traces and "price" in df.columns:
         fig.add_trace(go.Scatter(
             x=df["timestamp"],
             y=df["price"],
@@ -979,9 +1030,8 @@ for sym in symbols:
             hovertemplate="Price: %{y:.2f}<extra></extra>",
         ))
 
-
     # ---- FINAL PROBABILITY (right axis)
-    if "finalprob" in df.columns or "final_prob" in df.columns:
+    if ("Final prob" in visible_traces) and ("finalprob" in df.columns or "final_prob" in df.columns):
         prob_col = "finalprob" if "finalprob" in df.columns else "final_prob"
         fig.add_trace(go.Scatter(
             x=df["timestamp"],
@@ -992,9 +1042,8 @@ for sym in symbols:
             hovertemplate="Final prob: %{y:.3f}<extra></extra>",
         ))
 
-
-    # Optional: intraday vs daily
-    if "intradayprob" in df.columns or "intraday_prob" in df.columns:
+    # ---- Intraday prob
+    if ("Intraday prob" in visible_traces) and ("intradayprob" in df.columns or "intraday_prob" in df.columns):
         ip_col = "intradayprob" if "intradayprob" in df.columns else "intraday_prob"
         fig.add_trace(go.Scatter(
             x=df["timestamp"],
@@ -1006,8 +1055,8 @@ for sym in symbols:
             hovertemplate="Intraday prob: %{y:.3f}<extra></extra>",
         ))
 
-
-    if "dailyprob" in df.columns or "daily_prob" in df.columns:
+    # ---- Daily prob
+    if ("Daily prob" in visible_traces) and ("dailyprob" in df.columns or "daily_prob" in df.columns):
         dp_col = "dailyprob" if "dailyprob" in df.columns else "daily_prob"
         fig.add_trace(go.Scatter(
             x=df["timestamp"],
@@ -1019,14 +1068,12 @@ for sym in symbols:
             hovertemplate="Daily prob: %{y:.3f}<extra></extra>",
         ))
 
-
     # ---- BUY/SELL MARKERS (on price axis)
     if df_tr is not None and not df_tr.empty:
         buys = df_tr[df_tr["action"] == "buy"].copy()
         sells = df_tr[df_tr["action"] == "sell"].copy()
 
-
-        if not buys.empty:
+        if "BUY" in visible_traces and not buys.empty:
             fig.add_trace(go.Scatter(
                 x=buys["timestamp"],
                 y=buys["price"],
@@ -1043,8 +1090,7 @@ for sym in symbols:
                 ),
             ))
 
-
-        if not sells.empty:
+        if "SELL" in visible_traces and not sells.empty:
             fig.add_trace(go.Scatter(
                 x=sells["timestamp"],
                 y=sells["price"],
@@ -1151,6 +1197,10 @@ if os.path.exists(portfolio_path):
                 amount = row["amount"]
                 df.loc[df["date"] >= dep_date, "total_equity"] += amount
 
+
+        # --- Trace visibility controls
+        trace_options = ["Price", "Final prob", "Intraday prob", "Daily prob", "BUY", "SELL"]
+        default_traces = ["Price", "Final prob", "BUY", "SELL"]
 
         # Dual Curve Chart + Markers (Plotly)
         fig = go.Figure()
