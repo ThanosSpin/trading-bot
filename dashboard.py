@@ -586,18 +586,6 @@ else:
     latest = latest[["symbol", "dp", "ip", "divergence", "weight", "model"]].sort_values("symbol")
     st.dataframe(latest, use_container_width=True)
 
-    # --- Trace visibility controls
-    trace_options = ["Price", "Final prob", "Intraday prob", "Daily prob", "BUY", "SELL"]
-    default_traces = ["Price", "Final prob", "BUY", "SELL"]
-
-    visible_traces = st.multiselect(
-        f"Show traces for {sym}",
-        options=trace_options,
-        default=default_traces,
-        key=f"trace_selector_{sym}",
-    )
-
-
     # plot divergence over time
     fig = go.Figure()
     for sym in sorted(dfd["symbol"].dropna().unique()):
@@ -1015,6 +1003,15 @@ for sym in symbols:
         except Exception:
             df_tr = None
 
+    trace_options = ["Price", "Final prob", "Intraday prob", "Daily prob", "BUY", "SELL"]
+    default_traces = ["Price", "Final prob", "BUY", "SELL"]
+
+    visible_traces = st.multiselect(
+        f"Show traces for {sym}",
+        options=trace_options,
+        default=default_traces,
+        key=f"trace_selector_{sym}",
+    )
 
     fig = go.Figure()
 
