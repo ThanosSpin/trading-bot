@@ -14,7 +14,8 @@ from config.config import (
     SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE,
-    PAPER_TRADE_SYMBOLS, USE_LIVE_TRADING, PAPER_TRADE_NOTES
+    PAPER_TRADE_SYMBOLS, USE_LIVE_TRADING, PAPER_TRADE_NOTES,
+    PDT_EMERGENCY_PROB_THRESH
 )
 from market import is_market_open, is_trading_day
 import os, csv
@@ -353,6 +354,11 @@ def execute_decisions(decisions):
         print(f"Action: SELL | Qty: {qty} | Price: {price}")
         print(f"Reason: {explain}")
 
+        # 🚨 NEW: Emergency logging
+        if decision.get('pdt_emergency'):
+            print(f"🚨 PDT EMERGENCY SELL: {sym}")
+            print(f"   Reason: {explain}")
+            print(f"   prob_up: {decision.get('prob_up', 'N/A')}")
         
         if price is None or qty <= 0:
             print(f"[WARN] {sym} invalid sell input, skipping.")
@@ -534,6 +540,25 @@ def process_all_symbols(symbols):
     # ----------------------------
     symbols_for_strategy = list(predictions.keys())
     decisions = compute_strategy_decisions(predictions, symbols=symbols_for_strategy, diagnostics=diagnostics)
+
+    # 🚨 EMERGENCY SELLS (highest priority)
+    pdt_status = get_pdt_status()
+    for sym in core_symbols:
+        sig_prob = predictions.get(sym)
+        if sig_prob and sig_prob < PDT_EMERGENCY_PROB_THRESH:
+            pm = PortfolioManager(sym)
+            pm.refresh_live()
+            shares = pm.data.get('shares', 0)
+            
+            if shares > 0 and pdt_status.get('remaining', 0) > 0:
+                decisions[sym] = {
+                    'action': 'sell',
+                    'qty': shares,
+                    'explain': f"🚨 EMERGENCY prob_up={sig_prob:.3f} < {PDT_EMERGENCY_PROB_THRESH}",
+                    'pdt_emergency': True,
+                    'priority_rank': 0  # Execute first
+                }
+                print(f"🚨 EMERGENCY SELL OVERRIDE: {sym} prob_up={sig_prob:.3f}")
 
 
     print("\n================== DECISIONS ==================")
