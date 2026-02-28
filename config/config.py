@@ -143,7 +143,7 @@ PDT_EMERGENCY_MAX_PER_DAY = 1
 # ============================================================
 # EMERGENCY_SELL_THRESHOLDS
 # ============================================================
-PDT_EMERGENCY_PROB_THRESH = 0.38  # Emergency sell below this
+PDT_EMERGENCY_PROB_THRESH = 0.4  # Emergency sell below this
 
 # ============================================================
 # PRE-MARKET SCANNER SETTINGS
