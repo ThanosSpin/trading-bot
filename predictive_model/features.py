@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 from predictive_model.time_features import add_time_features
+from predictive_model.data_loader import fetch_historical_data
 
 
 # ============================================================================
@@ -412,7 +413,8 @@ def build_daily_features(df: pd.DataFrame) -> pd.DataFrame:
     Build full advanced feature set for daily data.
     """
     result = _build_base_features(df, mode="daily")
-    
+    result = add_spy_regime_features(result)
+
     # ✅ FINAL SAFETY CHECK
     result = _remove_unnamed_columns(result)
     
@@ -430,6 +432,7 @@ def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.index, pd.DatetimeIndex):
         df = add_time_features(df)
     
+    df = add_spy_regime_features(df)
     # ✅ FINAL SAFETY CHECK
     df = _remove_unnamed_columns(df)
     
@@ -515,4 +518,72 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     # ✅ SAFETY: Clean any unnamed columns that may have been created
     df = _remove_unnamed_columns(df)
 
+    return df
+
+# ============================================================================
+# 🆕 SPY REGIME FEATURES (MACRO CONTEXT)
+# ============================================================================
+def add_spy_regime_features(df: pd.DataFrame, spy_symbol: str = "SPY") -> pd.DataFrame:
+    """
+    Add SPY market regime features (most predictive exogenous signal).
+    
+    Features:
+    - SPY 10-day momentum (broad market trend)
+    - SPY above/below 20-day MA (regime confirmation)
+    - SPY 10-day drawdown (risk-off signal)
+    - SPY volatility regime (high/low vol environment)
+    """
+    import warnings
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    
+    df = df.copy()
+    
+    try:
+        # Fetch SPY data matching this df's timeframe
+        if df.attrs.get('interval', '1d') == '1d':
+            spy_df = fetch_historical_data(spy_symbol, period="3mo", interval="1d")
+        else:
+            # Intraday: shorter lookback
+            spy_df = fetch_historical_data(spy_symbol, period="1mo", interval="1d")
+        
+        if spy_df is None or spy_df.empty:
+            print("[SPY-FEATURES] No SPY data available - skipping regime features")
+            return df
+        
+        # Extract scalar Close series (handles MultiIndex)
+        spy_close = spy_df["Close"].iloc[:, 0] if hasattr(spy_df["Close"], "iloc") else spy_df["Close"]
+        spy_close = pd.to_numeric(spy_close, errors='coerce').dropna()
+        
+        if len(spy_close) < 20:
+            print("[SPY-FEATURES] Insufficient SPY data - skipping")
+            return df
+        
+        # Reindex to match main df (forward-fill for intraday)
+        spy_regime = spy_close.reindex(df.index, method='ffill').fillna(method='ffill')
+        
+        # 1. SPY 10-day momentum (MOST PREDICTIVE)
+        spy_ret10d = spy_close.pct_change(10)
+        df['spy_ret10d'] = spy_ret10d.reindex(df.index, method='ffill').fillna(0)
+        
+        # 2. SPY above/below 20-day MA (regime confirmation)
+        spy_ma20 = spy_close.rolling(20).mean()
+        df['spy_above_ma20'] = (spy_close > spy_ma20).reindex(df.index, method='ffill').fillna(False).astype(int)
+        
+        # 3. SPY 10-day drawdown (risk-off)
+        spy_peak10 = spy_close.rolling(10, min_periods=1).max()
+        df['spy_dd10d'] = (spy_close / spy_peak10 - 1).reindex(df.index, method='ffill').fillna(0)
+        
+        # 4. SPY volatility regime
+        spy_vol10 = spy_close.pct_change().rolling(10).std()
+        spy_vol_regime = spy_vol10 / spy_vol10.mean()  # Normalized
+        df['spy_vol_regime'] = spy_vol_regime.reindex(df.index, method='ffill').fillna(1.0)
+        
+        # 5. SPY momentum acceleration (trend strengthening/weakening)
+        df['spy_mom_accel'] = df['spy_ret10d'].diff().fillna(0)
+        
+        print(f"[SPY-FEATURES] Added 6 SPY regime features | spy_ret10d={df['spy_ret10d'].iloc[-1]:.2%}")
+        
+    except Exception as e:
+        print(f"[SPY-FEATURES] Error adding regime features: {e}")
+    
     return df
