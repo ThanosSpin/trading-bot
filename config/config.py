@@ -60,10 +60,10 @@ USE_MULTICLASS_MODELS = False  # Train 5-class models instead of binary
 SPY_SYMBOL = "SPY"
 
 # Weakness definition for individual stocks:
-WEAK_PROB_THRESHOLD = 0.45
+WEAK_PROB_THRESHOLD = 0.48
 
 # Market is weak if this fraction of your stock symbols are weak:
-WEAK_RATIO_THRESHOLD = 0.60
+WEAK_RATIO_THRESHOLD = 0.5
 
 # Only trade SPY if SPY confirms strength:
 SPY_ENTRY_THRESHOLD = 0.70

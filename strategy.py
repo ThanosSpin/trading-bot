@@ -1195,7 +1195,8 @@ def compute_strategy_decisions(
             decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive → skipping SPY this cycle.")
 
     
-        # ============================================================
+    
+    # ============================================================
     # 🚀 MOMENTUM BREAKOUT OVERRIDE (before dip-buy)
     # ============================================================
     for sym in core_symbols:
@@ -1281,6 +1282,27 @@ def compute_strategy_decisions(
                                         print(f"   → {old_qty} → {new_qty} shares")
                         except Exception as e:
                             print(f"[ERROR] Dip-buy: {e}")
+
+
+    # ---------------------------------------------------------
+    # WEAK-MARKET BUY BLOCKER (core symbols only)
+    # ---------------------------------------------------------
+    market_weak = _weak_market(symbols, preds)
+    if market_weak:
+        print(f"[WEAK-MARKET] Blocking new core BUYs "
+              f"(WEAK_PROB_THRESHOLD={WEAK_PROB_THRESHOLD}, "
+              f"WEAK_RATIO_THRESHOLD={WEAK_RATIO_THRESHOLD})")
+
+        for sym in core_symbols:
+            d = decisions.get(sym) or {}
+            if d.get("action") == "buy":
+                # Turn BUY into HOLD, keep explanation for audit
+                decisions[sym] = make_decision(
+                    "hold",
+                    0,
+                    f"{sym}: BUY blocked by weak-market filter. "
+                    f"orig_reason=({d.get('explain','')})"
+                )
 
 
     return decisions
