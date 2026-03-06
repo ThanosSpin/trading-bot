@@ -1692,7 +1692,7 @@ def compute_signals(
             weight = max(0.30, weight - 0.20)
     except Exception:
         pass
-
+    
     # Price momentum override (tuned for 15m)
     try:
         # Strong momentum = price up >0.5% in last hour
@@ -1714,13 +1714,29 @@ def compute_signals(
             weight = max(weight, 0.75)
     except Exception:
         pass
-
+        
     # Strong daily continuation override
     try:
         if dp is not None and ip is not None and dp > 0.78 and ip < 0.25 and mom1h < -0.005:
             weight = max(weight, 0.70)
     except Exception:
         pass
+    
+    # ===============
+    # 🆕 VOLATILITY REGIME SCALING
+    # ===============
+    vol_regime = 1.0  # Default: neutral
+    if len(close) >= 20:
+        vol20_pct = close.pct_change().tail(20).std()
+        vol_regime = vol20_pct / 0.02  # Normalize to 2% daily vol
+        
+        # Adjust weight based on vol regime
+        if vol_regime > 1.5:  # High vol → trust intraday more
+            weight = min(0.90, weight + 0.15)
+        elif vol_regime < 0.7:  # Low vol → trust daily more
+            weight = max(0.25, weight - 0.15)
+    
+    results["vol_regime"] = float(vol_regime)  # Store for diagnostics
 
     weight = float(min(max(weight, 0.0), 0.90))
     results["intraday_weight"] = weight
