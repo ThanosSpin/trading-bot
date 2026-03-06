@@ -1268,6 +1268,51 @@ def get_signal_details(prediction) -> str:
     
     return "Unknown signal type"
 
+
+# ---------------------------------------------------------
+# 🆕 VIX MARKET REGIME FILTER
+# ---------------------------------------------------------
+def fetch_vix_level() -> float:
+    """
+    Fetch latest VIX close. Returns 20.0 as a safe default if unavailable.
+    """
+    try:
+        df_vix = fetch_historical_data("^VIX", period="5d", interval="1d")
+        if df_vix is not None and not df_vix.empty:
+            vix_close = df_vix["Close"]
+            vix_close = vix_close.iloc[:, 0] if isinstance(vix_close, pd.DataFrame) else vix_close
+            vix_close = vix_close.dropna()
+            if len(vix_close) > 0:
+                return float(vix_close.iloc[-1])
+    except Exception as e:
+        print(f"[VIX] Could not fetch VIX: {e}")
+    return 20.0  # Safe neutral default
+
+
+def vix_market_regime_filter(prob: float, vix_level: float, symbol: str = "") -> float:
+    """
+    Derate prediction confidence when VIX is elevated.
+    High fear  → reduce conviction (prob pulled toward 0.5)
+    Normal VIX → no change
+    """
+    if vix_level > 30:      # Extreme fear (e.g., crash)
+        scale = 0.80
+    elif vix_level > 25:    # High fear
+        scale = 0.85
+    elif vix_level > 18:    # Elevated
+        scale = 0.92
+    else:                   # Normal
+        scale = 1.0
+
+    if scale < 1.0:
+        # Pull toward 0.5 (neutral), don't just multiply
+        adjusted = 0.5 + (prob - 0.5) * scale
+        print(f"[VIX FILTER] {symbol} VIX={vix_level:.1f} → scale={scale:.2f} | prob {prob:.3f} → {adjusted:.3f}")
+        return float(adjusted)
+
+    return float(prob)
+
+
 # ================================================================================
 # SOLUTION: MOVE CONTRADICTION CHECK BEFORE BLENDING
 # ================================================================================
@@ -1369,6 +1414,11 @@ def compute_signals(
     model_intra_mr = load_model(symU, mode="intraday_mr")
     model_intra_mom = load_model(symU, mode="intraday_mom")
     model_intraday_legacy = load_model(symU, mode="intraday")
+
+    # 🆕 Fetch VIX once for the entire signal computation
+    vix_level = fetch_vix_level()
+    results["vix_level"] = vix_level
+    print(f"[VIX] {symU} Current VIX: {vix_level:.1f}")
 
     # -------------------------
     # DAILY PREDICTION
@@ -1826,7 +1876,13 @@ def compute_signals(
         results["final_prob"] = float(dp)
     else:
         # Normal blending (weight may be 0 if contradiction detected)
-        results["final_prob"] = float(weight * ip + (1 - weight) * dp)
+        raw_final = float(weight * ip + (1 - weight) * dp)
+
+        # 🆕 Apply VIX regime filter to derate conviction in fearful markets
+        final_prob_vix = vix_market_regime_filter(raw_final, vix_level=vix_level, symbol=symU)
+
+        results["final_prob"]       = final_prob_vix
+        results["final_prob_raw"]   = raw_final          # Store pre-VIX for diagnostics
 
     # ========================================================================
     # ✅ ADDITIONAL WEIGHT ADJUSTMENTS (Optional - keep your existing logic)
