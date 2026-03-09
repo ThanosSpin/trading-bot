@@ -254,7 +254,8 @@ def calculate_metrics(df):
 
     # Combine all round trips
     if all_round_trips:
-        combined_rt = pd.concat([r for r in all_round_trips if not r.empty], ignore_index=True)
+        valid_rts = [r for r in all_round_trips if not r.empty]
+        combined_rt = pd.concat(valid_rts, ignore_index=True) if valid_rts else pd.DataFrame()
     else:
         combined_rt = pd.DataFrame()
 
