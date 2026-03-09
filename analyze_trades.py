@@ -12,31 +12,26 @@ from datetime import datetime, timedelta
 import glob
 import os
 
+# ── Risk config (mirror config.py) ──────────────────────────────────────────
+STOP_LOSS       = 0.95   # 5% below buy price
+TRAIL_STOP      = 0.96   # 4% trailing stop
+TRAIL_ACTIVATE  = 1.05   # trailing activates after +5%
+
+
 def load_trade_logs(symbol=None, days=None):
     """Load trade logs from CSV files."""
-    # Search in multiple locations
-    search_paths = [
-        ".",                    # Current directory
-        "data",                 # data folder
-        "logs",                 # logs folder
-        "../logs",              # Parent's logs folder
-        "./logs/trades",        # logs/trades subfolder
-    ]
-
+    search_paths = [".", "data", "logs", "../logs", "./logs/trades"]
     files = []
 
     for path in search_paths:
         if not os.path.exists(path):
             continue
-
         if symbol:
             pattern = os.path.join(path, f"trades_{symbol.upper()}.csv")
-            files.extend(glob.glob(pattern))
         else:
             pattern = os.path.join(path, "trades_*.csv")
-            files.extend(glob.glob(pattern))
+        files.extend(glob.glob(pattern))
 
-    # Remove duplicates
     files = list(set(files))
 
     if not files:
@@ -56,32 +51,26 @@ def load_trade_logs(symbol=None, days=None):
         try:
             df = pd.read_csv(file)
 
-            # Handle different timestamp column names
             timestamp_col = None
-            for col in ['timestamp', 'date', 'time', 'datetime']:
+            for col in ["timestamp", "date", "time", "datetime"]:
                 if col in df.columns:
                     timestamp_col = col
                     break
 
             if timestamp_col:
-                # ✅ FIX: Use format='ISO8601' and handle timezone-aware datetimes
                 try:
-                    df['timestamp'] = pd.to_datetime(df[timestamp_col], format='ISO8601', utc=True)
-                except:
-                    # Fallback to infer format
+                    df["timestamp"] = pd.to_datetime(df[timestamp_col], format="ISO8601", utc=True)
+                except Exception:
                     try:
-                        df['timestamp'] = pd.to_datetime(df[timestamp_col], format='mixed', utc=True)
-                    except:
-                        # Last resort - let pandas infer, then convert to UTC
-                        df['timestamp'] = pd.to_datetime(df[timestamp_col], errors='coerce')
-                        if df['timestamp'].dt.tz is None:
-                            # If timezone-naive, localize to UTC
-                            df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
+                        df["timestamp"] = pd.to_datetime(df[timestamp_col], format="mixed", utc=True)
+                    except Exception:
+                        df["timestamp"] = pd.to_datetime(df[timestamp_col], errors="coerce")
+                        if df["timestamp"].dt.tz is None:
+                            df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
 
-            # Extract symbol from filename if not in data
-            if 'symbol' not in df.columns:
-                sym = os.path.basename(file).replace('trades_', '').replace('.csv', '')
-                df['symbol'] = sym.upper()
+            if "symbol" not in df.columns:
+                sym = os.path.basename(file).replace("trades_", "").replace(".csv", "")
+                df["symbol"] = sym.upper()
 
             dfs.append(df)
         except Exception as e:
@@ -92,206 +81,338 @@ def load_trade_logs(symbol=None, days=None):
 
     df = pd.concat(dfs, ignore_index=True)
 
-    # Filter by days if specified
-    if days and 'timestamp' in df.columns:
-        # ✅ FIX: Make cutoff timezone-aware to match dataframe
-        cutoff = pd.Timestamp.now(tz='UTC') - timedelta(days=days)
-        df = df[df['timestamp'] >= cutoff]
+    if days and "timestamp" in df.columns:
+        cutoff = pd.Timestamp.now(tz="UTC") - timedelta(days=days)
+        df = df[df["timestamp"] >= cutoff]
 
     return df
 
+
+# ── FIFO round-trip matching ─────────────────────────────────────────────────
+def calculate_round_trips(df, price_col="price", qty_col="qty"):
+    """
+    Match buys to sells using FIFO.
+    Returns (round_trips_df, open_positions_list).
+    """
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    buy_queue   = []   # list of dicts: {price, qty, time}
+    round_trips = []
+
+    for _, row in df.iterrows():
+        action = str(row["action"]).upper()
+        qty    = float(row[qty_col])
+        price  = float(row[price_col])
+        ts     = row["timestamp"]
+
+        if action == "BUY":
+            buy_queue.append({"price": price, "qty": qty, "time": ts})
+
+        elif action == "SELL":
+            remaining = qty
+            while remaining > 0 and buy_queue:
+                b        = buy_queue[0]
+                matched  = min(b["qty"], remaining)
+                pnl      = (price - b["price"]) * matched
+                pnl_pct  = (price / b["price"]) - 1.0
+
+                # Classify exit reason
+                if pnl_pct <= -(1 - STOP_LOSS):          # hit hard stop ~5%
+                    exit_reason = "stop_loss"
+                elif pnl_pct >= (TRAIL_ACTIVATE - 1) and pnl_pct <= -(1 - TRAIL_STOP):
+                    exit_reason = "trail_stop"
+                elif pnl > 0:
+                    exit_reason = "signal_profit"
+                else:
+                    exit_reason = "signal_loss"
+
+                try:
+                    hold_h = (ts - b["time"]).total_seconds() / 3600
+                except Exception:
+                    hold_h = 0.0
+
+                round_trips.append({
+                    "symbol":      row.get("symbol", ""),
+                    "buy_time":    b["time"],
+                    "sell_time":   ts,
+                    "buy_price":   b["price"],
+                    "sell_price":  price,
+                    "qty":         matched,
+                    "pnl":         round(pnl, 4),
+                    "pnl_pct":     round(pnl_pct * 100, 3),
+                    "hold_hours":  round(hold_h, 2),
+                    "win":         pnl > 0,
+                    "exit_reason": exit_reason,
+                })
+
+                b["qty"]  -= matched
+                remaining -= matched
+                if b["qty"] <= 0:
+                    buy_queue.pop(0)
+
+    rt_df     = pd.DataFrame(round_trips)
+    open_pos  = [b for b in buy_queue if b["qty"] > 0]
+    return rt_df, open_pos
+
+
 def calculate_metrics(df):
-    """Calculate trading performance metrics."""
+    """Calculate trading performance metrics using proper FIFO round-trips."""
     if df is None or df.empty:
         return None
 
     metrics = {}
 
-    # Filter to actual trades (not reconciliations)
-    if 'action' in df.columns:
-        trades = df[df['action'].str.upper().isin(['BUY', 'SELL'])].copy()
+    if "action" in df.columns:
+        trades = df[df["action"].str.upper().isin(["BUY", "SELL"])].copy()
     else:
         trades = df.copy()
 
-    metrics['total_trades'] = len(trades)
+    metrics["total_trades"] = len(trades)
 
-    if metrics['total_trades'] == 0:
+    if metrics["total_trades"] == 0:
         print("⚠️ No trades found in the specified period")
         return metrics
 
-    # Calculate P&L if price and qty available
-    price_col = None
-    qty_col = None
+    # Detect column names
+    price_col = next((c for c in df.columns if "price" in c.lower()), None)
+    qty_col   = next((c for c in df.columns if c.lower() in ["qty", "quantity", "shares", "amount"]), None)
 
-    # Find price column (could be 'price', 'Price', 'fill_price', etc.)
-    for col in df.columns:
-        if 'price' in col.lower():
-            price_col = col
-            break
-
-    # Find qty column
-    for col in df.columns:
-        if col.lower() in ['qty', 'quantity', 'shares', 'amount']:
-            qty_col = col
-            break
-
+    metrics["total_value_traded"] = 0
     if price_col and qty_col:
-        trades[price_col] = pd.to_numeric(trades[price_col], errors='coerce')
-        trades[qty_col] = pd.to_numeric(trades[qty_col], errors='coerce')
-
-        # Remove rows with invalid data
+        trades[price_col] = pd.to_numeric(trades[price_col], errors="coerce")
+        trades[qty_col]   = pd.to_numeric(trades[qty_col],   errors="coerce")
         trades = trades.dropna(subset=[price_col, qty_col])
+        metrics["total_value_traded"] = (
+            trades[price_col].astype(float) * trades[qty_col].astype(float)
+        ).sum()
 
-        # Convert action to numeric (BUY = -1, SELL = +1)
-        trades['direction'] = trades['action'].str.upper().map({'BUY': -1, 'SELL': 1})
-        trades['value'] = trades[price_col].astype(float) * trades[qty_col].astype(float) * trades['direction']
+    # Count buys/sells
+    if "action" in trades.columns:
+        ac = trades["action"].str.upper().value_counts()
+        metrics["buys"]  = int(ac.get("BUY",  0))
+        metrics["sells"] = int(ac.get("SELL", 0))
 
-        metrics['total_value_traded'] = abs(trades['value']).sum()
+    if "action" in df.columns:
+        metrics["reconciliations"] = int(
+            len(df[df["action"].str.upper() == "RECONCILE"])
+        )
 
-        # Group by symbol to calculate P&L
-        pnl_by_symbol = {}
+    if "notes" in df.columns:
+        metrics["contradictions_logged"] = int(
+            df["notes"].astype(str).str.contains("contradiction", case=False, na=False).sum()
+        )
 
-        for symbol in trades['symbol'].unique():
-            sym_trades = trades[trades['symbol'] == symbol].copy()
-            if 'timestamp' in sym_trades.columns:
-                sym_trades = sym_trades.sort_values('timestamp')
+    # ── Per-symbol FIFO round-trip analysis ──────────────────────────────────
+    if not (price_col and qty_col):
+        metrics["total_realized_pnl"] = 0
+        return metrics
 
-            position = 0
-            avg_price = 0
-            realized_pnl = 0
+    pnl_by_symbol  = {}
+    all_round_trips = []
 
-            for _, trade in sym_trades.iterrows():
-                qty = float(trade[qty_col])
-                price = float(trade[price_col])
-                action = str(trade['action']).upper()
+    for symbol in trades["symbol"].unique():
+        sym_df = trades[trades["symbol"] == symbol].copy()
+        if "timestamp" in sym_df.columns:
+            sym_df = sym_df.sort_values("timestamp")
 
-                if action == 'BUY':
-                    # Update average price
-                    if position > 0:
-                        avg_price = (avg_price * position + price * qty) / (position + qty)
-                    else:
-                        avg_price = price
-                    position += qty
+        rt_df, open_pos = calculate_round_trips(sym_df, price_col=price_col, qty_col=qty_col)
+        all_round_trips.append(rt_df)
 
-                elif action == 'SELL':
-                    if position > 0:
-                        # Realize profit/loss
-                        pnl = (price - avg_price) * qty
-                        realized_pnl += pnl
-                        position -= qty
+        realized_pnl = float(rt_df["pnl"].sum()) if not rt_df.empty else 0.0
+        open_shares  = sum(b["qty"] for b in open_pos)
+        open_avg     = (
+            sum(b["price"] * b["qty"] for b in open_pos) / open_shares
+            if open_shares > 0 else 0.0
+        )
 
-            pnl_by_symbol[symbol] = {
-                'realized_pnl': realized_pnl,
-                'position': position,
-                'avg_price': avg_price
-            }
+        # Per-round-trip stats
+        wins       = int(rt_df["win"].sum())       if not rt_df.empty else 0
+        losses     = len(rt_df) - wins             if not rt_df.empty else 0
+        stop_hits  = int((rt_df["exit_reason"] == "stop_loss").sum()) if not rt_df.empty else 0
+        avg_win    = float(rt_df[rt_df["win"]]["pnl"].mean())        if not rt_df.empty and rt_df["win"].any()  else 0.0
+        avg_loss   = float(rt_df[~rt_df["win"]]["pnl"].mean())       if not rt_df.empty and (~rt_df["win"]).any() else 0.0
+        avg_hold   = float(rt_df["hold_hours"].mean())               if not rt_df.empty else 0.0
+        total_rt   = len(rt_df)
+        win_rate   = wins / total_rt * 100 if total_rt > 0 else 0.0
+        rr_ratio   = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf")
 
-        metrics['pnl_by_symbol'] = pnl_by_symbol
-        metrics['total_realized_pnl'] = sum(s['realized_pnl'] for s in pnl_by_symbol.values())
+        pnl_by_symbol[symbol] = {
+            "realized_pnl":  realized_pnl,
+            "position":      open_shares,
+            "avg_price":     open_avg,
+            "round_trips":   total_rt,
+            "wins":          wins,
+            "losses":        losses,
+            "win_rate":      win_rate,
+            "avg_win":       avg_win,
+            "avg_loss":      avg_loss,
+            "avg_hold_h":    avg_hold,
+            "rr_ratio":      rr_ratio,
+            "stop_hits":     stop_hits,
+            "rt_df":         rt_df,
+            "open_pos":      open_pos,
+        }
 
-        # Win rate
-        winning_trades = sum(1 for s in pnl_by_symbol.values() if s['realized_pnl'] > 0)
-        metrics['win_rate'] = (winning_trades / len(pnl_by_symbol)) * 100 if pnl_by_symbol else 0
+    # Combine all round trips
+    if all_round_trips:
+        combined_rt = pd.concat([r for r in all_round_trips if not r.empty], ignore_index=True)
+    else:
+        combined_rt = pd.DataFrame()
 
-    # Count by action
-    if 'action' in trades.columns:
-        action_counts = trades['action'].str.upper().value_counts()
-        metrics['buys'] = action_counts.get('BUY', 0)
-        metrics['sells'] = action_counts.get('SELL', 0)
+    metrics["pnl_by_symbol"]      = pnl_by_symbol
+    metrics["total_realized_pnl"] = sum(s["realized_pnl"] for s in pnl_by_symbol.values())
+    metrics["combined_rt"]        = combined_rt
 
-    # Count reconciliations if present
-    if 'action' in df.columns:
-        reconcile_count = len(df[df['action'].str.upper() == 'RECONCILE'])
-        metrics['reconciliations'] = reconcile_count
-
-    # Count contradictions if logged
-    if 'notes' in df.columns:
-        contradiction_count = df['notes'].astype(str).str.contains('contradiction', case=False, na=False).sum()
-        metrics['contradictions_logged'] = contradiction_count
+    # Overall win rate across ALL round-trips (not per symbol)
+    if not combined_rt.empty:
+        total_rt   = len(combined_rt)
+        total_wins = int(combined_rt["win"].sum())
+        metrics["win_rate"]      = total_wins / total_rt * 100 if total_rt > 0 else 0.0
+        metrics["total_rt"]      = total_rt
+        metrics["total_wins"]    = total_wins
+        metrics["total_losses"]  = total_rt - total_wins
+        metrics["avg_win"]       = float(combined_rt[combined_rt["win"]]["pnl"].mean())  if combined_rt["win"].any()  else 0.0
+        metrics["avg_loss"]      = float(combined_rt[~combined_rt["win"]]["pnl"].mean()) if (~combined_rt["win"]).any() else 0.0
+        metrics["avg_hold_h"]    = float(combined_rt["hold_hours"].mean())
+        metrics["stop_hits"]     = int((combined_rt["exit_reason"] == "stop_loss").sum())
+        rr = abs(metrics["avg_win"] / metrics["avg_loss"]) if metrics["avg_loss"] != 0 else float("inf")
+        metrics["rr_ratio"]      = rr
+    else:
+        metrics["win_rate"]     = 0.0
+        metrics["total_rt"]     = 0
+        metrics["total_wins"]   = 0
+        metrics["total_losses"] = 0
 
     return metrics
 
+
 def print_report(metrics, days=None):
     """Print formatted performance report."""
-    print("\n" + "="*70)
-    print(f"📊 TRADING PERFORMANCE REPORT")
+    print("\n" + "=" * 70)
+    print("📊 TRADING PERFORMANCE REPORT")
     if days:
         print(f"Period: Last {days} days")
-    print("="*70)
+    print("=" * 70)
 
-    if not metrics or metrics.get('total_trades', 0) == 0:
+    if not metrics or metrics.get("total_trades", 0) == 0:
         print("\n⚠️ No trades to analyze")
-        print("="*70 + "\n")
+        print("=" * 70 + "\n")
         return
 
     print(f"\n📈 TRADE STATISTICS:")
-    print(f"  Total Trades: {metrics.get('total_trades', 0)}")
-    print(f"  Buys:  {metrics.get('buys', 0)}")
-    print(f"  Sells: {metrics.get('sells', 0)}")
+    print(f"  Total Rows Loaded : {metrics.get('total_trades', 0)}")
+    print(f"  Buys              : {metrics.get('buys', 0)}")
+    print(f"  Sells             : {metrics.get('sells', 0)}")
+    print(f"  Completed R/Trips : {metrics.get('total_rt', 0)}")
 
-    if 'reconciliations' in metrics and metrics['reconciliations'] > 0:
-        print(f"  Reconciliations: {metrics['reconciliations']}")
-
-    if 'contradictions_logged' in metrics and metrics['contradictions_logged'] > 0:
-        print(f"  Contradictions: {metrics['contradictions_logged']}")
+    if metrics.get("reconciliations", 0) > 0:
+        print(f"  Reconciliations   : {metrics['reconciliations']}")
+    if metrics.get("contradictions_logged", 0) > 0:
+        print(f"  Contradictions    : {metrics['contradictions_logged']}")
 
     print(f"\n💰 PROFIT & LOSS:")
+    pnl = metrics.get("total_realized_pnl", 0)
+    print(f"  Total Realized P&L  : ${pnl:+,.2f}")
 
-    if 'total_realized_pnl' in metrics:
-        pnl = metrics['total_realized_pnl']
-        print(f"  Total Realized P&L: ${pnl:,.2f}")
+    if "pnl_by_symbol" in metrics:
+        print(f"\n  By Symbol:")
+        for symbol, data in sorted(metrics["pnl_by_symbol"].items()):
+            p         = data["realized_pnl"]
+            pos       = data["position"]
+            avg       = data["avg_price"]
+            wr        = data["win_rate"]
+            rt        = data["round_trips"]
+            stop_hits = data["stop_hits"]
+            rr        = data["rr_ratio"]
+            avg_h     = data["avg_hold_h"]
+            p_str     = f"${p:+,.2f}"
+            stop_str  = f"  🛑 {stop_hits} stop-loss hit(s)" if stop_hits > 0 else ""
+            print(f"    {symbol:6s}: {p_str:>10s}  |  {rt} R/Trips  |  WR {wr:.0f}%  |  R/R {rr:.2f}x  |  AvgHold {avg_h:.1f}h{stop_str}")
+            print(f"           Avg Win ${data['avg_win']:+.2f}  |  Avg Loss ${data['avg_loss']:+.2f}  |  Open: {pos:.0f} @ ${avg:.2f}")
 
-        if 'pnl_by_symbol' in metrics:
-            print(f"\n  By Symbol:")
-            for symbol, data in sorted(metrics['pnl_by_symbol'].items()):
-                pnl_sym = data['realized_pnl']
-                pos = data['position']
-                avg = data['avg_price']
+    print(f"\n  ── Overall ──────────────────────────────────────────")
+    total_rt    = metrics.get("total_rt", 0)
+    total_wins  = metrics.get("total_wins", 0)
+    total_losses= metrics.get("total_losses", 0)
+    wr          = metrics.get("win_rate", 0)
+    avg_win     = metrics.get("avg_win", 0)
+    avg_loss    = metrics.get("avg_loss", 0)
+    rr          = metrics.get("rr_ratio", 0)
+    avg_hold    = metrics.get("avg_hold_h", 0)
+    stop_hits   = metrics.get("stop_hits", 0)
 
-                pnl_str = f"${pnl_sym:+,.2f}" if pnl_sym != 0 else "$0.00"
-                print(f"    {symbol:6s}: {pnl_str:>12s}  (Position: {pos:>5g} @ ${avg:.2f})")
+    print(f"  Win Rate      : {wr:.1f}%  ({total_wins}W / {total_losses}L  out of {total_rt} round-trips)")
+    print(f"  Avg Win       : ${avg_win:+.2f}")
+    print(f"  Avg Loss      : ${avg_loss:+.2f}")
+    print(f"  Reward/Risk   : {rr:.2f}x  {'✅' if rr >= 1.0 else '⚠️  Need ≥1.0x to be profitable'}")
+    print(f"  Avg Hold Time : {avg_hold:.1f} hrs")
+    if stop_hits > 0:
+        print(f"  🛑 Stop-Loss Hits : {stop_hits}  (stop-loss IS working)")
 
-        if 'win_rate' in metrics:
-            print(f"\n  Win Rate: {metrics['win_rate']:.1f}%")
-    else:
-        print(f"  ⚠️ Could not calculate P&L (missing price/qty columns)")
+    if "total_value_traded" in metrics:
+        print(f"  Total $ Traded : ${metrics['total_value_traded']:,.2f}")
 
-    if 'total_value_traded' in metrics:
-        print(f"\n  Total Value Traded: ${metrics['total_value_traded']:,.2f}")
+    # ── Round-trip detail per symbol ──
+    if "pnl_by_symbol" in metrics:
+        for symbol, data in sorted(metrics["pnl_by_symbol"].items()):
+            rt_df = data.get("rt_df")
+            if rt_df is None or rt_df.empty:
+                continue
+            print(f"\n  📋 {symbol} Round-Trip Detail:")
+            print(f"  {'Buy':>16}  {'Sell':>16}  {'Qty':>4}  {'Buy$':>7}  {'Sell$':>7}  {'P&L':>8}  {'Hold':>6}  {'Reason'}")
+            print(f"  {'-'*85}")
+            for _, t in rt_df.iterrows():
+                flag = "✅" if t["win"] else "❌"
+                bt   = str(t["buy_time"])[:16]
+                st   = str(t["sell_time"])[:16]
+                rsn  = t["exit_reason"]
+                print(f"  {bt:>16}  {st:>16}  {t['qty']:>4.0f}  {t['buy_price']:>7.2f}  {t['sell_price']:>7.2f}  {t['pnl']:>+8.2f}  {t['hold_hours']:>5.1f}h  {rsn} {flag}")
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("💡 INSIGHTS:")
 
-    # Provide insights
-    if metrics.get('reconciliations', 0) > 0:
-        print(f"  ⚠️ {metrics['reconciliations']} reconciliation(s) detected")
-        print(f"     (Check for partial fills or manual trades)")
+    # Insights
+    if metrics.get("reconciliations", 0) > 0:
+        print(f"  ⚠️  {metrics['reconciliations']} reconciliation(s) detected")
     else:
-        print(f"  ✅ No reconciliations needed (portfolios stayed in sync)")
+        print("  ✅ No reconciliations needed")
 
-    if metrics.get('contradictions_logged', 0) > 0:
-        print(f"  ⚠️ {metrics['contradictions_logged']} contradiction(s) logged")
-        print(f"     (Review if contradictions are frequent >20%)")
+    if metrics.get("contradictions_logged", 0) > 0:
+        print(f"  ⚠️  {metrics['contradictions_logged']} contradiction(s) logged")
 
-    if 'win_rate' in metrics and metrics['win_rate'] > 0:
-        wr = metrics['win_rate']
-        if wr >= 60:
-            print(f"  ✅ Strong win rate: {wr:.1f}%")
-        elif wr >= 50:
-            print(f"  👍 Decent win rate: {wr:.1f}%")
-        else:
-            print(f"  ⚠️ Low win rate: {wr:.1f}% (review strategy)")
+    wr = metrics.get("win_rate", 0)
+    rr = metrics.get("rr_ratio", 0)
+    if wr >= 60:
+        print(f"  ✅ Strong win rate: {wr:.1f}%")
+    elif wr >= 50:
+        print(f"  👍 Decent win rate: {wr:.1f}%")
+    elif wr > 0:
+        print(f"  ⚠️  Low win rate: {wr:.1f}% — review signal thresholds")
 
-    print("="*70 + "\n")
+    if rr > 0 and rr < 1.0:
+        print(f"  ⚠️  R/R ratio {rr:.2f}x is below 1.0 — losses outsize wins")
+        print(f"      → Consider tighter stop-loss or wider take-profit")
+
+    avg_hold = metrics.get("avg_hold_h", 0)
+    if avg_hold < 0.5:
+        print(f"  ⚠️  Avg hold {avg_hold:.1f}h is very short — possible noise trading")
+        print(f"      → Consider MIN_HOLD_MINUTES = 15 guard in execute_sell()")
+
+    stop_hits = metrics.get("stop_hits", 0)
+    if stop_hits > 0:
+        pct = stop_hits / metrics.get("total_rt", 1) * 100
+        print(f"  🛑 Stop-loss fired {stop_hits}x ({pct:.0f}% of trades) — working as intended")
+
+    print("=" * 70 + "\n")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze trading performance")
-    parser.add_argument('--days', type=int, help='Analyze last N days')
-    parser.add_argument('--symbol', type=str, help='Analyze specific symbol')
-    parser.add_argument('--export', action='store_true', help='Export to CSV')
+    parser.add_argument("--days",   type=int, help="Analyze last N days")
+    parser.add_argument("--symbol", type=str, help="Analyze specific symbol")
+    parser.add_argument("--export", action="store_true", help="Export to CSV")
     args = parser.parse_args()
 
-    print(f"\n🔍 Loading trade logs...")
+    print("\n🔍 Loading trade logs...")
     if args.symbol:
         print(f"   Symbol: {args.symbol.upper()}")
     if args.days:
@@ -312,6 +433,7 @@ def main():
         output_file = f"trade_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         df.to_csv(output_file, index=False)
         print(f"\n✅ Exported to: {output_file}\n")
+
 
 if __name__ == "__main__":
     main()
