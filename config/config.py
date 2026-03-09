@@ -40,7 +40,7 @@ PAPER_TRADE_NOTES = {
 
 # --- Trading thresholds ---
 BUY_THRESHOLD = 0.55    # require strong confidence to buy
-SELL_THRESHOLD = 0.47   # require strong confidence to sell
+SELL_THRESHOLD = 0.45   # require strong confidence to sell
 PYRAMID_THRESHOLD = 0.65 
 
 # --------------------
@@ -110,7 +110,7 @@ TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY", "ABBV", "PLTR"]  # used by retrain_model
 SHAP_TOP_N = 40  # Number of features to keep after SHAP selection
 
 # --- Risk management ---
-STOP_LOSS = 0.95        # sell if price falls 5% below last buy price
+STOP_LOSS = 0.97        # sell if price falls 5% below last buy price
 TAKE_PROFIT = None      # sell if price rises 5% above last buy price
 TRAIL_STOP = 0.96        # trailing stop vs max_price since entry (e.g., 0.97 = 3% trail)
 TRAIL_ACTIVATE = 1.05   # ✅ activate trailing only after +5% profit
