@@ -367,21 +367,13 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                 f"pyramiding requires prob≥{PYRAMID_THRESHOLD:.2f} (current={prob_up:.3f})."
             )
         
-        # Pyramiding allowed - calculate quantity based on available cash
-        # Use same allocation logic as new positions
-        if total_symbols == 1:
-            max_invest = cash
-        elif total_symbols == 2:
-            max_invest = cash * RISK_FRACTION if concurrent_buys == 2 else cash
-        else:
-            max_invest = cash * RISK_FRACTION
-        
+        # Pyramiding: use full available cash, not fractional allocation
+        # (position sizing already happened on entry; we're just topping up)
         affordable = int(cash // price)
-        target = int(max_invest // price)
-        qty = min(affordable, target)
+
         
         # Apply position limits
-        qty = apply_position_limits(qty, price, cash, symbol)
+        qty = apply_position_limits(affordable, price, cash, symbol)
         
         if qty > 0:
             return make_decision(
