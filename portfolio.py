@@ -248,7 +248,10 @@ class PortfolioManager:
             self.data["shares"] = shares_after
 
             self.data["max_price"] = max(max_before, price)
-
+            # ── Guard 3 prerequisite: record first entry time ──
+            if shares_before <= 0:
+                self.data["entry_time"] = datetime.utcnow().isoformat()
+            
         # -----------------------
         # SELL
         # -----------------------
@@ -268,6 +271,7 @@ class PortfolioManager:
                 self.data["shares"] = 0.0
                 self.data["avg_price"] = 0.0
                 self.data["max_price"] = 0.0
+                self.data["entry_time"] = None  # ── Guard 3: clear on flat
 
         else:
             # unknown action

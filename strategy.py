@@ -349,6 +349,17 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
     # If already in a position, don't pyramid by default (prevents confusing "BUY but no cash")
     if shares > 0 and prob_up >= BUY_THRESHOLD:
+        # ── Guard 2: block averaging down into a losing position ──────────
+        avg_cost = float(pm.data.get("avg_price", 0.0))
+        if avg_cost > 0 and price < avg_cost:
+            unrealized_pct = (price - avg_cost) / avg_cost
+            if unrealized_pct < -0.01:   # position already down >1%
+                return make_decision(
+                    "hold", 0,
+                    explain + f"HOLD — averaging-down blocked "
+                              f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
+                              f"drawdown={unrealized_pct:.1%})."
+                )
         if prob_up < PYRAMID_THRESHOLD:
             return make_decision(
                 "hold", 0,
@@ -400,6 +411,23 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
 
 
+    # ── Guard 3: minimum hold time before signal-based sell ──────────────
+    if prob_up <= SELL_THRESHOLD and shares > 0:
+        entry_ts = pm.data.get("entry_time")
+        if entry_ts:
+            try:
+                from datetime import datetime
+                entry_dt = datetime.fromisoformat(entry_ts)
+                held_min = (datetime.utcnow() - entry_dt).total_seconds() / 60
+                if held_min < 15:
+                    return make_decision(
+                        "hold", 0,
+                        explain + f"SELL deferred — held only {held_min:.0f}min "
+                                  f"(min=15min). Re-evaluating next cycle."
+                    )
+            except Exception:
+                pass
+    
     # SELL
     if prob_up <= SELL_THRESHOLD:
         if shares > 0:
