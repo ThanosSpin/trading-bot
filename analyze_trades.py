@@ -28,8 +28,15 @@ def load_trade_logs(symbol=None, days=None):
             continue
         if symbol:
             pattern = os.path.join(path, f"trades_{symbol.upper()}.csv")
+            # ✅ Also search paper trades for this symbol
+            pattern_paper = os.path.join(path, f"paper_trades_{symbol.upper()}.csv")
+            files.extend(glob.glob(pattern_paper))
         else:
             pattern = os.path.join(path, "trades_*.csv")
+            # ✅ Also pick up all paper trade files
+            pattern_paper = os.path.join(path, "paper_trades_*.csv")
+            files.extend(glob.glob(pattern_paper))
+
         files.extend(glob.glob(pattern))
 
     files = list(set(files))

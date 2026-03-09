@@ -156,51 +156,44 @@ def _get_live_price(symbol):
 # =====================================================================
 # Log paper trade
 # =====================================================================
-def log_paper_trade(symbol, action, quantity, price, decision=None):
+def log_paper_trade(symbol, action, quantity, price, cash=0.0, shares_after=0.0, value=0.0):
     """
-    Log paper trades to a separate CSV file for analysis.
+    Log paper trades with the same schema as trades_<symbol>.csv (pm.log()).
+    Ensures analyze_trades.py works on paper_trades_<symbol>.csv directly.
     """
-    import csv
+    import csv, os
     from datetime import datetime
-    import os
-    
+
+
     filename = f'paper_trades_{symbol}.csv'
     file_exists = os.path.exists(filename)
-    
+
     try:
         with open(filename, 'a', newline='') as f:
             writer = csv.writer(f)
-            
-            # Write header if new file
+
+
             if not file_exists:
                 writer.writerow([
-                    'timestamp',
-                    'symbol',
-                    'action',
-                    'qty',
-                    'price',
-                    'value',
-                    'signal',
-                    'mode'
+                    "timestamp", "symbol", "action", "qty",
+                    "price", "cash", "shares", "value",
+                    "shares_before", "shares_after",
                 ])
-            
-            # Extract signal if available
-            signal = None
-            if decision and isinstance(decision, dict):
-                signal = decision.get('final_signal') or decision.get('signal')
-            
-            # Write trade record
+
+
             writer.writerow([
-                datetime.now().isoformat(),
+                datetime.utcnow().isoformat(),
                 symbol,
                 action.upper(),
-                quantity,
-                price,
-                quantity * price,
-                signal if signal is not None else '',
-                'PAPER'
+                f"{float(quantity):g}",
+                f"{float(price):.2f}",
+                f"{float(cash):.2f}",
+                f"{float(shares_after):.8g}",
+                f"{float(value):.2f}",
+                "",
+                f"{float(shares_after):.8g}",
             ])
-            
+
     except Exception as e:
         print(f"[WARN] Failed to log paper trade for {symbol}: {e}")
 
@@ -250,7 +243,25 @@ def execute_trade(action, quantity, symbol, decision=None):
             
             # Log paper trades separately for analysis
             if is_paper_symbol:
-                log_paper_trade(symU, action, quantity, price, decision)
+                         # Load pm state to capture cash/shares/value for correct schema
+                try:
+                    pm = PortfolioManager(symU)
+                    pm.refresh_live()
+                    _cash   = float(pm.data.get("cash", 0.0))
+                    _shares = float(pm.data.get("shares", 0.0))
+                    # Simulate post-trade shares for logging
+                    if action == "buy":
+                        _shares_after = _shares + quantity
+                        _cash_after   = _cash - quantity * price   # spent cash
+                    else:
+                        _shares_after = max(0.0, _shares - quantity)
+                        _cash_after   = _cash + quantity * price   # received cash
+                    _value = _cash_after + _shares_after * price
+                except Exception:
+                    _cash, _shares_after, _value = 0.0, 0.0, 0.0
+
+                log_paper_trade(symU, action, quantity, price,
+                                cash=_cash, shares_after=_shares_after, value=_value)
             
             return quantity, float(price)
         
