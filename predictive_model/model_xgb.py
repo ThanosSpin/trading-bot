@@ -124,21 +124,21 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return out
 
 
-def _add_intraday_regime_cols(df_feat: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds simple regime columns for filtering intraday training rows.
-    Assumes df_feat contains Close (your feature pipeline already does).
-    """
-    df_feat = df_feat.copy()
+def _add_intraday_regime_cols(dffeat: pd.DataFrame) -> pd.DataFrame:
+    dffeat = dffeat.copy()
+    try:
+        # ── Fix: flatten Close if yfinance returns multi-level DataFrame ──
+        close = dffeat["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = pd.to_numeric(close, errors="coerce")
 
-    # 12 bars * 15m = 3 hours (good regime window)
-    df_feat["ret_12"] = df_feat["Close"].pct_change(12)
-    df_feat["mom_12_abs"] = df_feat["ret_12"].abs()
-
-    # realized vol over same window
-    df_feat["vol_12"] = df_feat["Close"].pct_change().rolling(12).std()
-
-    return df_feat
+        dffeat["ret12"]   = close.pct_change(12)
+        dffeat["mom12abs"] = dffeat["ret12"].abs()
+        dffeat["vol12"]   = close.pct_change().rolling(12).std()
+    except Exception as e:
+        print(f"[SPY-FEATURES] Error adding regime features: {e}")
+    return dffeat
 
 
 def _filter_intraday_rows_by_mode(df_feat: pd.DataFrame, mode: str) -> pd.DataFrame:
@@ -1837,6 +1837,17 @@ def compute_signals(
         weight = float(intraday_weight) * q
 
     original_weight = weight  # Store for logging
+
+    # ── Fix 4: cap intraday weight in first 30min after market open ──────
+    import pytz
+    from datetime import datetime as _dt
+    _ny = pytz.timezone("America/New_York")
+    _now_ny = _dt.now(_ny)
+    _market_open_min = (_now_ny.hour * 60 + _now_ny.minute) - (9 * 60 + 30)
+    if 0 <= _market_open_min <= 30:
+        weight = min(weight, 0.30)
+        print(f"[WEIGHT] {symU}: first 30min cap → intraday_weight={weight:.2f} (was {original_weight:.2f})")
+    # ─────────────────────────────────────────────────────────────────────
 
     # ✅ CHECK CONTRADICTION FIRST (before blending)
     if dp is not None and ip is not None:
