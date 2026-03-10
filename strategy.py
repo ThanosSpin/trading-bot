@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional
+import pandas as pd
 from config.config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
@@ -360,6 +361,17 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                               f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
                               f"drawdown={unrealized_pct:.1%})."
                 )
+        # ── Guard 2b: don't chase — block pyramid if already up >2% from entry ──
+        avg_cost = float(pm.data.get("avg_price", 0.0))
+        if avg_cost > 0 and price > avg_cost:
+            run_up_pct = (price - avg_cost) / avg_cost
+            if run_up_pct > 0.02:
+                return make_decision(
+                    "hold", 0,
+                    explain + f"HOLD — pyramid blocked, already up {run_up_pct:.1%} "
+                              f"from entry ${avg_cost:.2f} (chasing prevention)."
+                )
+        # ─────────────────────────────────────────────────────────────────
         if prob_up < PYRAMID_THRESHOLD:
             return make_decision(
                 "hold", 0,
@@ -371,7 +383,7 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         # (position sizing already happened on entry; we're just topping up)
         affordable = int(cash // price)
 
-        
+
         # Apply position limits
         qty = apply_position_limits(affordable, price, cash, symbol)
         
@@ -528,7 +540,24 @@ def compute_strategy_decisions(
     # ---------------------------------------------------------
     diagnostics = diagnostics or {}
 
+    # ── Fix 4: reduce intraday weight in first 30min after open ──────────
+    import pytz
+    from datetime import datetime as _dt
+    _ny = pytz.timezone("America/New_York")
+    _now_ny = _dt.now(_ny)
+    _market_open_min = (_now_ny.hour * 60 + _now_ny.minute) - (9 * 60 + 30)
+    _opening_window = 0 <= _market_open_min <= 30
 
+    if _opening_window:
+        print(f"[WEIGHT] First 30min of session — capping intraday weight to 0.30 for all symbols")
+        for sym in list(diagnostics.keys()):
+            d = diagnostics[sym]
+            if isinstance(d, dict) and d.get("intraday_weight") is not None:
+                try:
+                    d["intraday_weight"] = min(float(d["intraday_weight"]), 0.30)
+                except Exception:
+                    pass
+    # ─────────────────────────────────────────────────────────────────────
 
     def _diag(sym: str) -> dict:
         return diagnostics.get(sym.upper()) or {}
@@ -571,6 +600,14 @@ def compute_strategy_decisions(
         if (mom <= -0.003) and (ip < dp):
             return True
 
+        # ADD this additional check — block if price just spiked >1% in last bar:
+        d = _diag(sym)
+        price_now = float(d.get("price") or 0)
+        # block if intraday vol is high AND momentum is positive (chasing a spike)
+        vol = float(d.get("intraday_vol") or 0)
+        mom = float(d.get("intraday_mom") or 0)
+        if mom > 0.008 and vol > 0.005:   # price spiked hard → wait for pullback
+            return True
 
         return False
 
@@ -605,6 +642,30 @@ def compute_strategy_decisions(
         return vol_ratio < min_ratio
 
 
+    def _block_buy_overbought(sym: str) -> bool:
+        """Block buy if RSI indicates overbought conditions."""
+        try:
+            df = fetch_historical_data(sym, period="1mo", interval="1d")
+            if df is None or len(df) < 15:
+                return False
+            
+            close = df["Close"]
+            close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
+            
+            delta = close.diff()
+            gain  = delta.clip(lower=0).rolling(14).mean()
+            loss  = (-delta.clip(upper=0)).rolling(14).mean()
+            rs    = gain / loss.replace(0, 1e-9)
+            rsi   = float((100 - 100 / (1 + rs)).iloc[-1])
+            
+            if rsi > 70:
+                print(f"[RSI BLOCK] {sym} RSI={rsi:.1f} — overbought, blocking BUY")
+                return True
+        except Exception:
+            pass
+        return False
+
+
     # ---------------------------------------------------------
     # ABBV secondary logic helpers
     # ---------------------------------------------------------
@@ -629,6 +690,20 @@ def compute_strategy_decisions(
 
         if _block_buy_on_weak_volume(sym):
             return False
+        
+        if _block_buy_overbought(sym):        # 🆕
+            return False
+
+        # ── NEW: don't chase — block if intraday momentum is already extended ──
+        d = _diag(sym)
+        mom = d.get("intraday_mom")
+        try:
+            mom = float(mom)
+            if mom > 0.01:   # already up >1.0% in last 2h — likely overextended
+                print(f"[BLOCK] {sym}: entry blocked — momentum overextended (mom={mom:.2%})")
+                return False
+        except Exception:
+            pass
 
         return True
 
