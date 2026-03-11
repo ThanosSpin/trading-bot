@@ -551,7 +551,12 @@ def add_spy_regime_features(df: pd.DataFrame, spy_symbol: str = "SPY") -> pd.Dat
             return df
         
         # Extract scalar Close series (handles MultiIndex)
-        spy_close = spy_df["Close"].iloc[:, 0] if hasattr(spy_df["Close"], "iloc") else spy_df["Close"]
+        # ── Fix: correctly detect DataFrame vs Series ──────────────────────
+        spy_raw = spy_df["Close"]
+        if isinstance(spy_raw, pd.DataFrame):
+            spy_close = spy_raw.iloc[:, 0]
+        else:
+            spy_close = spy_raw
         spy_close = pd.to_numeric(spy_close, errors='coerce').dropna()
         
         if len(spy_close) < 20:
