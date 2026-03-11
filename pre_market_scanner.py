@@ -387,16 +387,8 @@ def scan_and_queue_orders():
         return []
     
     print(f"\n📊 Scanning {len(symbols)} symbols for high-conviction signals...")
-
-   # ✅ NEW: Early exit if no cash
-    if available_cash < 10:
-        print(f"\n⚠️ Insufficient cash to trade (${available_cash:.2f})")
-        print(f"   Need at least $10 to place orders")
-        print(f"   Exiting scanner...")
-        return []
-
-    print(f"📊 Scanning {len(symbols)} symbols for high-conviction signals...")
     
+
     # Show thresholds
     min_sell_prob = PRE_MARKET_MIN_SELL_PROB
     print(f"🎯 BUY Threshold:  Probability >= {PRE_MARKET_MIN_PROB:.0%}")
@@ -759,18 +751,17 @@ def scan_and_queue_orders():
         if buy_orders:
             notification_msg += f"🟢 BUY Orders ({len(buy_orders)}):\n"
             for order in buy_orders:
-                notification_msg += f"  {order['symbol']}: {order['qty']} @ ${order['limit_price']:.2f} ({order['probability']:.1%})\n"
-        
-        if sell_close_orders:
-            notification_msg += f"\n🔴 SELL (Close) Orders ({len(sell_close_orders)}):\n"
-            for order in sell_close_orders:
-                notification_msg += f"  {order['symbol']}: {order['qty']} @ ${order['limit_price']:.2f} ({order['probability']:.1%})\n"
-        
-        if sell_short_orders:
-            notification_msg += f"\n🔴 SELL (Short) Orders ({len(sell_short_orders)}):\n"
-            for order in sell_short_orders:
-                notification_msg += f"  {order['symbol']}: {order['qty']} @ ${order['limit_price']:.2f} ({order['probability']:.1%})\n"
-        
+                price_label = f"${order['limit_price']:.2f}" if order['limit_price'] else "MARKET"
+                notification_msg += f"  {order['symbol']}: {order['qty']} @ {price_label} ({order['probability']:.1%})\n"
+
+        for order in sell_close_orders:
+            price_label = f"${order['limit_price']:.2f}" if order['limit_price'] else "MARKET"
+            notification_msg += f"  {order['symbol']}: {order['qty']} @ {price_label} ({order['probability']:.1%})\n"
+
+        for order in sell_short_orders:
+            price_label = f"${order['limit_price']:.2f}" if order['limit_price'] else "MARKET"
+            notification_msg += f"  {order['symbol']}: {order['qty']} @ {price_label} ({order['probability']:.1%})\n"
+     
         notification_msg += f"\nTotal Value: BUY ${total_buy_value:,.2f}"
         if total_sell_value > 0:
             notification_msg += f" | SELL ${total_sell_value:,.2f}"
