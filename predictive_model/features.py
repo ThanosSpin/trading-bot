@@ -549,15 +549,28 @@ def add_spy_regime_features(df: pd.DataFrame, spy_symbol: str = "SPY") -> pd.Dat
         if spy_df is None or spy_df.empty:
             print("[SPY-FEATURES] No SPY data available - skipping regime features")
             return df
-        
-        # Extract scalar Close series (handles MultiIndex)
-        # ── Fix: correctly detect DataFrame vs Series ──────────────────────
+
+        # ── Fix: strip timezone from spy_df index before ANY operations ───
+        if isinstance(spy_df.index, pd.DatetimeIndex) and spy_df.index.tz is not None:
+            spy_df.index = spy_df.index.tz_localize(None)
+        # Also strip main df if it has tz (defensive)
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        # ──────────────────────────────────────────────────────────────────
+
+        # Extract scalar Close series (handles MultiIndex)    
         spy_raw = spy_df["Close"]
         if isinstance(spy_raw, pd.DataFrame):
             spy_close = spy_raw.iloc[:, 0]
         else:
             spy_close = spy_raw
-        spy_close = pd.to_numeric(spy_close, errors='coerce').dropna()
+        spy_close = pd.to_numeric(spy_close, errors="coerce").dropna()
+
+
+        # ── Fix: strip timezone from SPY index to match main df ───────────
+        if hasattr(spy_close.index, 'tz') and spy_close.index.tz is not None:
+            spy_close.index = spy_close.index.tz_localize(None)
+        # ──────────────────────────────────────────────────────────────────
         
         if len(spy_close) < 20:
             print("[SPY-FEATURES] Insufficient SPY data - skipping")
