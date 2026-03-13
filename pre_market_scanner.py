@@ -403,13 +403,21 @@ def scan_and_queue_orders():
         print(f"🔍 Analyzing {sym}...")
         
         try:
+            # ── Fix 2: use daily-only signals pre-market (intraday is noisy) ──
+            session = get_market_session()
+            effective_intraday_weight = 0.0 if session in ('pre_market', 'closed') else INTRADAY_WEIGHT
+            if effective_intraday_weight == 0.0:
+                print(f"  ⏰ Pre-market: using daily model only (intraday weight=0)")
+            # ──────────────────────────────────────────────────────────────────
+
             # Compute signals
             sig = compute_signals(
                 sym,
                 lookback_minutes=2400,
-                intraday_weight=INTRADAY_WEIGHT,
+                intraday_weight=effective_intraday_weight,
                 resample_to="15min"
             )
+
             
             prob = sig.get("final_prob")
             daily_prob = sig.get("daily_prob")
@@ -514,6 +522,17 @@ def scan_and_queue_orders():
             # SELL SIGNAL (Low probability)
             # ============================================================
             elif prob <= min_sell_prob:
+
+                # ── Pre-market SELL guard ────────────────────────────────
+                # Block sells triggered by noisy pre-market/after-hours data.
+                # Only sell pre-market if BOTH daily AND intraday agree bearish.
+                # A single weak intraday signal is not enough to dump a position.
+                if daily_prob is not None and daily_prob >= 0.45:
+                    print(f"  🛡️ PRE-MARKET SELL BLOCKED: daily_prob={daily_prob:.1%} is not bearish")
+                    print(f"     Intraday noise may be causing false SELL signal")
+                    print(f"     Require daily_prob < 0.45 AND final_prob <= {min_sell_prob:.0%} to sell pre-market")
+                    continue
+                # ─────────────────────────────────────────────────────────
                 print(f"\n  🎯 HIGH CONVICTION SELL SIGNAL!")
                 
                 # Check if we currently hold this stock
