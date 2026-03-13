@@ -354,13 +354,20 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         avg_cost = float(pm.data.get("avg_price", 0.0))
         if avg_cost > 0 and price < avg_cost:
             unrealized_pct = (price - avg_cost) / avg_cost
-            if unrealized_pct < -0.01:   # position already down >1%
+            if unrealized_pct < -0.01:
+                # ── Fix: check stop-loss FIRST before blocking the add ────
+                from strategy import check_stop_tp
+                stop_decision = check_stop_tp(symbol, price, pm)
+                if stop_decision is not None:
+                    return stop_decision   # stop-loss overrides averaging-down guard
+                # ─────────────────────────────────────────────────────────
                 return make_decision(
                     "hold", 0,
                     explain + f"HOLD — averaging-down blocked "
                               f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
                               f"drawdown={unrealized_pct:.1%})."
                 )
+
         # ── Guard 2b: don't chase — block pyramid if already up >2% from entry ──
         avg_cost = float(pm.data.get("avg_price", 0.0))
         if avg_cost > 0 and price > avg_cost:
