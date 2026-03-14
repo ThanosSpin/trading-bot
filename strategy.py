@@ -1,12 +1,14 @@
 from typing import Dict, List, Optional
 import pandas as pd
+import pytz
+from datetime import datetime as _dt
 from config.config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
     PDT_TIERING_ENABLED, PDT_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
     MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB,
-    PYRAMID_THRESHOLD
+    PYRAMID_THRESHOLD, MAX_LOSS_PER_TRADE, AAPL_BUY_THRESHOLD
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
@@ -282,6 +284,14 @@ def check_stop_tp(symbol, price, pm):
             f"{symbol}: STOP blocked by PDT tiering (opened_today={opened_today:g}, loss={loss:.2%})."
         )
 
+    # ── Fix Dollar stop cap ────────────────────────────────────────────
+    if MAX_LOSS_PER_TRADE is not None:
+        unrealized_loss = (entry_price - price) * shares
+        if unrealized_loss >= MAX_LOSS_PER_TRADE:
+            return _pdt_tiered_sell(
+                f"{symbol}: DOLLAR-STOP hit — loss ${unrealized_loss:.2f} >= cap ${MAX_LOSS_PER_TRADE:.2f}"
+            )
+    # ─────────────────────────────────────────────────────────────────────
 
     # 1) HARD STOP-LOSS
     if price <= entry_price * STOP_LOSS:
@@ -301,6 +311,21 @@ def check_stop_tp(symbol, price, pm):
                 )
             )
 
+    # fix: EOD exit — don't hold a losing position overnight ─────────
+    try:
+        _ny = pytz.timezone("America/New_York")
+        _now_ny = _dt.now(_ny)
+        _mins_to_close = (16 * 60) - (_now_ny.hour * 60 + _now_ny.minute)
+        _is_near_close = 0 <= _mins_to_close <= 30   # last 30min: 3:30–4:00 PM ET
+
+        if _is_near_close and price < entry_price * 0.99:
+            return _pdt_tiered_sell(
+                f"{symbol}: EOD exit — down {((price/entry_price)-1):.1%} at close "
+                f"(avoiding overnight risk, entry=${entry_price:.2f})"
+            )
+    except Exception:
+        pass
+    # ─────────────────────────────────────────────────────────────────────
 
     return None
 
@@ -344,7 +369,7 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
     explain = (
         f"{symbol}: prob_up={prob_up:.3f} "
-        f"(BUY≥{BUY_THRESHOLD}, SELL≤{SELL_THRESHOLD}, shares={shares:.4g}). "
+        f"(BUY≥{effective_buy_threshold}, SELL≤{SELL_THRESHOLD}, shares={shares:.4g}). "
     )
 
 
@@ -407,7 +432,8 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
 
     # BUY
-    if prob_up >= BUY_THRESHOLD:
+    effective_buy_threshold = AAPL_BUY_THRESHOLD if symbol == "AAPL" else BUY_THRESHOLD
+    if prob_up >= effective_buy_threshold:
         affordable = int(cash // price)
         target = int(max_invest // price)
         qty = min(affordable, target)
@@ -689,7 +715,8 @@ def compute_strategy_decisions(
         - NOT blocked by momentum pullback guard
         - NOT blocked by weak volume guard
         """
-        if preds.get(sym, 0.0) < BUY_THRESHOLD:
+        threshold = AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD
+        if preds.get(sym, 0.0) < threshold:
             return False
 
         if _block_buy_on_pullback(sym):

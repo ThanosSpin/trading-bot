@@ -39,9 +39,11 @@ PAPER_TRADE_NOTES = {
 }
 
 # --- Trading thresholds ---
-BUY_THRESHOLD = 0.55    # require strong confidence to buy
-SELL_THRESHOLD = 0.45   # require strong confidence to sell
+BUY_THRESHOLD = 0.55    # require stronger confidence to buy
+SELL_THRESHOLD = 0.45   # require stronger confidence to sell
 PYRAMID_THRESHOLD = 0.65 
+AAPL_BUY_THRESHOLD = 0.60   # Higher bar for AAPL until win rate recovers (normal BUY_THRESHOLD = 0.55)
+
 
 # --------------------
 # Model blending weights
@@ -110,11 +112,12 @@ TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY", "ABBV", "PLTR"]  # used by retrain_model
 SHAP_TOP_N = 40  # Number of features to keep after SHAP selection
 
 # --- Risk management ---
-STOP_LOSS = 0.97        # sell if price falls 5% below last buy price
+STOP_LOSS = 0.97        # sell if price falls 3% below last buy price
 TAKE_PROFIT = None      # sell if price rises 5% above last buy price
-TRAIL_STOP = 0.96        # trailing stop vs max_price since entry (e.g., 0.97 = 3% trail)
-TRAIL_ACTIVATE = 1.05   # ✅ activate trailing only after +5% profit
+TRAIL_STOP = 0.985        # Trail at -1.5% from peak
+TRAIL_ACTIVATE = 1.02   # ✅ activate trailing only after +2% profit
 RISK_FRACTION = 0.5     # default: invest or sell 50%
+MAX_LOSS_PER_TRADE = 10.00   # Hard cap: never lose more than $10 on one round-trip
 
 # NEW: Hard limits (always enforced)
 MAX_POSITION_SIZE_PCT = 0.90  # Never invest >90% in single symbol
