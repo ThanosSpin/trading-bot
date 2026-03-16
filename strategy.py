@@ -367,6 +367,9 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         max_invest = cash * RISK_FRACTION
 
 
+    effective_buy_threshold = AAPL_BUY_THRESHOLD if symbol == "AAPL" else BUY_THRESHOLD
+    # ─────────────────────────────────────────────────────────────────────
+
     explain = (
         f"{symbol}: prob_up={prob_up:.3f} "
         f"(BUY≥{effective_buy_threshold}, SELL≤{SELL_THRESHOLD}, shares={shares:.4g}). "
@@ -432,7 +435,6 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
 
     # BUY
-    effective_buy_threshold = AAPL_BUY_THRESHOLD if symbol == "AAPL" else BUY_THRESHOLD
     if prob_up >= effective_buy_threshold:
         affordable = int(cash // price)
         target = int(max_invest // price)
