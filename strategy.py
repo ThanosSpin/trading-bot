@@ -719,15 +719,19 @@ def compute_strategy_decisions(
         """
         threshold = AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD
         if preds.get(sym, 0.0) < threshold:
+            print(f"[DEBUG _is_buy] {sym} BLOCKED: prob={preds.get(sym,0):.3f} < threshold={threshold}")
             return False
 
         if _block_buy_on_pullback(sym):
+            print(f"[DEBUG _is_buy] {sym} BLOCKED: pullback guard")
             return False
 
         if _block_buy_on_weak_volume(sym):
+            print(f"[DEBUG _is_buy] {sym} BLOCKED: weak volume guard")
             return False
         
-        if _block_buy_overbought(sym):        # 🆕
+        if _block_buy_overbought(sym):
+            print(f"[DEBUG _is_buy] {sym} BLOCKED: overbought guard")        # 🆕
             return False
 
         # ── NEW: don't chase — block if intraday momentum is already extended ──
@@ -740,7 +744,8 @@ def compute_strategy_decisions(
                 return False
         except Exception:
             pass
-
+        
+        print(f"[DEBUG _is_buy] {sym} PASSED all guards: prob={preds.get(sym,0):.3f}")
         return True
 
 
