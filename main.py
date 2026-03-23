@@ -279,6 +279,20 @@ def print_signal_diagnostics(decisions, diagnostics):
             except:
                 vr = f"{vol/0.0024:.1f}"  # fallback
         
+         # ── Temporary NVDA volume debug ──────────────────────────────
+        if sym == "NVDA":
+            try:
+                _vol_series = df_daily["Volume"]   # reuses df_daily already fetched above
+                if isinstance(_vol_series, pd.DataFrame):
+                    _vol_series = _vol_series.iloc[:, 0]
+                _today_vol = float(_vol_series.iloc[-1])
+                _avg_vol   = float(_vol_series.iloc[:-1].tail(20).mean())
+                _vr_raw    = _today_vol / _avg_vol if _avg_vol > 0 else 0
+                print(f"[DEBUG NVDA VOL] today={_today_vol:,.0f}  20d_avg={_avg_vol:,.0f}  ratio={_vr_raw:.2f}")
+            except Exception as _e:
+                print(f"[DEBUG NVDA VOL] failed: {_e}")
+        # ─────────────────────────────────────────────────────────────
+        
         print(f"  {sym:<5} D={fmt(dp)} I={fmt(ip)} Δ={div} W={fmt(w):>5} → F={fmt(fp)} | q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} | regime={sig.get('intraday_regime')} | model={model_used} | {action}")
 
 
