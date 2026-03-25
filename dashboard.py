@@ -1178,12 +1178,22 @@ if os.path.exists(portfolio_path):
             if daily_vol and daily_vol > 0 else float("nan")
         )
 
+        # ── Max Drawdown ────────────────────────────────────────────
+        rolling_max = df["pnl_value"].cummax()
+        drawdown = (df["pnl_value"] - rolling_max) / rolling_max
+        max_drawdown = float(drawdown.min())  # most negative value
+        calmar = annualized_return / abs(max_drawdown) if max_drawdown != 0 else float("nan")
+        # ─────────────────────────────────────────────────────────────
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Cumulative Return (PnL-only)", f"{cumulative_return*100:.2f}%")
         c2.metric("Annualized Return (PnL-only)", f"{annualized_return*100:.2f}%")
         c3.metric("Sharpe Ratio (PnL-only)", f"{sharpe:.2f}")
 
+        c4, c5, c6 = st.columns(3)
+        c4.metric("Max Drawdown", f"{max_drawdown*100:.2f}%")
+        c5.metric("Calmar Ratio", f"{calmar:.2f}" if not pd.isna(calmar) else "N/A")
+        c6.metric("Trading Days", f"{days}")
 
         # Total equity (adds deposits/withdrawals)
         df["total_equity"] = df["pnl_value"]
