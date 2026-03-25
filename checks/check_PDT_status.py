@@ -1,4 +1,6 @@
 # check_pdt_status.py
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import alpaca_trade_api as tradeapi
 from datetime import datetime, timedelta
 import pytz
