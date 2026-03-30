@@ -406,6 +406,23 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                     explain + f"HOLD — pyramid blocked, already up {run_up_pct:.1%} "
                               f"from entry ${avg_cost:.2f} (chasing prevention)."
                 )
+        # ── Guard 2c: block pyramid if SPY is declining ───────────────────
+        try:
+            spy_df = fetch_historical_data("SPY", period="5d", interval="15m")
+            if spy_df is not None and len(spy_df) >= 4:
+                spy_close = spy_df["Close"]
+                spy_close = spy_close.iloc[:, 0] if isinstance(spy_close, pd.DataFrame) else spy_close
+                spy_recent = float(spy_close.iloc[-1])
+                spy_2h_ago = float(spy_close.iloc[-8])  # ~2h ago (8 x 15min bars)
+                spy_trend = (spy_recent - spy_2h_ago) / spy_2h_ago
+                if spy_trend < -0.003:  # SPY down >0.3% in last 2h
+                    return make_decision(
+                        "hold", 0,
+                        explain + f"HOLD — pyramid blocked, SPY declining {spy_trend:.2%} over 2h."
+                    )
+        except Exception:
+            pass
+
         # ─────────────────────────────────────────────────────────────────
         if prob_up < PYRAMID_THRESHOLD:
             return make_decision(
@@ -530,7 +547,7 @@ def check_momentum_breakout(sym: str, diagnostics: dict, preds: dict) -> tuple:
         if (
             above_ma > 0.02 and      # ✅ LOWERED: 2% above MA50 (was 3%)
             mom > 0.008 and          # ✅ LOWERED: 0.8% hourly momentum (was 1%)
-            prob >= 0.40 and         # ✅ LOWERED: Model prob >=40% (was 45%)
+            prob >= 0.52 and         # ✅ LOWERED: Model prob >=50% (was 45%)
             vol > 0.012):            # ✅ LOWERED: Vol >1.2% (was 1.5%)
 
             
