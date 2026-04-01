@@ -279,11 +279,6 @@ def print_signal_diagnostics(decisions, diagnostics):
             except:
                 vr = f"{vol/0.0024:.1f}"  # fallback
         
-        # ── ADD THIS ─────────────────────────────────────────────────
-        ivr = sig.get("intraday_volume_ratio")
-        print(f"[IVR] {sym} intraday_volume_ratio={ivr}")
-        # ─────────────────────────────────────────────────────────────
-        
          # ── Temporary NVDA volume debug ──────────────────────────────
         if sym == "NVDA":
             try:
