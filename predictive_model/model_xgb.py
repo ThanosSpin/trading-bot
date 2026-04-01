@@ -1560,6 +1560,26 @@ def compute_signals(
             if len(close) >= 4:
                 mom1h = close.pct_change(4).iloc[-1]
                 results["intraday_mom"] = float(mom1h) if not pd.isna(mom1h) else None
+            
+            # ── Intraday volume ratio (used by strategy guards) ──────────
+            try:
+                vol_series = df_intra_resampled["Volume"]
+                if isinstance(vol_series, pd.DataFrame):
+                    vol_series = vol_series.iloc[:, 0]
+                vol_series = pd.to_numeric(vol_series, errors="coerce").dropna()
+
+                if len(vol_series) >= 10:
+                    current_vol  = float(vol_series.iloc[-1])
+                    baseline_vol = float(vol_series.iloc[:-1].tail(20).median())  # ← median, not mean
+                    results["intraday_volume_ratio"] = (
+                        current_vol / baseline_vol if baseline_vol > 0 else None
+                    )
+                    print(f"[VOL_RATIO] {symU} current={current_vol:.0f}  baseline(median)={baseline_vol:.0f}  ratio={results['intraday_volume_ratio']:.2f}")
+            except Exception as _e:
+                print(f"[VOL_RATIO] {symU} failed: {_e}")
+                results["intraday_volume_ratio"] = None
+            # ─────────────────────────────────────────────────────────────
+
 
             # ✅ GET THRESHOLDS (adaptive or config)
             try:

@@ -287,8 +287,11 @@ def print_signal_diagnostics(decisions, diagnostics):
                     _vol_series = _vol_series.iloc[:, 0]
                 _today_vol = float(_vol_series.iloc[-1])
                 _avg_vol   = float(_vol_series.iloc[:-1].tail(20).mean())
-                _vr_raw    = _today_vol / _avg_vol if _avg_vol > 0 else 0
-                print(f"[DEBUG NVDA VOL] today={_today_vol:,.0f}  20d_avg={_avg_vol:,.0f}  ratio={_vr_raw:.2f}")
+                _avg_vol_mean   = float(_vol_series.iloc[:-1].tail(20).mean())
+                _avg_vol_median = float(_vol_series.iloc[:-1].tail(20).median())
+                _vr_mean   = _today_vol / _avg_vol_mean   if _avg_vol_mean   > 0 else 0
+                _vr_median = _today_vol / _avg_vol_median if _avg_vol_median > 0 else 0
+                print(f"[DEBUG NVDA VOL] today={_today_vol:,.0f}  20d_avg(mean)={_avg_vol_mean:,.0f} ratio={_vr_mean:.2f}  |  20d_avg(median)={_avg_vol_median:,.0f} ratio={_vr_median:.2f}")
             except Exception as _e:
                 print(f"[DEBUG NVDA VOL] failed: {_e}")
         # ─────────────────────────────────────────────────────────────
