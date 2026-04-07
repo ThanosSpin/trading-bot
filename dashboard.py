@@ -1242,11 +1242,6 @@ for sym in symbols:
 # -------------------------------------------------
 st.header("📈 Total Portfolio Performance (All Symbols Combined)")
 
-
-show_bot_only = st.checkbox("Show Bot-Only Equity (PnL curve)", value=True)
-show_total_equity = st.checkbox("Show Total Equity (includes deposits/withdrawals)", value=True)
-show_markers = st.checkbox("Show deposit/withdrawal markers", value=True)
-
 if os.path.exists(portfolio_path):
     df = pd.read_csv(portfolio_path)
 
@@ -1276,75 +1271,39 @@ if os.path.exists(portfolio_path):
 
         df["total_equity"] = pd.to_numeric(df[value_col], errors="coerce")
 
-        # ── PnL-only: deposits.csv contains ONLY additional capital injections
-        # (not the initial capital). Subtract ALL of them from their arrival date onward
-        # so the PnL curve shows pure bot performance, flat on deposit events.
+        # ── PnL-only: subtract deposits from their arrival date onward ──
         df["additional_deposits"] = 0.0
         if df_dep_chart is not None and not df_dep_chart.empty:
             df_dep_sorted = df_dep_chart.sort_values("date")
             for _, row in df_dep_sorted.iterrows():
-                dep_date = row["date"]  # already in local tz
+                dep_date = row["date"]
                 df.loc[df["date"] >= dep_date, "additional_deposits"] += float(row["amount"])
 
         df["pnl_value"] = df["total_equity"] - df["additional_deposits"]
+        df["pnl_value"] = df["pnl_value"] - df["pnl_value"].iloc[0]
 
-        # Dual Curve Chart + Markers (Plotly)
-        fig = go.Figure()
+        # ── Chart 1: Total Equity with deposit/withdrawal markers ──────────
+        fig_eq = go.Figure()
 
+        fig_eq.add_trace(go.Scatter(
+            x=df["date"],
+            y=df["total_equity"],
+            mode="lines",
+            name="Total Equity (with deposits)",
+            line=dict(width=2, color="#636efa"),
+            hovertemplate=(
+                "<b>Total Equity</b><br>"
+                "Date: %{x|%Y-%m-%d}<br>"
+                "Value: $%{y:,.2f}"
+                "<extra></extra>"
+            ),
+        ))
 
-        # PnL-only curve
-        if show_bot_only:
-            fig.add_trace(go.Scatter(
-                x=df["date"],
-                y=df["pnl_value"],
-                mode="lines",
-                name="PnL-Only Equity",
-                line=dict(width=2),
-                hovertemplate=(
-                    "<b>PnL-Only Equity</b><br>"
-                    "Date: %{x|%Y-%m-%d}<br>"
-                    "Value: $%{y:,.2f}"
-                    "<extra></extra>"
-                ),
-            ))
-
-
-        # Total equity (with deposits)
-        if show_total_equity:
-            fig.add_trace(go.Scatter(
-                x=df["date"],
-                y=df["total_equity"],
-                mode="lines",
-                name="Total Equity (with deposits)",
-                line=dict(width=2, dash="dash"),
-                hovertemplate=(
-                    "<b>Total Equity</b><br>"
-                    "Date: %{x|%Y-%m-%d}<br>"
-                    "Value: $%{y:,.2f}"
-                    "<extra></extra>"
-                ),
-            ))
-
-
-        # Determine dynamic Y-axis label
-        if show_bot_only and not show_total_equity:
-            y_axis_label = "PnL-Only Equity ($)"
-        elif show_total_equity and not show_bot_only:
-            y_axis_label = "Total Equity ($)"
-        elif show_bot_only and show_total_equity:
-            y_axis_label = "Value ($)"
-        else:
-            y_axis_label = ""
-
-
-        # Deposit / Withdrawal Markers
-        if show_markers and df_dep_chart is not None and not df_dep_chart.empty:
+        # Deposit / Withdrawal markers
+        if df_dep_chart is not None and not df_dep_chart.empty:
             target_tz = str(df["date"].dt.tz)
-
-
             has_dep_legend = False
             has_wdr_legend = False
-
 
             for _, row in df_dep_chart.iterrows():
                 dep_t = row["date"]
@@ -1356,15 +1315,12 @@ if os.path.exists(portfolio_path):
                     else:
                         dep_t = dep_t.tz_convert(target_tz)
 
-
                 nearest_idx = (df["date"] - dep_t).abs().idxmin()
                 nearest_date = df.loc[nearest_idx, "date"]
-                # Anchor to whichever curve(s) are visible
-                nearest_value = df.loc[nearest_idx, "pnl_value" if show_bot_only else "total_equity"]
+                nearest_value = df.loc[nearest_idx, "total_equity"]
 
                 is_dep = amount > 0
                 name = "Deposit" if is_dep else "Withdrawal"
-
 
                 showlegend = False
                 if is_dep and not has_dep_legend:
@@ -1374,8 +1330,7 @@ if os.path.exists(portfolio_path):
                     showlegend = True
                     has_wdr_legend = True
 
-
-                fig.add_trace(go.Scatter(
+                fig_eq.add_trace(go.Scatter(
                     x=[nearest_date],
                     y=[nearest_value],
                     mode="markers",
@@ -1396,25 +1351,51 @@ if os.path.exists(portfolio_path):
                     )
                 ))
 
-
-        # Layout with dynamic Y-label
-        fig.update_layout(
-            title="PnL vs Total Account Equity",
+        fig_eq.update_layout(
+            title="💼 Total Account Equity (includes deposits/withdrawals)",
             xaxis_title="Date",
-            yaxis_title=y_axis_label,
+            yaxis_title="Total Equity ($)",
             hovermode="x unified",
             template="plotly_white",
-            height=450,
+            height=420,
         )
 
+        st.plotly_chart(fig_eq, use_container_width=True, key="portfolio_chart")
 
-        st.plotly_chart(fig, use_container_width=True, key="portfolio_chart")
+        # ── Chart 2: Bot PnL Only (deposits stripped) ───────────────────────
+        st.subheader("🤖 Bot PnL — Trading Gains Only (deposits stripped)")
 
+        fig_pnl = go.Figure()
 
-        # Deposits / Withdrawals Log
+        fig_pnl.add_trace(go.Scatter(
+            x=df["date"],
+            y=df["pnl_value"],
+            mode="lines",
+            name="PnL-Only Equity",
+            line=dict(width=2, color="#00b4d8"),
+            hovertemplate=(
+                "<b>Bot PnL</b><br>"
+                "Date: %{x|%Y-%m-%d}<br>"
+                "Value: $%{y:,.2f}"
+                "<extra></extra>"
+            ),
+        ))
+
+        fig_pnl.add_hline(y=0, line_dash="dash", line_color="red", line_width=1)
+
+        fig_pnl.update_layout(
+            xaxis_title="Date",
+            yaxis_title="PnL-Only Equity ($)",
+            hovermode="x unified",
+            template="plotly_white",
+            height=320,
+        )
+
+        st.plotly_chart(fig_pnl, use_container_width=True, key="total_pnl_chart")
+
+        # ── Deposits / Withdrawals Log ───────────────────────────────────────
         if df_dep_chart is not None:
             st.subheader("💵 Deposits / Withdrawals Log")
-
 
             df_dep_chart["display_date"] = (
                 df_dep_chart["date"]
@@ -1422,13 +1403,11 @@ if os.path.exists(portfolio_path):
                     .dt.strftime("%Y-%m-%d")
             )
 
-
             st.dataframe(
                 df_dep_chart[["display_date", "amount"]]
                     .rename(columns={"display_date": "Date", "amount": "Amount ($)"}),
                 use_container_width=True
             )
-
 
 else:
     st.info("No daily portfolio file found. Run update_portfolio_data.py.")
