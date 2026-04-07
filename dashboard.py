@@ -24,6 +24,7 @@ from portfolio import (
 from trader import get_pdt_status
 from predictive_model.model_xgb import compute_signals
 from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
+from plotly.subplots import make_subplots
 
 
 # -------------------------------------------------
@@ -150,6 +151,87 @@ else:
 
 tz = pytz.timezone(TIMEZONE)
 
+# ── Load deposits from Alpaca account activities (CSD = Cash Deposit) ──────
+# Primary source: Alpaca API  →  GET /v2/account/activities/CSD
+# Fallback:       deposits.csv (manual file)
+from portfolio import get_daily_portfolio_file
+portfolio_path = get_daily_portfolio_file()
+deposit_path = os.path.join(os.path.dirname(portfolio_path), "deposits.csv")
+
+
+@st.cache_data(ttl=3600)  # cache for 1 hour — deposits don't change often
+def _fetch_deposits_from_alpaca() -> pd.DataFrame:
+    """
+    Fetch cash deposits (CSD) and withdrawals (CSW) from Alpaca account activities.
+    Returns a DataFrame with columns: date (UTC, tz-aware), amount (positive=deposit, negative=withdrawal).
+    """
+    try:
+        import alpaca_trade_api as tradeapi
+        from config.config import API_KEY, API_SECRET, BASE_URL
+        if not API_KEY or not API_SECRET:
+            return pd.DataFrame(columns=["date", "amount", "source"])
+        api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL)
+        rows = []
+        for activity_type in ["CSD", "CSW"]:
+            try:
+                activities = api.get_activities(activity_type=activity_type)
+                for a in activities:
+                    amount = float(getattr(a, "net_amount", 0) or 0)
+                    date_raw = getattr(a, "date", None) or getattr(a, "transaction_time", None)
+                    if date_raw and amount != 0:
+                        rows.append({
+                            "date": pd.to_datetime(str(date_raw), utc=True),
+                            "amount": amount,
+                            "source": activity_type,
+                        })
+            except Exception:
+                pass
+        if rows:
+            df = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+            return df
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return pd.DataFrame(columns=["date", "amount", "source"])
+
+
+df_dep = None
+
+# ── Try Alpaca API first ──────────────────────────────────────────────────────
+try:
+    _alpaca_deps = _fetch_deposits_from_alpaca()
+    if not _alpaca_deps.empty:
+        df_dep = _alpaca_deps[["date", "amount"]].copy()
+        st.caption(f"💳 Loaded {len(df_dep)} deposit/withdrawal entries from Alpaca API.")
+except Exception as _e:
+    st.caption(f"⚠️ Alpaca deposit fetch failed: {_e} — trying deposits.csv")
+
+# ── Fallback: deposits.csv ────────────────────────────────────────────────────
+if df_dep is None or df_dep.empty:
+    if os.path.exists(deposit_path):
+        _raw = pd.read_csv(deposit_path)
+        _raw["date"] = pd.to_datetime(_raw["date"], utc=True)
+        df_dep = _raw[["date", "amount"]].copy()
+        st.caption(f"💳 Loaded {len(df_dep)} deposit entries from deposits.csv (fallback).")
+    else:
+        df_dep = pd.DataFrame(columns=["date", "amount"])
+        st.caption("ℹ️ No deposits.csv found and Alpaca API returned no deposit data. PnL = Raw Equity.")
+
+# Ensure date is UTC tz-aware (defensive)
+if df_dep is not None and not df_dep.empty:
+    df_dep["date"] = pd.to_datetime(df_dep["date"], utc=True)
+    df_dep = df_dep.sort_values("date").reset_index(drop=True)
+
+# ── Debug: show what deposits were loaded ────────────────────────────────────
+with st.expander("🔍 Deposit Debug (expand to verify deposit data)", expanded=False):
+    if df_dep is None or df_dep.empty:
+        st.error("❌ No deposits loaded — PnL and Raw Equity will be identical!")
+        st.info("Add entries to deposits.csv  OR  ensure Alpaca API credentials are correct.")
+    else:
+        st.success(f"✅ {len(df_dep)} deposit/withdrawal entries loaded:")
+        st.dataframe(df_dep, use_container_width=True)
+# ─────────────────────────────────────────────────────────────────────────────
 
 # -------------------------------------------------
 # Helper: safely extract Close column
@@ -171,7 +253,6 @@ def _get_close_series(df: pd.DataFrame) -> Optional[pd.Series]:
             s = df[col]
             return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
     return None
-
 
 # -------------------------------------------------
 # Helper: load model info
@@ -209,36 +290,36 @@ def load_signal_history(sym: str) -> Optional[pd.DataFrame]:
     for p in _signal_history_paths(sym):
         if not os.path.exists(p):
             continue
-        
+
         try:
             # Try normal load first
             df = pd.read_csv(p)
-            
+
             # Normalize timestamp
             if "timestamp" in df.columns:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
                 df = df.dropna(subset=["timestamp"])
-            
+
             return df
-            
+
         except pd.errors.ParserError as e:
             # Handle corrupted/mismatched schema
             st.warning(f"⚠️ {sym}: Signal log has schema mismatch. Attempting recovery...")
-            
+
             try:
                 # Try skipping bad lines
                 df = pd.read_csv(p, on_bad_lines='skip')
-                
+
                 if "timestamp" in df.columns:
                     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
                     df = df.dropna(subset=["timestamp"])
-                
+
                 st.success(f"✅ Recovered {len(df)} valid rows for {sym}")
                 return df
-                
+
             except Exception as e2:
                 st.error(f"❌ Could not recover {sym} signal log: {e2}")
-                
+
                 # Offer to delete corrupted file
                 if st.button(f"🗑️ Delete corrupted signal log for {sym}", key=f"delete_signal_{sym}"):
                     try:
@@ -247,15 +328,14 @@ def load_signal_history(sym: str) -> Optional[pd.DataFrame]:
                         st.rerun()
                     except Exception as e3:
                         st.error(f"Failed to delete: {e3}")
-                
+
                 return None
-                
+
         except Exception as e:
             st.warning(f"{sym}: Failed reading signal history ({p}): {e}")
             return None
-    
-    return None
 
+    return None
 
 # -------------------------------------------------
 # PORTFOLIO SUMMARY
@@ -266,19 +346,19 @@ try:
     from account_cache import account_cache
     account_cache.invalidate()
     account = account_cache.get_account()
-    
+
     total_equity = float(account.get("equity", 0.0))
     total_cash = float(account.get("cash", 0.0))
     buying_power = float(account.get("buying_power", 0.0))
-    
+
     # Top-level KPIs
     k1, k2, k3 = st.columns(3)
     k1.metric("💼 Total Equity", f"${total_equity:,.2f}")
     k2.metric("💵 Cash Available", f"${total_cash:,.2f}")
     k3.metric("💪 Buying Power", f"${buying_power:,.2f}")
-    
+
     st.divider()
-    
+
 except Exception as e:
     st.error(f"Error fetching account data: {e}")
 
@@ -395,7 +475,6 @@ for sym in symbols:
         """,
         unsafe_allow_html=True,
     )
-
 
     # Optional: show vol/mom inline (super useful when debugging regime switches)
     vol = sig.get("intraday_vol")
@@ -524,7 +603,6 @@ for sym in symbols:
                     )
                 except:
                     pass
-
 
             for key in ["accuracy", "logloss", "roc_auc", "precision", "recall", "f1"]:
                 container.write(f"- **{key}**: `{metrics.get(key)}`")
@@ -659,11 +737,11 @@ if show_compare and model_compare:
     with colA:
         st.subheader("Accuracy Comparison")
         fig, ax = plt.subplots(figsize=(8, 4))
-        
+
         for mode in ["Daily", "Intraday"]:
             sub = df_chart[df_chart["Mode"] == mode]
             bars = ax.bar(sub["Symbol"] + " (" + mode + ")", sub["Accuracy"])
-            
+
             # Add value labels inside bars
             for bar in bars:
                 height = bar.get_height()
@@ -676,10 +754,10 @@ if show_compare and model_compare:
                     fontsize=8,
                     fontweight='bold'
                 )
-        
+
         ax.set_ylim(0, 1)
         ax.set_ylabel("Accuracy")
- 
+
         ax.grid(True, alpha=0.2)
         ax.tick_params(axis='x', labelsize=8, rotation=45)
         plt.tight_layout()
@@ -690,11 +768,11 @@ if show_compare and model_compare:
     with colB:
         st.subheader("Logloss Comparison")
         fig, ax = plt.subplots(figsize=(8, 4))
-        
+
         for mode in ["Daily", "Intraday"]:
             sub = df_chart[df_chart["Mode"] == mode]
             bars = ax.bar(sub["Symbol"] + " (" + mode + ")", sub["Logloss"])
-            
+
             # LogLoss labels (raw value + context)
             for bar in bars:
                 height = bar.get_height()
@@ -707,7 +785,7 @@ if show_compare and model_compare:
                     fontsize=8,
                     fontweight='bold'
                 )
-        
+
         ax.set_ylabel("Logloss (lower = better)")
         ax.axhline(y=0.693, color='red', linestyle='--', alpha=0.7, label='Random (0.693)')
         ax.legend()
@@ -715,8 +793,6 @@ if show_compare and model_compare:
         ax.tick_params(axis='x', labelsize=8, rotation=45)
         plt.tight_layout()
         st.pyplot(fig)
-
-
 
 # Price charts
 for sym in symbols:
@@ -793,182 +869,220 @@ for sym in symbols:
     # VALUE OVER TIME PER SYMBOL (Plotly)
     if "value" in df.columns:
         try:
+            from plotly.subplots import make_subplots
+
             dfp = df.sort_values("local_time").copy()
-            # Interactive Plotly line + markers
-            fig = go.Figure()
 
+            # ── Compute PnL from cashflows — deposit-independent ──────────
+            dfp["price"]  = pd.to_numeric(dfp.get("price"),  errors="coerce").fillna(0)
+            dfp["qty"]    = pd.to_numeric(dfp.get("qty"),    errors="coerce").fillna(0)
+            dfp["shares"] = pd.to_numeric(dfp.get("shares"), errors="coerce").fillna(0)
 
-            fig.add_trace(
-                go.Scatter(
-                    x=dfp["local_time"],
-                    y=dfp["value"],
-                    mode="lines+markers",
-                    name=f"{sym} Equity",
-                    hovertemplate=(
-                        "<b>%{x|%Y-%m-%d %H:%M:%S}</b><br>"
-                        "Value: $%{y:,.2f}<extra></extra>"
-                    ),
-                )
+            def _cf(r):
+                if r["action"] == "sell":
+                    return  r["qty"] * r["price"]
+                elif r["action"] == "buy":
+                    return -r["qty"] * r["price"]
+                return 0.0
+
+            dfp["cf"]             = dfp.apply(_cf, axis=1)
+            dfp["cum_cf"]         = dfp["cf"].cumsum()
+            dfp["position_value"] = dfp["shares"] * dfp["price"]
+            dfp["pnl_value"]      = dfp["cum_cf"] + dfp["position_value"]
+
+            # ── Two-panel chart ───────────────────────────────────────────
+            fig = make_subplots(
+                rows=1, cols=2,
+                subplot_titles=(
+                    "🤖 Bot PnL (trading gains only)",
+                    "💼 Account Equity (raw, includes deposits)",
+                ),
             )
 
+            fig.add_trace(go.Scatter(
+                x=dfp["local_time"],
+                y=dfp["pnl_value"],
+                mode="lines+markers",
+                name="PnL",
+                line=dict(color="#00b4d8", width=2),
+                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>PnL: $%{y:,.2f}<extra></extra>",
+            ), row=1, col=1)
+
+            fig.add_trace(go.Scatter(
+                x=dfp["local_time"],
+                y=dfp["value"],
+                mode="lines+markers",
+                name="Raw Equity",
+                line=dict(color="#adb5bd", width=2, dash="dash"),
+                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Equity: $%{y:,.2f}<extra></extra>",
+            ), row=1, col=2)
+
+            fig.add_hline(y=0, line_dash="dash", line_color="red", row=1, col=1)
+
+            # Deposit markers on equity panel
+            if df_dep is not None and not df_dep.empty:
+                for _, dep_row in df_dep.iterrows():
+                    dep_dt  = dep_row["date"]
+                    amount  = float(dep_row["amount"])
+                    if dep_dt.tzinfo is None:
+                        dep_dt = dep_dt.tz_localize("UTC").tz_convert(str(dfp["local_time"].dt.tz))
+                    else:
+                        dep_dt = dep_dt.tz_convert(str(dfp["local_time"].dt.tz))
+                    fig.add_vline(
+                        x=dep_dt.timestamp() * 1000,
+                        line_width=1, line_dash="dot",
+                        line_color="green" if amount > 0 else "red",
+                        annotation_text=f"+${amount:,.0f}",
+                        annotation_position="top right",
+                        row=1, col=2,
+                    )
 
             fig.update_layout(
-                title=f"{sym} Portfolio Value (per trade)",
-                xaxis_title="Time",
-                yaxis_title="Value ($)",
-                hovermode="x unified",
-                height=350,
+                title=f"{sym} — PnL vs Equity",
+                height=420,
                 template="plotly_white",
+                hovermode="x unified",
+                showlegend=False,
             )
-
-
-            # optional: show y as dollars with thousands separator
-            fig.update_yaxes(tickprefix="$", separatethousands=True)
-
+            fig.update_yaxes(tickprefix="$", separatethousands=True, row=1, col=1)
+            fig.update_yaxes(tickprefix="$", separatethousands=True, row=1, col=2)
 
             st.plotly_chart(fig, use_container_width=True, key=f"value_chart_{sym}")
-
 
         except Exception as e:
             st.warning(f"Could not plot value chart: {e}")
 
-
-    # TRADE ANALYTICS
-    if not df.empty:
-        df = df.copy()
-
-
-        # ---- coerce types safely ----
-        df["action"] = df["action"].astype(str).str.lower().str.strip()
-        df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
-        df["timestamp"] = pd.to_datetime(df.get("timestamp"), utc=True, errors="coerce")
+    # ---- coerce types safely ----
+    df["action"] = df["action"].astype(str).str.lower().str.strip()
+    df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
+    df["timestamp"] = pd.to_datetime(df.get("timestamp"), utc=True, errors="coerce")
 
 
-        # shares column in your CSV is "shares AFTER this trade"
-        df["shares"] = pd.to_numeric(df.get("shares"), errors="coerce")
+    # shares column in your CSV is "shares AFTER this trade"
+    df["shares"] = pd.to_numeric(df.get("shares"), errors="coerce")
 
 
-        # optional new columns if you add them later
-        if "shares_before" in df.columns:
-            df["shares_before"] = pd.to_numeric(df["shares_before"], errors="coerce")
-        if "shares_after" in df.columns:
-            df["shares_after"] = pd.to_numeric(df["shares_after"], errors="coerce")
+    # optional new columns if you add them later
+    if "shares_before" in df.columns:
+        df["shares_before"] = pd.to_numeric(df["shares_before"], errors="coerce")
+    if "shares_after" in df.columns:
+        df["shares_after"] = pd.to_numeric(df["shares_after"], errors="coerce")
 
 
-        df = df.dropna(subset=["timestamp", "action", "price", "shares"])
+    df = df.dropna(subset=["timestamp", "action", "price", "shares"])
 
 
-        # ---- build shares_before / shares_after ----
-        df = df.sort_values("timestamp").copy()
+    # ---- build shares_before / shares_after ----
+    df = df.sort_values("timestamp").copy()
 
 
-        if "shares_after" not in df.columns:
-            df["shares_after"] = df["shares"]
+    if "shares_after" not in df.columns:
+        df["shares_after"] = df["shares"]
 
 
-        if "shares_before" not in df.columns:
-            df["shares_before"] = df["shares_after"].shift(1).fillna(0.0)
+    if "shares_before" not in df.columns:
+        df["shares_before"] = df["shares_after"].shift(1).fillna(0.0)
 
 
-        # ---- derive executed quantity from share deltas ----
-        def _exec_qty(r):
+    # ---- derive executed quantity from share deltas ----
+    def _exec_qty(r):
+        sb = float(r["shares_before"])
+        sa = float(r["shares_after"])
+        if r["action"] == "buy":
+            return max(0.0, sa - sb)
+        if r["action"] == "sell":
+            return max(0.0, sb - sa)
+        return 0.0
+
+
+    df["exec_qty"] = df.apply(_exec_qty, axis=1)
+
+
+    # drop rows that don't change position
+    df = df[df["exec_qty"] > 0].copy()
+
+
+    if df.empty:
+        st.info("No filled trades detected (position never changed).")
+    else:
+        # ---- cashflow from executed qty ----
+        df["cashflow"] = df.apply(
+            lambda r: -(r["exec_qty"] * r["price"]) if r["action"] == "buy"
+            else +(r["exec_qty"] * r["price"]) if r["action"] == "sell"
+            else 0.0,
+            axis=1,
+        )
+
+
+        # ---- cycle detection: flat -> in position -> flat ----
+        EPS = 1e-9
+        cycle_pnls = []
+        in_cycle = False
+        running = 0.0
+
+
+        for _, r in df.iterrows():
             sb = float(r["shares_before"])
             sa = float(r["shares_after"])
-            if r["action"] == "buy":
-                return max(0.0, sa - sb)
-            if r["action"] == "sell":
-                return max(0.0, sb - sa)
-            return 0.0
+            cf = float(r["cashflow"])
 
 
-        df["exec_qty"] = df.apply(_exec_qty, axis=1)
+            was_flat = abs(sb) <= EPS
+            now_flat = abs(sa) <= EPS
 
 
-        # drop rows that don't change position
-        df = df[df["exec_qty"] > 0].copy()
+            # start cycle
+            if (not in_cycle) and was_flat and (not now_flat):
+                in_cycle = True
+                running = 0.0
 
 
-        if df.empty:
-            st.info("No filled trades detected (position never changed).")
+            if in_cycle:
+                running += cf
+
+
+            # end cycle (position fully closed)
+            if in_cycle and (not was_flat) and now_flat:
+                cycle_pnls.append(running)
+                in_cycle = False
+                running = 0.0
+
+
+        if not cycle_pnls:
+            st.info("Not enough closed trades (need flat → position → flat).")
         else:
-            # ---- cashflow from executed qty ----
-            df["cashflow"] = df.apply(
-                lambda r: -(r["exec_qty"] * r["price"]) if r["action"] == "buy"
-                else +(r["exec_qty"] * r["price"]) if r["action"] == "sell"
-                else 0.0,
-                axis=1,
-            )
+            s = pd.Series(cycle_pnls, dtype=float)
 
 
-            # ---- cycle detection: flat -> in position -> flat ----
-            EPS = 1e-9
-            cycle_pnls = []
-            in_cycle = False
-            running = 0.0
+            gross_profit = float(s[s > 0].sum())
+            gross_loss = float(-s[s < 0].sum())
 
 
-            for _, r in df.iterrows():
-                sb = float(r["shares_before"])
-                sa = float(r["shares_after"])
-                cf = float(r["cashflow"])
+            win_rate = float((s > 0).mean() * 100.0)
+            avg_win = float(s[s > 0].mean()) if (s > 0).any() else 0.0
+            avg_loss = float(s[s < 0].mean()) if (s < 0).any() else 0.0
+            largest_win = float(s.max())
+            largest_loss = float(s.min())
 
 
-                was_flat = abs(sb) <= EPS
-                now_flat = abs(sa) <= EPS
-
-
-                # start cycle
-                if (not in_cycle) and was_flat and (not now_flat):
-                    in_cycle = True
-                    running = 0.0
-
-
-                if in_cycle:
-                    running += cf
-
-
-                # end cycle (position fully closed)
-                if in_cycle and (not was_flat) and now_flat:
-                    cycle_pnls.append(running)
-                    in_cycle = False
-                    running = 0.0
-
-
-            if not cycle_pnls:
-                st.info("Not enough closed trades (need flat → position → flat).")
+            # Profit factor
+            if gross_loss > 0:
+                profit_factor = gross_profit / gross_loss
+                pf_str = f"{profit_factor:.2f}"
             else:
-                s = pd.Series(cycle_pnls, dtype=float)
+                profit_factor = float("inf")
+                pf_str = "∞"
 
 
-                gross_profit = float(s[s > 0].sum())
-                gross_loss = float(-s[s < 0].sum())
+            cA, cB, cC, cD = st.columns(4)
+            cA.metric("Win Rate", f"{win_rate:.1f}%")
+            cB.metric("Profit Factor", pf_str)
+            cC.metric("Avg Win / Loss", f"{avg_win:.2f} / {avg_loss:.2f}")
+            cD.metric("Largest Win / Loss", f"{largest_win:.2f} / {largest_loss:.2f}")
 
 
-                win_rate = float((s > 0).mean() * 100.0)
-                avg_win = float(s[s > 0].mean()) if (s > 0).any() else 0.0
-                avg_loss = float(s[s < 0].mean()) if (s < 0).any() else 0.0
-                largest_win = float(s.max())
-                largest_loss = float(s.min())
-
-
-                # Profit factor
-                if gross_loss > 0:
-                    profit_factor = gross_profit / gross_loss
-                    pf_str = f"{profit_factor:.2f}"
-                else:
-                    profit_factor = float("inf")
-                    pf_str = "∞"
-
-
-                cA, cB, cC, cD = st.columns(4)
-                cA.metric("Win Rate", f"{win_rate:.1f}%")
-                cB.metric("Profit Factor", pf_str)
-                cC.metric("Avg Win / Loss", f"{avg_win:.2f} / {avg_loss:.2f}")
-                cD.metric("Largest Win / Loss", f"{largest_win:.2f} / {largest_loss:.2f}")
-
-
-                with st.expander("🔍 Closed-trade cycle PnLs (debug)"):
-                    st.dataframe(pd.DataFrame({"cycle_pnl": s}))
+            with st.expander("🔍 Closed-trade cycle PnLs (debug)"):
+                st.dataframe(pd.DataFrame({"cycle_pnl": s}))
 
 
 # -------------------------------------------------
@@ -980,11 +1094,11 @@ st.header("📈 Price vs Model Probability (with Buy/Sell Markers)")
 for sym in symbols:
     # Use robust loader
     df = load_signal_history(sym)
-    
+
     if df is None or df.empty:
         st.info(f"No signal history for {sym}")
         continue
-    
+
     df = df.sort_values("timestamp").tail(300)
 
 
@@ -1014,7 +1128,6 @@ for sym in symbols:
     )
 
     fig = go.Figure()
-
 
     # ---- PRICE (left axis)
     if "Price" in visible_traces and "price" in df.columns:
@@ -1134,23 +1247,8 @@ show_bot_only = st.checkbox("Show Bot-Only Equity (PnL curve)", value=True)
 show_total_equity = st.checkbox("Show Total Equity (includes deposits/withdrawals)", value=True)
 show_markers = st.checkbox("Show deposit/withdrawal markers", value=True)
 
-
-# Load daily portfolio PnL file
-portfolio_path = get_daily_portfolio_file()
-deposit_path = os.path.join(os.path.dirname(portfolio_path), "deposits.csv")
-
-
-df_dep = None
-if os.path.exists(deposit_path):
-    df_dep = pd.read_csv(deposit_path)
-    df_dep["date"] = pd.to_datetime(df_dep["date"], utc=True)
-else:
-    st.info("ℹ️ No deposits.csv found — only showing PnL performance.")
-
-
 if os.path.exists(portfolio_path):
     df = pd.read_csv(portfolio_path)
-
 
     if df.empty:
         st.warning("Daily portfolio is empty.")
@@ -1159,55 +1257,36 @@ if os.path.exists(portfolio_path):
         df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert(tz)
         df = df.sort_values("date")
 
-
-        # PnL-only curve
-        df["pnl_value"] = df["value"]
-        V0 = df["pnl_value"].iloc[0]
-        VT = df["pnl_value"].iloc[-1]
-
-
-        days = max((df["date"].iloc[-1] - df["date"].iloc[0]).days, 1)
-        cumulative_return = VT / V0 - 1
-        annualized_return = (VT / V0) ** (365 / days) - 1
-
-
-        df["ret"] = df["pnl_value"].pct_change()
-        daily_vol = df["ret"].std()
-        sharpe = (
-            (annualized_return - 0) / (daily_vol * (365 ** 0.5))
-            if daily_vol and daily_vol > 0 else float("nan")
-        )
-
-        # ── Max Drawdown ────────────────────────────────────────────
-        rolling_max = df["pnl_value"].cummax()
-        drawdown = (df["pnl_value"] - rolling_max) / rolling_max
-        max_drawdown = float(drawdown.min())  # most negative value
-        calmar = annualized_return / abs(max_drawdown) if max_drawdown != 0 else float("nan")
-        # ─────────────────────────────────────────────────────────────
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Cumulative Return (PnL-only)", f"{cumulative_return*100:.2f}%")
-        c2.metric("Annualized Return (PnL-only)", f"{annualized_return*100:.2f}%")
-        c3.metric("Sharpe Ratio (PnL-only)", f"{sharpe:.2f}")
-
-        c4, c5, c6 = st.columns(3)
-        c4.metric("Max Drawdown", f"{max_drawdown*100:.2f}%")
-        c5.metric("Calmar Ratio", f"{calmar:.2f}" if not pd.isna(calmar) else "N/A")
-        c6.metric("Trading Days", f"{days}")
-
-        # Total equity (adds deposits/withdrawals)
-        df["total_equity"] = df["pnl_value"]
+        # ── Work with a local copy of df_dep, converted to the chart's tz ──
+        # Never re-assign the global df_dep here to avoid cross-section tz drift.
         if df_dep is not None:
-            df_dep = df_dep.sort_values("date")
-            for _, row in df_dep.iterrows():
-                dep_date = row["date"]
-                amount = row["amount"]
-                df.loc[df["date"] >= dep_date, "total_equity"] += amount
+            df_dep_chart = df_dep.copy()
+            df_dep_chart["date"] = df_dep_chart["date"].dt.tz_convert(tz)
+        else:
+            df_dep_chart = None
 
+        # ── Find the value column (handles different CSV schemas) ────
+        value_col = next(
+            (c for c in ["value", "equity", "total_value", "portfolio_value"] if c in df.columns),
+            None
+        )
+        if value_col is None:
+            st.error(f"No value column found. Columns: {df.columns.tolist()}")
+            st.stop()
 
-        # --- Trace visibility controls
-        trace_options = ["Price", "Final prob", "Intraday prob", "Daily prob", "BUY", "SELL"]
-        default_traces = ["Price", "Final prob", "BUY", "SELL"]
+        df["total_equity"] = pd.to_numeric(df[value_col], errors="coerce")
+
+        # ── PnL-only: deposits.csv contains ONLY additional capital injections
+        # (not the initial capital). Subtract ALL of them from their arrival date onward
+        # so the PnL curve shows pure bot performance, flat on deposit events.
+        df["additional_deposits"] = 0.0
+        if df_dep_chart is not None and not df_dep_chart.empty:
+            df_dep_sorted = df_dep_chart.sort_values("date")
+            for _, row in df_dep_sorted.iterrows():
+                dep_date = row["date"]  # already in local tz
+                df.loc[df["date"] >= dep_date, "additional_deposits"] += float(row["amount"])
+
+        df["pnl_value"] = df["total_equity"] - df["additional_deposits"]
 
         # Dual Curve Chart + Markers (Plotly)
         fig = go.Figure()
@@ -1259,18 +1338,17 @@ if os.path.exists(portfolio_path):
 
 
         # Deposit / Withdrawal Markers
-        if show_markers and df_dep is not None and not df_dep.empty:
-            target_tz = df["date"].dt.tz
+        if show_markers and df_dep_chart is not None and not df_dep_chart.empty:
+            target_tz = str(df["date"].dt.tz)
 
 
             has_dep_legend = False
             has_wdr_legend = False
 
 
-            for _, row in df_dep.iterrows():
+            for _, row in df_dep_chart.iterrows():
                 dep_t = row["date"]
                 amount = float(row["amount"])
-
 
                 if target_tz is not None:
                     if dep_t.tzinfo is None:
@@ -1281,8 +1359,8 @@ if os.path.exists(portfolio_path):
 
                 nearest_idx = (df["date"] - dep_t).abs().idxmin()
                 nearest_date = df.loc[nearest_idx, "date"]
-                nearest_value = df.loc[nearest_idx, "total_equity"]
-
+                # Anchor to whichever curve(s) are visible
+                nearest_value = df.loc[nearest_idx, "pnl_value" if show_bot_only else "total_equity"]
 
                 is_dep = amount > 0
                 name = "Deposit" if is_dep else "Withdrawal"
@@ -1334,21 +1412,19 @@ if os.path.exists(portfolio_path):
 
 
         # Deposits / Withdrawals Log
-        if df_dep is not None:
+        if df_dep_chart is not None:
             st.subheader("💵 Deposits / Withdrawals Log")
 
 
-            # Convert timezone
-            df_dep["display_date"] = (
-                df_dep["date"]
-                    .dt.tz_convert(tz)
+            df_dep_chart["display_date"] = (
+                df_dep_chart["date"]
                     .dt.normalize()
                     .dt.strftime("%Y-%m-%d")
             )
 
 
             st.dataframe(
-                df_dep[["display_date", "amount"]]
+                df_dep_chart[["display_date", "amount"]]
                     .rename(columns={"display_date": "Date", "amount": "Amount ($)"}),
                 use_container_width=True
             )
