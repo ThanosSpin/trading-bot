@@ -1362,52 +1362,56 @@ if os.path.exists(portfolio_path):
 
         st.plotly_chart(fig_eq, use_container_width=True, key="portfolio_chart")
 
-        # ── Chart 2: Bot PnL Only (deposits stripped) ───────────────────────
-        st.subheader("🤖 Bot PnL — Trading Gains Only (deposits stripped)")
+        if len(df) < 2:
+            st.info("⏳ Not enough data yet to show PnL curve — needs at least 2 days of portfolio history.")
+        else:
 
-        fig_pnl = go.Figure()
+            # ── Chart 2: Bot PnL Only (deposits stripped) ───────────────────────
+            st.subheader("🤖 Bot PnL — Trading Gains Only (deposits stripped)")
 
-        fig_pnl.add_trace(go.Scatter(
-            x=df["date"],
-            y=df["pnl_value"],
-            mode="lines",
-            name="PnL-Only Equity",
-            line=dict(width=2, color="#00b4d8"),
-            hovertemplate=(
-                "<b>Bot PnL</b><br>"
-                "Date: %{x|%Y-%m-%d}<br>"
-                "Value: $%{y:,.2f}"
-                "<extra></extra>"
-            ),
-        ))
+            fig_pnl = go.Figure()
 
-        fig_pnl.add_hline(y=0, line_dash="dash", line_color="red", line_width=1)
+            fig_pnl.add_trace(go.Scatter(
+                x=df["date"],
+                y=df["pnl_value"],
+                mode="lines",
+                name="PnL-Only Equity",
+                line=dict(width=2, color="#00b4d8"),
+                hovertemplate=(
+                    "<b>Bot PnL</b><br>"
+                    "Date: %{x|%Y-%m-%d}<br>"
+                    "Value: $%{y:,.2f}"
+                    "<extra></extra>"
+                ),
+            ))
 
-        fig_pnl.update_layout(
-            xaxis_title="Date",
-            yaxis_title="PnL-Only Equity ($)",
-            hovermode="x unified",
-            template="plotly_white",
-            height=320,
-        )
+            fig_pnl.add_hline(y=0, line_dash="dash", line_color="red", line_width=1)
 
-        st.plotly_chart(fig_pnl, use_container_width=True, key="total_pnl_chart")
-
-        # ── Deposits / Withdrawals Log ───────────────────────────────────────
-        if df_dep_chart is not None:
-            st.subheader("💵 Deposits / Withdrawals Log")
-
-            df_dep_chart["display_date"] = (
-                df_dep_chart["date"]
-                    .dt.normalize()
-                    .dt.strftime("%Y-%m-%d")
+            fig_pnl.update_layout(
+                xaxis_title="Date",
+                yaxis_title="PnL-Only Equity ($)",
+                hovermode="x unified",
+                template="plotly_white",
+                height=320,
             )
 
-            st.dataframe(
-                df_dep_chart[["display_date", "amount"]]
-                    .rename(columns={"display_date": "Date", "amount": "Amount ($)"}),
-                use_container_width=True
-            )
+            st.plotly_chart(fig_pnl, use_container_width=True, key="total_pnl_chart")
+
+            # ── Deposits / Withdrawals Log ───────────────────────────────────────
+            if df_dep_chart is not None:
+                st.subheader("💵 Deposits / Withdrawals Log")
+
+                df_dep_chart["display_date"] = (
+                    df_dep_chart["date"]
+                        .dt.normalize()
+                        .dt.strftime("%Y-%m-%d")
+                )
+
+                st.dataframe(
+                    df_dep_chart[["display_date", "amount"]]
+                        .rename(columns={"display_date": "Date", "amount": "Amount ($)"}),
+                    use_container_width=True
+                )
 
 else:
     st.info("No daily portfolio file found. Run update_portfolio_data.py.")
