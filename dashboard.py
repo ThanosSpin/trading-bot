@@ -429,7 +429,6 @@ for sym in symbols:
     final_p = sig.get("final_prob")
     weight = sig.get("intraday_weight", 0.65)
 
-
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Final prob_up", f"{final_p:.3f}")
     col2.metric("Daily model", f"{daily_p:.3f}" if daily_p is not None else "N/A")
@@ -548,8 +547,6 @@ for sym in symbols:
     # MODEL VALIDATION + FRESHNESS
     # -------------------------------------------------
     with st.expander(f"📘 {sym} Model Validation & Freshness"):
-
-
         info_daily = load_model_info(sym, "daily")
         info_intra = load_model_info(sym, "intraday")
 
@@ -697,8 +694,6 @@ else:
         yaxis_title="ip - dp",
         hovermode="x unified",
     )
-
-
     st.plotly_chart(fig, use_container_width=True, key="divergence_chart")
 
 
@@ -864,7 +859,6 @@ for sym in symbols:
 
 
     st.dataframe(df.sort_values("local_time", ascending=False), use_container_width=True)
-
 
     # VALUE OVER TIME PER SYMBOL (Plotly)
     if "value" in df.columns:
@@ -1101,7 +1095,6 @@ for sym in symbols:
 
     df = df.sort_values("timestamp").tail(300)
 
-
     # ---- Load trades (optional) ----
     trade_path = get_trade_log_file(sym)
     df_tr = None
@@ -1250,11 +1243,10 @@ if os.path.exists(portfolio_path):
     else:
         # Normalize
         df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert(tz)
-        df = df.sort_values("date")
+        df = df.sort_values("date").reset_index(drop=True)
 
         # ── Work with a local copy of df_dep, converted to the chart's tz ──
-        # Never re-assign the global df_dep here to avoid cross-section tz drift.
-        if df_dep is not None:
+        if df_dep is not None and not df_dep.empty:
             df_dep_chart = df_dep.copy()
             df_dep_chart["date"] = df_dep_chart["date"].dt.tz_convert(tz)
         else:
@@ -1271,16 +1263,28 @@ if os.path.exists(portfolio_path):
 
         df["total_equity"] = pd.to_numeric(df[value_col], errors="coerce")
 
-        # ── PnL-only: subtract deposits from their arrival date onward ──
-        df["additional_deposits"] = 0.0
+        # ── PnL = equity growth minus deposit injections, anchored to 0 ──
+        # Build cumulative deposits per row:
+        # A deposit on day D is counted in cum_deposits for all rows STRICTLY AFTER day D.
+        # This means the deposit day itself is NOT penalised — only future rows carry it.
+        df["cum_deposits"] = 0.0
         if df_dep_chart is not None and not df_dep_chart.empty:
-            df_dep_sorted = df_dep_chart.sort_values("date")
-            for _, row in df_dep_sorted.iterrows():
-                dep_date = row["date"]
-                df.loc[df["date"] >= dep_date, "additional_deposits"] += float(row["amount"])
+            for _, row in df_dep_chart.iterrows():
+                dep_date_only = pd.Timestamp(row["date"]).tz_convert(None).date()
+                amount = float(row["amount"])
+                df_dates_naive = df["date"].dt.tz_convert(None).dt.date
+                # strictly AFTER the deposit date
+                df.loc[df_dates_naive > dep_date_only, "cum_deposits"] += amount
 
-        df["pnl_value"] = df["total_equity"] - df["additional_deposits"]
-        df["pnl_value"] = df["pnl_value"] - df["pnl_value"].iloc[0]
+        # PnL anchored to 0 on day 1
+        baseline = df["total_equity"].iloc[0] - df["cum_deposits"].iloc[0]
+        df["pnl_value"] = (df["total_equity"] - df["cum_deposits"]) - baseline
+
+        with st.expander("🔍 PnL Debug — last 10 rows", expanded=True):
+            st.dataframe(
+                df[["date", "total_equity", "cum_deposits", "pnl_value"]].tail(10),
+                use_container_width=True
+            )
 
         # ── Chart 1: Total Equity with deposit/withdrawal markers ──────────
         fig_eq = go.Figure()
@@ -1362,13 +1366,12 @@ if os.path.exists(portfolio_path):
 
         st.plotly_chart(fig_eq, use_container_width=True, key="portfolio_chart")
 
+        # ── Chart 2: Bot PnL Only (deposits stripped) ───────────────────────
+        st.subheader("🤖 Bot PnL — Trading Gains Only (deposits stripped)")
+
         if len(df) < 2:
             st.info("⏳ Not enough data yet to show PnL curve — needs at least 2 days of portfolio history.")
         else:
-
-            # ── Chart 2: Bot PnL Only (deposits stripped) ───────────────────────
-            st.subheader("🤖 Bot PnL — Trading Gains Only (deposits stripped)")
-
             fig_pnl = go.Figure()
 
             fig_pnl.add_trace(go.Scatter(
@@ -1396,22 +1399,6 @@ if os.path.exists(portfolio_path):
             )
 
             st.plotly_chart(fig_pnl, use_container_width=True, key="total_pnl_chart")
-
-            # ── Deposits / Withdrawals Log ───────────────────────────────────────
-            if df_dep_chart is not None:
-                st.subheader("💵 Deposits / Withdrawals Log")
-
-                df_dep_chart["display_date"] = (
-                    df_dep_chart["date"]
-                        .dt.normalize()
-                        .dt.strftime("%Y-%m-%d")
-                )
-
-                st.dataframe(
-                    df_dep_chart[["display_date", "amount"]]
-                        .rename(columns={"display_date": "Date", "amount": "Amount ($)"}),
-                    use_container_width=True
-                )
 
 else:
     st.info("No daily portfolio file found. Run update_portfolio_data.py.")
