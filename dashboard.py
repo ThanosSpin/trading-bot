@@ -1347,7 +1347,10 @@ if os.path.exists(portfolio_path):
             st.stop()
 
         df["total_equity"] = pd.to_numeric(df[value_col], errors="coerce").fillna(0.0)
-        df["external_flow"] = pd.to_numeric(df.get("external_flow", 0.0), errors="coerce").fillna(0.0)
+        if "external_flow" in df.columns:
+            df["external_flow"] = pd.to_numeric(df["external_flow"], errors="coerce").fillna(0.0)
+        else:
+            df["external_flow"] = 0.0
 
         if "initial_cash" in df.columns:
             initial_cash = pd.to_numeric(df["initial_cash"], errors="coerce").fillna(0.0).iloc[0]
