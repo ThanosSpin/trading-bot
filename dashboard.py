@@ -51,6 +51,9 @@ open_time = m.get("market_open")
 close_time = m.get("market_close")
 ny_now = m.get("ny_time")
 
+if st.button("🔄 Clear cache"):
+    st.cache_data.clear()
+    st.rerun()
 
 # Build visual message
 if not is_day:
@@ -174,7 +177,8 @@ def _fetch_deposits_from_alpaca() -> pd.DataFrame:
         rows = []
         for activity_type in ["CSD", "CSW"]:
             try:
-                activities = api.get_activities(activity_type=activity_type)
+                # ✅ CORRECT
+                activities = api.get_activities(activity_types=activity_type)
                 for a in activities:
                     amount = float(getattr(a, "net_amount", 0) or 0)
                     date_raw = getattr(a, "date", None) or getattr(a, "transaction_time", None)
@@ -347,15 +351,54 @@ try:
     account_cache.invalidate()
     account = account_cache.get_account()
 
-    total_equity = float(account.get("equity", 0.0))
-    total_cash = float(account.get("cash", 0.0))
-    buying_power = float(account.get("buying_power", 0.0))
+    total_equity = float(account.get("equity", 0.0) or 0.0)
+    total_cash = float(account.get("cash", 0.0) or 0.0)
 
-    # Top-level KPIs
+    raw_bp = account.get("buying_power")
+    raw_regt_bp = account.get("regt_buying_power")
+    raw_day_bp = account.get("daytrading_buying_power")
+    raw_non_margin_bp = account.get("non_marginable_buying_power")
+    raw_multiplier = account.get("multiplier")
+
+    def _to_float(x, default=0.0):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return default
+
+    buying_power = None
+    bp_label = "💪 Buying Power"
+
+    if raw_bp not in (None, "", "0", 0):
+        buying_power = _to_float(raw_bp, 0.0)
+        bp_label = "💪 Buying Power (Alpaca)"
+    elif raw_regt_bp not in (None, "", "0", 0):
+        buying_power = _to_float(raw_regt_bp, 0.0)
+        bp_label = "💪 Reg T Buying Power"
+    elif raw_day_bp not in (None, "", "0", 0):
+        buying_power = _to_float(raw_day_bp, 0.0)
+        bp_label = "💪 Day Trading Buying Power"
+    else:
+        buying_power = total_cash
+        bp_label = "💪 Buying Power (Cash Fallback)"
+
     k1, k2, k3 = st.columns(3)
     k1.metric("💼 Total Equity", f"${total_equity:,.2f}")
     k2.metric("💵 Cash Available", f"${total_cash:,.2f}")
-    k3.metric("💪 Buying Power", f"${buying_power:,.2f}")
+    k3.metric(bp_label, f"${buying_power:,.2f}")
+
+    with st.expander("Account details", expanded=False):
+        st.json({
+            "equity": account.get("equity"),
+            "cash": account.get("cash"),
+            "buying_power": account.get("buying_power"),
+            "regt_buying_power": account.get("regt_buying_power"),
+            "daytrading_buying_power": account.get("daytrading_buying_power"),
+            "non_marginable_buying_power": account.get("non_marginable_buying_power"),
+            "multiplier": raw_multiplier,
+            "initial_margin": account.get("initial_margin"),
+            "maintenance_margin": account.get("maintenance_margin"),
+        })
 
     st.divider()
 
@@ -416,210 +459,209 @@ for sym in symbols:
         sig = compute_signals(sym, lookback_minutes=2400, intraday_weight=INTRADAY_WEIGHT, resample_to="15min")
     except Exception as e:
         st.warning(f"{sym}: error computing signals — {e}")
-        continue
-
+        import traceback
+        st.code(traceback.format_exc())
+        sig = None
 
     if not sig or sig.get("final_prob") is None:
         st.info(f"{sym}: No valid prediction available.")
-        continue
-
-
-    daily_p = sig.get("daily_prob")
-    intra_p = sig.get("intraday_prob")
-    final_p = sig.get("final_prob")
-    weight = sig.get("intraday_weight", 0.65)
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Final prob_up", f"{final_p:.3f}")
-    col2.metric("Daily model", f"{daily_p:.3f}" if daily_p is not None else "N/A")
-    col3.metric("Intraday model", f"{intra_p:.3f}" if intra_p is not None else "N/A")
-    col4.metric("Intraday weight", f"{weight:.2f}")
-    st.progress(max(0.0, min(final_p, 1.0)))
-
-
-    # -----------------------------
-    # Regime badge + quick intraday diagnostics
-    # -----------------------------
-    model_used = sig.get("intraday_model_used") or "intraday"
-
-
-    # Badge mapping
-    mu = str(model_used).lower()
-    if "mom" in mu:
-        regime_text = "📈 Momentum intraday"
-        regime_color = "#1f77b4"
-    elif "mr" in mu:
-        regime_text = "↩️ Mean-reversion intraday"
-        regime_color = "#ff7f0e"
+        sig = None
     else:
-        regime_text = f"🧠 Intraday (legacy): {model_used}"
-        regime_color = "#6c757d"
+        daily_p = sig.get("daily_prob")
+        intra_p = sig.get("intraday_prob")
+        final_p = sig.get("final_prob")
+        weight = sig.get("intraday_weight", 0.65)
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Final prob_up", f"{final_p:.3f}")
+        col2.metric("Daily model", f"{daily_p:.3f}" if daily_p is not None else "N/A")
+        col3.metric("Intraday model", f"{intra_p:.3f}" if intra_p is not None else "N/A")
+        col4.metric("Intraday weight", f"{weight:.2f}")
+        st.progress(max(0.0, min(final_p, 1.0)))
+
+        # -----------------------------
+        # Regime badge + quick intraday diagnostics
+        # -----------------------------
+        model_used = sig.get("intraday_model_used") or "intraday"
 
 
-    st.markdown(
-        f"""
-        <div style="
-            display:inline-block;
-            padding:6px 10px;
-            border-radius:999px;
-            background:{regime_color};
-            color:white;
-            font-weight:600;
-            font-size:13px;
-            margin-top:6px;
-            margin-bottom:6px;
-        ">
-            {regime_text}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Optional: show vol/mom inline (super useful when debugging regime switches)
-    vol = sig.get("intraday_vol")
-    mom = sig.get("intraday_mom")
-    if vol is not None or mom is not None:
-        vol_s = "N/A" if vol is None else f"{float(vol):.5f}"
-        mom_s = "N/A" if mom is None else f"{float(mom)*100:.2f}%"
-        st.caption(f"Intraday diagnostics → vol={vol_s} | mom(≈2h)={mom_s}")
+        # Badge mapping
+        mu = str(model_used).lower()
+        if "mom" in mu:
+            regime_text = "📈 Momentum intraday"
+            regime_color = "#1f77b4"
+        elif "mr" in mu:
+            regime_text = "↩️ Mean-reversion intraday"
+            regime_color = "#ff7f0e"
+        else:
+            regime_text = f"🧠 Intraday (legacy): {model_used}"
+            regime_color = "#6c757d"
 
 
-    # -----------------------------
-    # Tiny improvement: show dp/ip divergence + which intraday model was used
-    # -----------------------------
-    model_used = sig.get("intraday_model_used") or sig.get("model") or "intraday"
-    div = None
-    if daily_p is not None and intra_p is not None:
-        try:
-            div = float(intra_p - daily_p)
-        except Exception:
-            div = None
+        st.markdown(
+            f"""
+            <div style="
+                display:inline-block;
+                padding:6px 10px;
+                border-radius:999px;
+                background:{regime_color};
+                color:white;
+                font-weight:600;
+                font-size:13px;
+                margin-top:6px;
+                margin-bottom:6px;
+            ">
+                {regime_text}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Optional: show vol/mom inline (super useful when debugging regime switches)
+        vol = sig.get("intraday_vol")
+        mom = sig.get("intraday_mom")
+        if vol is not None or mom is not None:
+            vol_s = "N/A" if vol is None else f"{float(vol):.5f}"
+            mom_s = "N/A" if mom is None else f"{float(mom)*100:.2f}%"
+            st.caption(f"Intraday diagnostics → vol={vol_s} | mom(≈2h)={mom_s}")
 
 
-    if div is not None:
-        st.caption(f"Δ (ip - dp) = {div:+.3f} | intraday model: {model_used}")
-    else:
-        st.caption(f"intraday model: {model_used}")
+        # -----------------------------
+        # Tiny improvement: show dp/ip divergence + which intraday model was used
+        # -----------------------------
+        model_used = sig.get("intraday_model_used") or sig.get("model") or "intraday"
+        div = None
+        if daily_p is not None and intra_p is not None:
+            try:
+                div = float(intra_p - daily_p)
+            except Exception:
+                div = None
 
 
-    pretty_model = {
-        "intraday_mom": "📈 Momentum intraday",
-        "intraday_mr": "↩️ Mean-reversion intraday",
-        "intraday": "🧠 Legacy intraday",
-    }.get(model_used, model_used)
+        if div is not None:
+            st.caption(f"Δ (ip - dp) = {div:+.3f} | intraday model: {model_used}")
+        else:
+            st.caption(f"intraday model: {model_used}")
 
 
-    # -----------------------------
-    # Store points for divergence chart (session-level, bounded, dedup per refresh)
-    # -----------------------------
-    if "divergence_points" not in st.session_state:
-        st.session_state["divergence_points"] = []
+        pretty_model = {
+            "intraday_mom": "📈 Momentum intraday",
+            "intraday_mr": "↩️ Mean-reversion intraday",
+            "intraday": "🧠 Legacy intraday",
+        }.get(model_used, model_used)
 
 
-    # Use refresh key so we don't append duplicates on Streamlit reruns
-    refresh_key = f"{sym}:{st.session_state.get('global_refresh', 0)}"
-    if "divergence_seen" not in st.session_state:
-        st.session_state["divergence_seen"] = set()
+        # -----------------------------
+        # Store points for divergence chart (session-level, bounded, dedup per refresh)
+        # -----------------------------
+        if "divergence_points" not in st.session_state:
+            st.session_state["divergence_points"] = []
 
 
-    if refresh_key not in st.session_state["divergence_seen"]:
-        st.session_state["divergence_seen"].add(refresh_key)
+        # Use refresh key so we don't append duplicates on Streamlit reruns
+        refresh_key = f"{sym}:{st.session_state.get('global_refresh', 0)}"
+        if "divergence_seen" not in st.session_state:
+            st.session_state["divergence_seen"] = set()
 
 
-        st.session_state["divergence_points"].append({
-            "time": pd.Timestamp.utcnow(),
-            "symbol": sym,
-            "dp": float(daily_p) if daily_p is not None else None,
-            "ip": float(intra_p) if intra_p is not None else None,
-            "divergence": float(div) if div is not None else None,
-            "weight": float(weight) if weight is not None else None,
-            "model": pretty_model,
-        })
+        if refresh_key not in st.session_state["divergence_seen"]:
+            st.session_state["divergence_seen"].add(refresh_key)
 
 
-        # keep last N points overall (prevents memory growth)
-        MAX_POINTS = 500
-        if len(st.session_state["divergence_points"]) > MAX_POINTS:
-            st.session_state["divergence_points"] = st.session_state["divergence_points"][-MAX_POINTS:]
+            st.session_state["divergence_points"].append({
+                "time": pd.Timestamp.utcnow(),
+                "symbol": sym,
+                "dp": float(daily_p) if daily_p is not None else None,
+                "ip": float(intra_p) if intra_p is not None else None,
+                "divergence": float(div) if div is not None else None,
+                "weight": float(weight) if weight is not None else None,
+                "model": pretty_model,
+            })
 
 
-    # -------------------------------------------------
-    # MODEL VALIDATION + FRESHNESS
-    # -------------------------------------------------
-    with st.expander(f"📘 {sym} Model Validation & Freshness"):
-        info_daily = load_model_info(sym, "daily")
-        info_intra = load_model_info(sym, "intraday")
+            # keep last N points overall (prevents memory growth)
+            MAX_POINTS = 500
+            if len(st.session_state["divergence_points"]) > MAX_POINTS:
+                st.session_state["divergence_points"] = st.session_state["divergence_points"][-MAX_POINTS:]
 
 
-        c_md1, c_md2 = st.columns(2)
+        # -------------------------------------------------
+        # MODEL VALIDATION + FRESHNESS
+        # -------------------------------------------------
+        with st.expander(f"📘 {sym} Model Validation & Freshness"):
+            info_daily = load_model_info(sym, "daily")
+            info_intra = load_model_info(sym, "intraday")
 
 
-        def show_model_block(container, label, info):
-            container.markdown(f"### **{label} Model**")
-            if not info:
-                container.caption("No saved model found.")
-                return None
+            c_md1, c_md2 = st.columns(2)
 
 
-            metrics = info.get("metrics", {})
-            trained_at = info.get("trained_at")
+            def show_model_block(container, label, info):
+                container.markdown(f"### **{label} Model**")
+                if not info:
+                    container.caption("No saved model found.")
+                    return None
 
 
-            if trained_at:
-                container.caption(f"Trained at: `{trained_at}`")
+                metrics = info.get("metrics", {})
+                trained_at = info.get("trained_at")
 
 
-            age_days = None
-            if trained_at:
-                try:
-                    t = pd.to_datetime(trained_at)
-                    age_days = (pd.Timestamp.utcnow() - t).days
-                    if age_days > 90:
-                        status = "❌ **STALE — Retrain ASAP (>90 days)**"
-                        color = "red"
-                    elif age_days > 30:
-                        status = "⚠️ **Aging — Retrain Recommended (>30 days)**"
-                        color = "orange"
-                    else:
-                        status = "🟢 Fresh ✓"
-                        color = "green"
+                if trained_at:
+                    container.caption(f"Trained at: `{trained_at}`")
 
 
-                    container.markdown(
-                        f"""
-                        <div style="
-                            padding:10px;
-                            border-radius:8px;
-                            background-color:{color};
-                            color:white;
-                            font-weight:bold;">
-                            {status} (Age: {age_days} days)
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-                except:
-                    pass
-
-            for key in ["accuracy", "logloss", "roc_auc", "precision", "recall", "f1"]:
-                container.write(f"- **{key}**: `{metrics.get(key)}`")
+                age_days = None
+                if trained_at:
+                    try:
+                        t = pd.to_datetime(trained_at)
+                        age_days = (pd.Timestamp.utcnow() - t).days
+                        if age_days > 90:
+                            status = "❌ **STALE — Retrain ASAP (>90 days)**"
+                            color = "red"
+                        elif age_days > 30:
+                            status = "⚠️ **Aging — Retrain Recommended (>30 days)**"
+                            color = "orange"
+                        else:
+                            status = "🟢 Fresh ✓"
+                            color = "green"
 
 
-            cm = metrics.get("confusion_matrix")
-            if cm:
-                container.write(f"- **Confusion Matrix**: `{cm}`")
+                        container.markdown(
+                            f"""
+                            <div style="
+                                padding:10px;
+                                border-radius:8px;
+                                background-color:{color};
+                                color:white;
+                                font-weight:bold;">
+                                {status} (Age: {age_days} days)
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                    except:
+                        pass
+
+                for key in ["accuracy", "logloss", "roc_auc", "precision", "recall", "f1"]:
+                    container.write(f"- **{key}**: `{metrics.get(key)}`")
 
 
-            return {"accuracy": metrics.get("accuracy"), "logloss": metrics.get("logloss"), "age": age_days}
+                cm = metrics.get("confusion_matrix")
+                if cm:
+                    container.write(f"- **Confusion Matrix**: `{cm}`")
 
 
-        daily_stats = show_model_block(c_md1, "Daily", info_daily)
-        intra_stats = show_model_block(c_md2, "Intraday", info_intra)
+                return {"accuracy": metrics.get("accuracy"), "logloss": metrics.get("logloss"), "age": age_days}
 
 
-        if "model_compare" not in st.session_state:
-            st.session_state["model_compare"] = {}
-        st.session_state["model_compare"][sym] = {"daily": daily_stats, "intraday": intra_stats}
+            daily_stats = show_model_block(c_md1, "Daily", info_daily)
+            intra_stats = show_model_block(c_md2, "Intraday", info_intra)
+
+
+            if "model_compare" not in st.session_state:
+                st.session_state["model_compare"] = {}
+            st.session_state["model_compare"][sym] = {"daily": daily_stats, "intraday": intra_stats}
 
 
 # -------------------------------------------------
@@ -860,73 +902,119 @@ for sym in symbols:
 
     st.dataframe(df.sort_values("local_time", ascending=False), use_container_width=True)
 
-    # VALUE OVER TIME PER SYMBOL (Plotly)
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PER-SYMBOL PnL — deposit-aware
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Strategy: each symbol gets an equal share of every deposit/withdrawal.
+    # Formula: pnl = cumcf + position_value - sym_allocated_deposits
+    #
+    # Where:
+    #   cumcf              = running sum of (sell proceeds - buy costs) for THIS symbol
+    #   position_value     = shares_held × last_price
+    #   sym_allocated_deps = each deposit × (1 / n_active_symbols_at_that_time)
+    #
+    # This makes per-symbol PnL start at $0 and show ONLY trading gains,
+    # matching the Total Portfolio PnL chart logic.
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PER-SYMBOL PnL — deposit-aware, self-contained equity
+    # Drop-in replacement for the entire `if "value" in df.columns:` block
+    # ─────────────────────────────────────────────────────────────────────────────
+
     if "value" in df.columns:
         try:
             from plotly.subplots import make_subplots
 
-            dfp = df.sort_values("local_time").copy()
+            # ── 1. build localtime from timestamp ────────────────────────────────
+            dfp = df.copy()
+            dfp["timestamp"] = pd.to_datetime(dfp["timestamp"], utc=True, errors="coerce")
+            dfp["localtime"] = dfp["timestamp"].dt.tz_convert(tz)
+            dfp = dfp.sort_values("localtime").dropna(subset=["localtime"])
 
-            # ── Compute PnL from cashflows — deposit-independent ──────────
+            # ── 2. numeric columns ───────────────────────────────────────────────
             dfp["price"]  = pd.to_numeric(dfp.get("price"),  errors="coerce").fillna(0)
             dfp["qty"]    = pd.to_numeric(dfp.get("qty"),    errors="coerce").fillna(0)
             dfp["shares"] = pd.to_numeric(dfp.get("shares"), errors="coerce").fillna(0)
+            dfp["action"] = dfp["action"].astype(str).str.lower().str.strip()
 
+            # ── 3. cashflow per trade ─────────────────────────────────────────────
             def _cf(r):
-                if r["action"] == "sell":
-                    return  r["qty"] * r["price"]
-                elif r["action"] == "buy":
-                    return -r["qty"] * r["price"]
+                if r["action"] == "sell": return  r["qty"] * r["price"]
+                if r["action"] == "buy":  return -r["qty"] * r["price"]
                 return 0.0
-
             dfp["cf"]             = dfp.apply(_cf, axis=1)
-            dfp["cum_cf"]         = dfp["cf"].cumsum()
+            dfp["cumcf"]          = dfp["cf"].cumsum()
             dfp["position_value"] = dfp["shares"] * dfp["price"]
-            dfp["pnl_value"]      = dfp["cum_cf"] + dfp["position_value"]
 
-            # ── Two-panel chart ───────────────────────────────────────────
+            # ── 4. self-contained per-symbol equity (NO account-wide value col) ──
+            # cumcf + position_value is 100% per-symbol, starts at 0 before trades
+            dfp["sym_equity"] = dfp["cumcf"] + dfp["position_value"]
+
+            # ── 5. allocate deposits to this symbol ──────────────────────────────
+            _spy = (SPY_SYMBOL or "SPY").upper()
+            _trading_syms = [s for s in symbols if s.upper() != _spy]
+            n_symbols = max(1, len(_trading_syms))
+            sym_allocated_deposits = 0.0
+            if df_dep is not None and not df_dep.empty:
+                ic = 0.0
+                if os.path.exists(portfolio_path):
+                    try:
+                        _dp = pd.read_csv(portfolio_path)
+                        if "initial_cash" in _dp.columns:
+                            ic = float(pd.to_numeric(_dp["initial_cash"], errors="coerce").fillna(0).iloc[0])
+                    except Exception:
+                        pass
+                total_deps = ic + float(df_dep["amount"].clip(lower=0).sum())
+                sym_allocated_deposits = total_deps / n_symbols
+
+            # ── 6. PnL = trading gains only (deposits stripped) ──────────────────
+            dfp["pnl_value"]      = dfp["sym_equity"] - sym_allocated_deposits
+            # Raw equity = trading result + deposit allocation (starts at ~$1500)
+            dfp["sym_raw_equity"] = dfp["sym_equity"] + sym_allocated_deposits
+
+            # ── 7. chart ─────────────────────────────────────────────────────────
             fig = make_subplots(
                 rows=1, cols=2,
                 subplot_titles=(
                     "🤖 Bot PnL (trading gains only)",
-                    "💼 Account Equity (raw, includes deposits)",
+                    "🗃️ Account Equity (raw, includes deposits)",
                 ),
             )
-
-            fig.add_trace(go.Scatter(
-                x=dfp["local_time"],
-                y=dfp["pnl_value"],
-                mode="lines+markers",
-                name="PnL",
-                line=dict(color="#00b4d8", width=2),
-                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>PnL: $%{y:,.2f}<extra></extra>",
-            ), row=1, col=1)
-
-            fig.add_trace(go.Scatter(
-                x=dfp["local_time"],
-                y=dfp["value"],
-                mode="lines+markers",
-                name="Raw Equity",
-                line=dict(color="#adb5bd", width=2, dash="dash"),
-                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Equity: $%{y:,.2f}<extra></extra>",
-            ), row=1, col=2)
-
+            fig.add_trace(
+                go.Scatter(
+                    x=dfp["localtime"], y=dfp["pnl_value"],
+                    mode="lines+markers", name="PnL",
+                    line=dict(color="#00b4d8", width=2),
+                    hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>PnL: $%{y:,.2f}<extra></extra>",
+                ),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=dfp["localtime"], y=dfp["sym_raw_equity"],
+                    mode="lines+markers", name="Raw Equity",
+                    line=dict(color="#adb5bd", width=2, dash="dash"),
+                    hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Equity: $%{y:,.2f}<extra></extra>",
+                ),
+                row=1, col=2,
+            )
             fig.add_hline(y=0, line_dash="dash", line_color="red", row=1, col=1)
 
-            # Deposit markers on equity panel
+            # deposit markers on equity panel
             if df_dep is not None and not df_dep.empty:
-                for _, dep_row in df_dep.iterrows():
-                    dep_dt  = dep_row["date"]
-                    amount  = float(dep_row["amount"])
+                for _, deprow in df_dep.iterrows():
+                    dep_dt = deprow["date"]
+                    amount = float(deprow["amount"])
                     if dep_dt.tzinfo is None:
-                        dep_dt = dep_dt.tz_localize("UTC").tz_convert(str(dfp["local_time"].dt.tz))
+                        dep_dt = dep_dt.tz_localize("UTC").tz_convert(tz)
                     else:
-                        dep_dt = dep_dt.tz_convert(str(dfp["local_time"].dt.tz))
+                        dep_dt = dep_dt.tz_convert(tz)
                     fig.add_vline(
                         x=dep_dt.timestamp() * 1000,
                         line_width=1, line_dash="dot",
                         line_color="green" if amount > 0 else "red",
-                        annotation_text=f"+${amount:,.0f}",
+                        annotation_text=f"${amount/n_symbols:,.0f}",
                         annotation_position="top right",
                         row=1, col=2,
                     )
@@ -941,7 +1029,7 @@ for sym in symbols:
             fig.update_yaxes(tickprefix="$", separatethousands=True, row=1, col=1)
             fig.update_yaxes(tickprefix="$", separatethousands=True, row=1, col=2)
 
-            st.plotly_chart(fig, use_container_width=True, key=f"value_chart_{sym}")
+            st.plotly_chart(fig, use_container_width=True, key=f"valuechart_{sym}")
 
         except Exception as e:
             st.warning(f"Could not plot value chart: {e}")
@@ -1241,18 +1329,15 @@ if os.path.exists(portfolio_path):
     if df.empty:
         st.warning("Daily portfolio is empty.")
     else:
-        # Normalize
         df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert(tz)
         df = df.sort_values("date").reset_index(drop=True)
 
-        # ── Work with a local copy of df_dep, converted to the chart's tz ──
         if df_dep is not None and not df_dep.empty:
             df_dep_chart = df_dep.copy()
             df_dep_chart["date"] = df_dep_chart["date"].dt.tz_convert(tz)
         else:
             df_dep_chart = None
 
-        # ── Find the value column (handles different CSV schemas) ────
         value_col = next(
             (c for c in ["value", "equity", "total_value", "portfolio_value"] if c in df.columns),
             None
@@ -1261,34 +1346,22 @@ if os.path.exists(portfolio_path):
             st.error(f"No value column found. Columns: {df.columns.tolist()}")
             st.stop()
 
-        df["total_equity"] = pd.to_numeric(df[value_col], errors="coerce")
+        df["total_equity"] = pd.to_numeric(df[value_col], errors="coerce").fillna(0.0)
+        df["external_flow"] = pd.to_numeric(df.get("external_flow", 0.0), errors="coerce").fillna(0.0)
 
-        # ── PnL = equity growth minus deposit injections, anchored to 0 ──
-        # Build cumulative deposits per row:
-        # A deposit on day D is counted in cum_deposits for all rows STRICTLY AFTER day D.
-        # This means the deposit day itself is NOT penalised — only future rows carry it.
-        df["cum_deposits"] = 0.0
-        if df_dep_chart is not None and not df_dep_chart.empty:
-            for _, row in df_dep_chart.iterrows():
-                dep_date_only = pd.Timestamp(row["date"]).tz_convert(None).date()
-                amount = float(row["amount"])
-                df_dates_naive = df["date"].dt.tz_convert(None).dt.date
-                # strictly AFTER the deposit date
-                df.loc[df_dates_naive > dep_date_only, "cum_deposits"] += amount
+        if "initial_cash" in df.columns:
+            initial_cash = pd.to_numeric(df["initial_cash"], errors="coerce").fillna(0.0).iloc[0]
+        else:
+            initial_cash = float(df["total_equity"].iloc[0])
 
-        # PnL anchored to 0 on day 1
-        baseline = df["total_equity"].iloc[0] - df["cum_deposits"].iloc[0]
-        df["pnl_value"] = (df["total_equity"] - df["cum_deposits"]) - baseline
+        df["cum_external_flow"] = df["external_flow"].cumsum()
+        df["total_deposited"] = initial_cash + df["cum_external_flow"]
+        df["pnl_value"] = df["total_equity"] - df["total_deposited"]
 
-        with st.expander("🔍 PnL Debug — last 10 rows", expanded=True):
-            st.dataframe(
-                df[["date", "total_equity", "cum_deposits", "pnl_value"]].tail(10),
-                use_container_width=True
-            )
+        st.write("**External flow summary:**")
+        st.dataframe(df[["date", "external_flow", "cum_external_flow", "total_deposited", "pnl_value"]].tail(10))
 
-        # ── Chart 1: Total Equity with deposit/withdrawal markers ──────────
         fig_eq = go.Figure()
-
         fig_eq.add_trace(go.Scatter(
             x=df["date"],
             y=df["total_equity"],
@@ -1303,7 +1376,6 @@ if os.path.exists(portfolio_path):
             ),
         ))
 
-        # Deposit / Withdrawal markers
         if df_dep_chart is not None and not df_dep_chart.empty:
             target_tz = str(df["date"].dt.tz)
             has_dep_legend = False
@@ -1363,17 +1435,13 @@ if os.path.exists(portfolio_path):
             template="plotly_white",
             height=420,
         )
-
         st.plotly_chart(fig_eq, use_container_width=True, key="portfolio_chart")
 
-        # ── Chart 2: Bot PnL Only (deposits stripped) ───────────────────────
         st.subheader("🤖 Bot PnL — Trading Gains Only (deposits stripped)")
-
         if len(df) < 2:
             st.info("⏳ Not enough data yet to show PnL curve — needs at least 2 days of portfolio history.")
         else:
             fig_pnl = go.Figure()
-
             fig_pnl.add_trace(go.Scatter(
                 x=df["date"],
                 y=df["pnl_value"],
@@ -1387,9 +1455,7 @@ if os.path.exists(portfolio_path):
                     "<extra></extra>"
                 ),
             ))
-
             fig_pnl.add_hline(y=0, line_dash="dash", line_color="red", line_width=1)
-
             fig_pnl.update_layout(
                 xaxis_title="Date",
                 yaxis_title="PnL-Only Equity ($)",
@@ -1397,8 +1463,6 @@ if os.path.exists(portfolio_path):
                 template="plotly_white",
                 height=320,
             )
-
             st.plotly_chart(fig_pnl, use_container_width=True, key="total_pnl_chart")
-
 else:
     st.info("No daily portfolio file found. Run update_portfolio_data.py.")
