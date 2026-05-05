@@ -1318,6 +1318,7 @@ for sym in symbols:
     st.plotly_chart(fig, use_container_width=True, key=f"price_prob_chart_{sym}")
 
 
+
 # -------------------------------------------------
 # TOTAL DAILY PORTFOLIO PERFORMANCE
 # -------------------------------------------------
@@ -1360,6 +1361,181 @@ if os.path.exists(portfolio_path):
         df["cum_external_flow"] = df["external_flow"].cumsum()
         df["total_deposited"] = initial_cash + df["cum_external_flow"]
         df["pnl_value"] = df["total_equity"] - df["total_deposited"]
+
+        # -------------------------------------------------
+        # TOTAL PERFORMANCE STATS
+        # -------------------------------------------------
+        st.subheader("📊 Total Performance Stats")
+
+        df_stats = df.copy()
+        df_stats = df_stats.dropna(subset=["date", "total_equity"]).sort_values("date").reset_index(drop=True)
+
+        if len(df_stats) >= 2:
+            start_date = df_stats["date"].iloc[0]
+            end_date = df_stats["date"].iloc[-1]
+
+            start_equity = float(df_stats["total_equity"].iloc[0])
+            end_equity = float(df_stats["total_equity"].iloc[-1])
+            total_pnl = float(df_stats["pnl_value"].iloc[-1])
+
+            # Prefer a real positive starting capital
+            base_capital = None
+            if "total_deposited" in df_stats.columns:
+                first_dep = float(pd.to_numeric(df_stats["total_deposited"], errors="coerce").fillna(0.0).iloc[0])
+                if first_dep > 0:
+                    base_capital = first_dep
+
+            if base_capital is None or base_capital <= 0:
+                if "initial_cash" in locals() and initial_cash and float(initial_cash) > 0:
+                    base_capital = float(initial_cash)
+
+            if base_capital is None or base_capital <= 0:
+                base_capital = max(start_equity - total_pnl, 1e-9)
+
+            total_return = total_pnl / base_capital if base_capital > 0 else 0.0
+
+            elapsed_days = max((end_date - start_date).total_seconds() / 86400.0, 1.0)
+            annual_return = (1.0 + total_return) ** (365.25 / elapsed_days) - 1.0 if total_return > -1 else -1.0
+            annual_label = "Annualized Return"
+
+            # Build a positive equity curve for drawdown / Sharpe
+            df_stats["strategy_equity"] = base_capital + df_stats["pnl_value"]
+            df_stats["strategy_equity"] = pd.to_numeric(df_stats["strategy_equity"], errors="coerce").fillna(method="ffill")
+
+            # Prevent divide-by-zero / negative starting peak issues
+            df_stats = df_stats[df_stats["strategy_equity"] > 0].copy()
+
+            if len(df_stats) >= 2:
+                df_stats["running_peak"] = df_stats["strategy_equity"].cummax()
+                df_stats["drawdown"] = df_stats["strategy_equity"] / df_stats["running_peak"] - 1.0
+                max_drawdown = float(df_stats["drawdown"].min())
+            else:
+                max_drawdown = 0.0
+
+            daily_curve = (
+                df_stats.set_index("date")[["strategy_equity"]]
+                .resample("1D")
+                .last()
+                .dropna()
+                .copy()
+            )
+            daily_curve["ret"] = daily_curve["strategy_equity"].pct_change()
+            daily_rets = daily_curve["ret"].replace([float("inf"), float("-inf")], pd.NA).dropna()
+
+            if len(daily_rets) >= 2 and daily_rets.std() > 0:
+                sharpe = float((daily_rets.mean() / daily_rets.std()) * (252 ** 0.5))
+                volatility = float(daily_rets.std() * (252 ** 0.5))
+            else:
+                sharpe = None
+                volatility = None
+
+            # Closed-trade stats across all symbols
+            all_cycle_pnls = []
+
+            for sym in symbols:
+                trade_path = get_trade_log_file(sym)
+                if not os.path.exists(trade_path):
+                    continue
+
+                try:
+                    dft = pd.read_csv(trade_path)
+                    dft["timestamp"] = pd.to_datetime(dft["timestamp"], utc=True, errors="coerce")
+                    dft["action"] = dft["action"].astype(str).str.lower().str.strip()
+                    dft["price"] = pd.to_numeric(dft.get("price"), errors="coerce")
+                    dft["shares"] = pd.to_numeric(dft.get("shares"), errors="coerce")
+
+                    dft = dft.dropna(subset=["timestamp", "action", "price", "shares"]).sort_values("timestamp").copy()
+
+                    if "shares_after" not in dft.columns:
+                        dft["shares_after"] = dft["shares"]
+                    else:
+                        dft["shares_after"] = pd.to_numeric(dft["shares_after"], errors="coerce").fillna(dft["shares"])
+
+                    if "shares_before" not in dft.columns:
+                        dft["shares_before"] = dft["shares_after"].shift(1).fillna(0.0)
+                    else:
+                        dft["shares_before"] = pd.to_numeric(dft["shares_before"], errors="coerce").fillna(0.0)
+
+                    def _exec_qty_total(r):
+                        sb = float(r["shares_before"])
+                        sa = float(r["shares_after"])
+                        if r["action"] == "buy":
+                            return max(0.0, sa - sb)
+                        if r["action"] == "sell":
+                            return max(0.0, sb - sa)
+                        return 0.0
+
+                    dft["exec_qty"] = dft.apply(_exec_qty_total, axis=1)
+                    dft = dft[dft["exec_qty"] > 0].copy()
+                    if dft.empty:
+                        continue
+
+                    dft["cashflow"] = dft.apply(
+                        lambda r: -(r["exec_qty"] * r["price"]) if r["action"] == "buy"
+                        else +(r["exec_qty"] * r["price"]) if r["action"] == "sell"
+                        else 0.0,
+                        axis=1,
+                    )
+
+                    EPS = 1e-9
+                    in_cycle = False
+                    running = 0.0
+
+                    for _, r in dft.iterrows():
+                        sb = float(r["shares_before"])
+                        sa = float(r["shares_after"])
+                        cf = float(r["cashflow"])
+
+                        was_flat = abs(sb) <= EPS
+                        now_flat = abs(sa) <= EPS
+
+                        if (not in_cycle) and was_flat and (not now_flat):
+                            in_cycle = True
+                            running = 0.0
+
+                        if in_cycle:
+                            running += cf
+
+                        if in_cycle and (not was_flat) and now_flat:
+                            all_cycle_pnls.append(running)
+                            in_cycle = False
+                            running = 0.0
+
+                except Exception:
+                    pass
+
+            if all_cycle_pnls:
+                s = pd.Series(all_cycle_pnls, dtype=float)
+                win_rate = float((s > 0).mean())
+                gross_profit = float(s[s > 0].sum())
+                gross_loss = float(-s[s < 0].sum())
+                profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf")
+                avg_trade = float(s.mean())
+                closed_trades = int(len(s))
+            else:
+                win_rate = None
+                profit_factor = None
+                avg_trade = None
+                closed_trades = 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Equity", f"${end_equity:,.2f}")
+            c2.metric("Total PnL", f"${total_pnl:,.2f}")
+            c3.metric("Total Return", f"{total_return * 100:.2f}%")
+            c4.metric(annual_label, f"{annual_return * 100:.2f}%")
+
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("Max Drawdown", f"{max_drawdown * 100:.2f}%")
+            c6.metric("Sharpe Ratio", "N/A" if sharpe is None else f"{sharpe:.2f}")
+            c7.metric("Win Rate", "N/A" if win_rate is None else f"{win_rate * 100:.1f}%")
+            c8.metric("Profit Factor", "∞" if profit_factor == float("inf") else ("N/A" if profit_factor is None else f"{profit_factor:.2f}"))
+
+            c9, c10, c11 = st.columns(3)
+            c9.metric("Volatility", "N/A" if volatility is None else f"{volatility * 100:.2f}%")
+            c10.metric("Avg Closed Trade", "N/A" if avg_trade is None else f"${avg_trade:,.2f}")
+            c11.metric("Closed Trades", f"{closed_trades}")
+        else:
+            st.info("Not enough portfolio history yet to compute total performance stats.")
 
         st.write("**External flow summary:**")
         st.dataframe(df[["date", "external_flow", "cum_external_flow", "total_deposited", "pnl_value"]].tail(10))
