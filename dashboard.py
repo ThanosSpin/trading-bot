@@ -383,7 +383,7 @@ try:
         bp_label = "💪 Buying Power (Cash Fallback)"
 
     k1, k2, k3 = st.columns(3)
-    k1.metric("💼 Total Equity", f"${total_equity:,.2f}")
+    k1.metric("💼 Broker Equity", f"${total_equity:,.2f}")
     k2.metric("💵 Cash Available", f"${total_cash:,.2f}")
     k3.metric(bp_label, f"${buying_power:,.2f}")
 
@@ -1519,7 +1519,7 @@ if os.path.exists(portfolio_path):
                 closed_trades = 0
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Equity", f"${end_equity:,.2f}")
+            c1.metric("Strategy Equity", f"${end_equity:,.2f}")
             c2.metric("Total PnL", f"${total_pnl:,.2f}")
             c3.metric("Total Return", f"{total_return * 100:.2f}%")
             c4.metric(annual_label, f"{annual_return * 100:.2f}%")
@@ -1534,24 +1534,40 @@ if os.path.exists(portfolio_path):
             c9.metric("Volatility", "N/A" if volatility is None else f"{volatility * 100:.2f}%")
             c10.metric("Avg Closed Trade", "N/A" if avg_trade is None else f"${avg_trade:,.2f}")
             c11.metric("Closed Trades", f"{closed_trades}")
+
+            
+            broker_equity = None
+            try:
+                broker_equity = float(account_cache.get_account().get("equity", 0.0) or 0.0)
+            except Exception:
+                broker_equity = None
+
+            if broker_equity is not None:
+                st.caption(
+                    f"Broker Equity = ${broker_equity:,.2f} | "
+                    f"Strategy Equity = ${end_equity:,.2f} | "
+                    "Strategy Equity is calculated from the local daily portfolio file."
+                )
+
         else:
             st.info("Not enough portfolio history yet to compute total performance stats.")
+
 
         st.write("**External flow summary:**")
         st.dataframe(df[["date", "external_flow", "cum_external_flow", "total_deposited", "pnl_value"]].tail(10))
 
         fig_eq = go.Figure()
         fig_eq.add_trace(go.Scatter(
-            x=df["date"],
-            y=df["total_equity"],
-            mode="lines",
-            name="Total Equity (with deposits)",
-            line=dict(width=2, color="#636efa"),
-            hovertemplate=(
-                "<b>Total Equity</b><br>"
-                "Date: %{x|%Y-%m-%d}<br>"
-                "Value: $%{y:,.2f}"
-                "<extra></extra>"
+                x=df["date"],
+                y=df["total_equity"],
+                mode="lines",
+                name="Strategy Equity",
+                line=dict(width=2, color="#636efa"),
+                hovertemplate=(
+                    "<b>Strategy Equity</b><br>"
+                    "Date: %{x|%Y-%m-%d}<br>"
+                    "Value: $%{y:,.2f}"
+                    "<extra></extra>"
             ),
         ))
 
@@ -1607,9 +1623,9 @@ if os.path.exists(portfolio_path):
                 ))
 
         fig_eq.update_layout(
-            title="💼 Total Account Equity (includes deposits/withdrawals)",
+            title="💼 Strategy Equity (local portfolio file; includes deposits/withdrawals)",
             xaxis_title="Date",
-            yaxis_title="Total Equity ($)",
+            yaxis_title="Strategy Equity ($)",
             hovermode="x unified",
             template="plotly_white",
             height=420,
