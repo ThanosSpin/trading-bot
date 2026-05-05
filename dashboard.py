@@ -1543,11 +1543,16 @@ if os.path.exists(portfolio_path):
                 broker_equity = None
 
             if broker_equity is not None:
-                st.caption(
-                    f"Broker Equity = ${broker_equity:,.2f} | "
-                    f"Strategy Equity = ${end_equity:,.2f} | "
-                    "Strategy Equity is calculated from the local daily portfolio file."
-                )
+                st.markdown(
+                f"""
+                <div style="font-size: 0.85rem; color: var(--text-muted, rgba(255,255,255,0.65)); line-height: 1.5; margin-top: 0.25rem;">
+                    <strong>Broker Equity:</strong> ${broker_equity:,.2f}<br>
+                    <strong>Strategy Equity:</strong> ${end_equity:,.2f}<br>
+                    Strategy Equity is calculated from the local daily portfolio file.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )   
 
         else:
             st.info("Not enough portfolio history yet to compute total performance stats.")
