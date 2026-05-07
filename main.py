@@ -1,6 +1,7 @@
 # main.py
 #!/usr/bin/env python
 import time
+
 from predictive_model.data_loader import fetch_historical_data, fetch_latest_price
 from market import is_market_open, debug_market
 from predictive_model.model_xgb import compute_signals
@@ -20,7 +21,8 @@ from config.config import (
 from market import is_market_open, is_trading_day
 import os, csv
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
+import pytz
 
 
 
@@ -298,7 +300,66 @@ def print_signal_diagnostics(decisions, diagnostics):
         
         print(f"  {sym:<5} D={fmt(dp)} I={fmt(ip)} Δ={div} W={fmt(w):>5} → F={fmt(fp)} | q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} | regime={sig.get('intraday_regime')} | model={model_used} | {action}")
 
+# ===============================================================
+# Close-time de-risk
+# ===============================================================
+NY_TZ = pytz.timezone("America/New_York")
 
+def apply_close_time_derisk(decisions, diagnostics, pdt_status):
+    now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+    close_cutoff = dtime(15, 30)
+    hard_close = dtime(15, 50)
+
+    if now_ny.time() < close_cutoff:
+        return decisions
+
+    remaining_trades = None
+    try:
+        remaining_trades = int((pdt_status or {}).get("remaining", 0) or 0)
+    except Exception:
+        remaining_trades = 0
+
+    for sym, d in list(decisions.items()):
+        if d.get("action") not in ("buy", "hold"):
+            continue
+
+        diag = diagnostics.get(sym, {}) or {}
+        final_prob = diag.get("final_prob")
+        daily_prob = diag.get("daily_prob")
+
+        pm = PortfolioManager(sym)
+        pm.refresh_live()
+        shares = float(pm.data.get("shares", 0.0) or 0.0)
+        avg_price = float(pm.data.get("avg_price", 0.0) or 0.0)
+        last_price = float(fetch_latest_price(sym) or 0.0)
+
+        if shares <= 0 or avg_price <= 0 or last_price <= 0:
+            continue
+
+        unrealized_pct = (last_price - avg_price) / avg_price
+        strong_signal = (
+            final_prob is not None and final_prob >= 0.60 and
+            (daily_prob is None or daily_prob >= 0.55)
+        )
+
+        if remaining_trades <= 0:
+            continue
+
+        should_derisk = unrealized_pct >= 0.05 and not strong_signal
+        if now_ny.time() >= hard_close:
+            should_derisk = should_derisk or unrealized_pct >= 0.03
+
+        if should_derisk:
+            qty = max(1, int(shares * 0.5))
+            decisions[sym] = {
+                "action": "sell",
+                "qty": qty,
+                "explain": f"Close-time de-risk: up {unrealized_pct:.1%}, PDT remaining={remaining_trades}",
+                "priority_rank": 0,
+            }
+            print(f"🕒 CLOSE-TIME DE-RISK OVERRIDE: {sym} -> SELL {qty} | PDT remaining={remaining_trades}")
+
+    return decisions
 
 # ===============================================================
 # Execute decisions (clean & safe)
@@ -560,6 +621,7 @@ def process_all_symbols(symbols):
 
     # 🚨 EMERGENCY SELLS (highest priority)
     pdt_status = get_pdt_status()
+    decisions = apply_close_time_derisk(decisions, diagnostics, pdt_status)
     for sym in core_symbols:
         sig_prob = predictions.get(sym)
         if sig_prob and sig_prob < PDT_EMERGENCY_PROB_THRESH:
