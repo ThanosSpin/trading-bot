@@ -3,7 +3,7 @@
 import time
 
 from predictive_model.data_loader import fetch_historical_data, fetch_latest_price
-from market import is_market_open, debug_market
+from market import is_market_open, debug_market, is_trading_day
 from predictive_model.model_xgb import compute_signals
 from strategy import compute_strategy_decisions
 from portfolio import PortfolioManager
@@ -18,7 +18,7 @@ from config.config import (
     PAPER_TRADE_SYMBOLS, USE_LIVE_TRADING, PAPER_TRADE_NOTES,
     PDT_EMERGENCY_PROB_THRESH
 )
-from market import is_market_open, is_trading_day
+
 import os, csv
 import pandas as pd
 from datetime import datetime, timezone, time as dtime
@@ -342,7 +342,8 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
             (daily_prob is None or daily_prob >= 0.55)
         )
 
-        if remaining_trades <= 0:
+        pdt_safe = remaining_trades > 0
+        if not pdt_safe and now_ny.time() < hard_close:
             continue
 
         should_derisk = unrealized_pct >= 0.05 and not strong_signal
