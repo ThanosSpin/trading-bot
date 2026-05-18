@@ -631,12 +631,6 @@ def process_all_symbols(symbols):
         predictions,
         symbols=symbols_for_strategy,
         diagnostics=diagnostics,
-        session_state={
-            "buys": set(),
-            "sells": set(),
-            "flattened": set(),
-            "buy_times": {},
-        },
     )
 
     # 🚨 EMERGENCY SELLS (highest priority)
