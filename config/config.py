@@ -44,6 +44,10 @@ SELL_THRESHOLD = 0.45   # require stronger confidence to sell
 PYRAMID_THRESHOLD = 0.65 
 AAPL_BUY_THRESHOLD = 0.60   # Higher bar for AAPL until win rate recovers (normal BUY_THRESHOLD = 0.55)
 
+# --- Rebuying thresholds ---
+REBUY_THRESHOLD = BUY_THRESHOLD + 0.06
+REBUY_COOLDOWN_MINUTES = 45
+ALLOW_SAME_DAY_REBUY = True
 
 # --------------------
 # Model blending weights

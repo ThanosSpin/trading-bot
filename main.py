@@ -5,7 +5,13 @@ import time
 from predictive_model.data_loader import fetch_historical_data, fetch_latest_price
 from market import is_market_open, debug_market, is_trading_day
 from predictive_model.model_xgb import compute_signals
-from strategy import compute_strategy_decisions
+from strategy import (
+    compute_strategy_decisions,
+    reset_session_state,
+    mark_session_buy,
+    mark_session_sell,
+    mark_session_flattened,
+)
 from portfolio import PortfolioManager
 from trader import execute_trade, get_pdt_status
 from strategy import apply_position_limits
@@ -358,6 +364,7 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
                 "explain": f"Close-time de-risk: up {unrealized_pct:.1%}, PDT remaining={remaining_trades}",
                 "priority_rank": 0,
             }
+            mark_session_flattened(sym)
             print(f"🕒 CLOSE-TIME DE-RISK OVERRIDE: {sym} -> SELL {qty} | PDT remaining={remaining_trades}")
 
     return decisions
@@ -458,6 +465,7 @@ def execute_decisions(decisions):
         pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
         pm._apply("sell", filled_price, filled_qty, account_cash=account_cash)
+        mark_session_sell(sym)
         print(f"Updated Snapshot (cash + {sym} position): ${pm.value():.2f}")
 
     
@@ -553,6 +561,7 @@ def execute_decisions(decisions):
         pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
         pm._apply("buy", filled_price, filled_qty, account_cash=account_cash)
+        mark_session_buy(sym)
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
         
@@ -618,7 +627,17 @@ def process_all_symbols(symbols):
     # Step 2: Strategy logic
     # ----------------------------
     symbols_for_strategy = list(predictions.keys())
-    decisions = compute_strategy_decisions(predictions, symbols=symbols_for_strategy, diagnostics=diagnostics)
+    decisions = compute_strategy_decisions(
+        predictions,
+        symbols=symbols_for_strategy,
+        diagnostics=diagnostics,
+        session_state={
+            "buys": set(),
+            "sells": set(),
+            "flattened": set(),
+            "buy_times": {},
+        },
+    )
 
     # 🚨 EMERGENCY SELLS (highest priority)
     pdt_status = get_pdt_status()
@@ -855,9 +874,11 @@ def verify_trading_config():
 def main():
     
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
-    verify_trading_config() 
+    verify_trading_config()
 
- # Wait for confirmation if live trading
+    reset_session_state()
+
+    # Wait for confirmation if live trading
     if USE_LIVE_TRADING:
         print("⚠️  Starting LIVE trading in 5 seconds...")
         print("   Press Ctrl+C to abort")
@@ -870,10 +891,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display
