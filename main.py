@@ -17,7 +17,7 @@ from trader import execute_trade, get_pdt_status
 from strategy import apply_position_limits
 from predictive_model.model_monitor import get_monitor, evaluate_predictions, log_prediction
 from account_cache import account_cache
-from config.config import (
+from config import (
     SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE,
