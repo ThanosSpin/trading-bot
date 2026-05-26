@@ -22,3 +22,6 @@ models/
 
 # Optional generated plots
 shap_*.png
+
+# Shell files
+*.sh
