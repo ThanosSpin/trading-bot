@@ -1,5 +1,5 @@
-from data_loader import fetch_latest_price
-from model_xgb import compute_signals
+from predictive_model.data_loader import fetch_latest_price
+from predictive_model.model_xgb import compute_signals
 from strategy import compute_strategy_decisions
 
 # Get current PLTR signal
