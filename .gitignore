@@ -1,11 +1,24 @@
-# Ignore Python environment files
+# Python
 __pycache__/
 *.pyc
 .env
 
-# VS Code settings (optional)
+# Editors
 .vscode/
 
-# Model and log files
-models/
+# Virtual env
+venv/
+
+# Generated runtime data
+data/
+data_cache/
+predictive_model/data_cache/
 logs/
+logs_paper/
+models/
+
+# Logs
+*.log
+
+# Optional generated plots
+shap_*.png
