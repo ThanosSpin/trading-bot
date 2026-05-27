@@ -22,9 +22,10 @@ from config import (
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE,
     PAPER_TRADE_SYMBOLS, USE_LIVE_TRADING, PAPER_TRADE_NOTES,
-    PDT_EMERGENCY_PROB_THRESH
+    PDT_EMERGENCY_PROB_THRESH,ENV_NAME
 )
 
+from config import BASE_URL as CONFIG_BASE_URL
 import os, csv
 import pandas as pd
 from datetime import datetime, timezone, time as dtime
@@ -41,6 +42,40 @@ BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
 
+# ===============================================================
+# ✅ Helper Function
+# ===============================================================
+def verify_runtime_environment():
+    bot_env = os.getenv("BOT_ENV", "live").lower()
+    base_url = globals().get("CONFIG_BASE_URL", None)
+
+    print("=" * 70)
+    print("RUNTIME ENVIRONMENT CHECK")
+    print("=" * 70)
+    print(f"BOT_ENV={bot_env}")
+    try:
+        from config import ENV_NAME
+    except ImportError:
+        ENV_NAME = "unknown"
+
+    print(f"ENV_NAME={ENV_NAME}")
+    print(f"USE_LIVE_TRADING={USE_LIVE_TRADING}")
+    print(f"BASE_URL={base_url}")
+    print("=" * 70)
+
+    if bot_env == "paper":
+        if ENV_NAME != "paper":
+            raise RuntimeError(f"BOT_ENV=paper but ENV_NAME={ENV_NAME}")
+        if not base_url or "paper-api.alpaca.markets" not in base_url:
+            raise RuntimeError(f"BOT_ENV=paper but BASE_URL is not paper: {base_url}")
+
+    if bot_env == "live":
+        if ENV_NAME != "live":
+            raise RuntimeError(f"BOT_ENV=live but ENV_NAME={ENV_NAME}")
+        if not USE_LIVE_TRADING:
+            raise RuntimeError("BOT_ENV=live but USE_LIVE_TRADING=False")
+        if not base_url or "api.alpaca.markets" not in base_url:
+            raise RuntimeError(f"BOT_ENV=live but BASE_URL is not live: {base_url}")
 
 
 # ===============================================================
@@ -866,17 +901,22 @@ def verify_trading_config():
 # Entry Point
 # ===============================================================
 def main():
-    
+    verify_runtime_environment()
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
     verify_trading_config()
 
     reset_session_state()
 
     # Wait for confirmation if live trading
-    if USE_LIVE_TRADING:
+    if USE_LIVE_TRADING and ENV_NAME == "live":
         print("⚠️  Starting LIVE trading in 5 seconds...")
         print("   Press Ctrl+C to abort")
         time.sleep(5)
+    elif USE_LIVE_TRADING and ENV_NAME == "paper":
+        print("🧪 Starting PAPER order execution in 3 seconds...")
+        print("   Orders will be sent to Alpaca paper account")
+        time.sleep(3)
+
     
     print("🚀 Trading bot started\n")
 
@@ -885,10 +925,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display

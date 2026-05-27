@@ -29,22 +29,47 @@ if not (API_MARKET_KEY and API_MARKET_SECRET and MARKET_BASE_URL):
 # --------------------------
 # REST Clients
 # --------------------------
-api_general = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
-api_market = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')
+api_general = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
+api_market = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version="v2")
+
+def get_trading_api():
+    bot_env = os.getenv("BOT_ENV", "live").lower()
+    return api_general if bot_env == "paper" else api_market
+
+def get_active_env():
+    return os.getenv("BOT_ENV", "live").lower()
 
 # --------------------------
 # Optional Test When Run Directly
 # --------------------------
 def test_connection():
-    """Manual test: returns True if Market API reachable."""
-    try:
-        account = api_market.get_account()
-        print(f"✅ Alpaca connection OK! Equity: ${account.equity}")
-        return True
-    except Exception as e:
-        print(f"❌ Alpaca connection failed: {e}")
-        return False
+    """Manual test: checks both clients and the active selected client."""
+    ok = True
 
+    try:
+        general_account = api_general.get_account()
+        print(f"✅ GENERAL connection OK | equity=${general_account.equity} | url={BASE_URL}")
+    except Exception as e:
+        ok = False
+        print(f"❌ GENERAL connection failed: {e}")
+
+    try:
+        market_account = api_market.get_account()
+        print(f"✅ MARKET connection OK | equity=${market_account.equity} | url={MARKET_BASE_URL}")
+    except Exception as e:
+        ok = False
+        print(f"❌ MARKET connection failed: {e}")
+
+    try:
+        active_env = get_active_env()
+        active_api = get_trading_api()
+        active_account = active_api.get_account()
+        print(f"🎯 ACTIVE client = {active_env.upper()} | equity=${active_account.equity}")
+    except Exception as e:
+        ok = False
+        print(f"❌ ACTIVE client check failed: {e}")
+
+    return ok
 
 if __name__ == "__main__":
-    test_connection()
+    raise SystemExit(0 if test_connection() else 1)

@@ -1,7 +1,7 @@
 # account_cache.py
 from typing import Optional, Dict
 from datetime import datetime, timedelta
-from broker import api_market
+from broker import get_trading_api
 
 class AccountCache:
     """Singleton cache for Alpaca account state to reduce API calls."""
@@ -29,8 +29,9 @@ class AccountCache:
         
         # Fetch fresh data
         try:
-            account = api_market.get_account()
-            positions = api_market.list_positions()
+            api = get_trading_api()
+            account = api.get_account()
+            positions = api.list_positions()
             
             self._cache = {
                 "account": account,

@@ -1,29 +1,25 @@
 # trader.py
 import time
-import alpaca_trade_api as tradeapi
 import pytz
 
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-from alpaca_client import api  # NOTE: you also re-init api below; keep one source if possible
+from broker import get_trading_api
 from pdt.pdt_guardrails import max_sell_allowed
 from pdt.pdt_tracker import add_opened_today, reduce_opened_today, get_opened_today_qty
 
-from config.config import (
-    API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL,
-    USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS
-)
+from config import USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS
 from market import is_market_open, is_trading_day
 from predictive_model.data_loader import fetch_latest_price
 from portfolio import PortfolioManager
 
 
-# Keep ONE api instance. If alpaca_client.api is already set, you don't need this.
-# But leaving it here is ok as long as you don't import trader.api from data_loader (circular).
-api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')
+
 UTC = pytz.UTC
 
+def _api():
+    return get_trading_api()
 
 # =====================================================================
 # PDT (Pattern Day Trading) Utilities
@@ -121,7 +117,7 @@ def is_buy_allowed_by_pdt(api_client, symbol, quantity):
 
 def get_pdt_status():
     try:
-        acct = api.get_account()
+        acct = _api().get_account()
         eq = float(acct.equity or 0)
         dt_api = int(acct.daytrade_count or 0)
 
@@ -144,7 +140,7 @@ def get_pdt_status():
 def _get_live_price(symbol):
     symU = str(symbol).upper().strip()
     try:
-        latest_trade = api.get_latest_trade(symU)
+        latest_trade = _api().get_latest_trade(symU)
         px = float(getattr(latest_trade, "price", 0) or 0)
         if px > 0:
             return px
@@ -273,19 +269,18 @@ def execute_trade(action, quantity, symbol, decision=None):
     # LIVE TRADING (only if not in PAPER_TRADE_SYMBOLS)
     # -------------------------------------------------------
     try:
-        acct = api.get_account()
+        client = _api()
+        acct = client.get_account()
         pdt_status = get_pdt_status()
 
-        # Optional: if Alpaca says trading is blocked, fail fast
         if pdt_status and pdt_status.get("trading_blocked"):
             print("[WARN] Account trading_blocked=true — skipping order.")
             return 0.0, None
-        
 
         allowed_qty = quantity
 
         if action == "buy":
-            if not is_buy_allowed_by_pdt(api, symU, quantity):
+            if not is_buy_allowed_by_pdt(client, symU, quantity):
                 return 0.0, None
 
             price = _get_live_price(symU)
@@ -300,13 +295,10 @@ def execute_trade(action, quantity, symbol, decision=None):
 
         elif action == "sell":
             emergency = bool((decision or {}).get("pdt_emergency", False))
-
-            # Backward compatible: if your max_sell_allowed() doesn't accept emergency yet,
-            # fall back to the old signature.
             try:
-                allowed_qty = max_sell_allowed(api, symU, quantity, pdt_status, emergency=emergency)
+                allowed_qty = max_sell_allowed(client, symU, quantity, pdt_status, emergency=emergency)
             except TypeError:
-                allowed_qty = max_sell_allowed(api, symU, quantity, pdt_status)
+                allowed_qty = max_sell_allowed(client, symU, quantity, pdt_status)
 
             if allowed_qty <= 0:
                 print(f"[INFO] SELL suppressed by PDT guardrail → {symU}")
@@ -318,7 +310,7 @@ def execute_trade(action, quantity, symbol, decision=None):
 
         quantity = float(allowed_qty)
 
-        order = api.submit_order(
+        order = client.submit_order(
             symbol=symU,
             qty=quantity,
             side=action,
@@ -328,7 +320,7 @@ def execute_trade(action, quantity, symbol, decision=None):
         print(f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})")
 
         time.sleep(2)
-        result = api.get_order(order.id)
+        result = client.get_order(order.id)
 
         filled_qty = float(getattr(result, "filled_qty", 0) or 0)
         filled_price = float(getattr(result, "filled_avg_price", 0) or 0)

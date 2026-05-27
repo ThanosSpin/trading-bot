@@ -7,7 +7,7 @@ from datetime import datetime
 import pytz
 
 from config.config import PORTFOLIO_PATH, TIMEZONE
-from broker import api_market
+from broker import get_trading_api
 from account_cache import account_cache
 
 
@@ -395,7 +395,8 @@ def detect_capital_change(save_path="data/deposits_auto.csv", min_change=50):
     # 1. Fetch Alpaca equity history
     # ------------------------------
     try:
-        hist = api_market.get_portfolio_history(period="1A", timeframe="1D")
+        api = get_trading_api()
+        hist = api.get_portfolio_history(period="1A", timeframe="1D")
         equity = pd.Series(hist.equity, index=pd.to_datetime(hist.timestamp, unit='s'))
         equity = equity.sort_index()
     except Exception as e:
