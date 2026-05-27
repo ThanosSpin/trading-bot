@@ -19,6 +19,7 @@ models/
 
 # Logs
 *.log
+pdt_state.json
 
 # Optional generated plots
 shap_*.png
