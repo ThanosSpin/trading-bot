@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional
 import pandas as pd
 import pytz
-from datetime import datetime as _dt
+from datetime import datetime as _dt, timezone
 from config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
@@ -27,6 +27,7 @@ _session_state: dict = {
     "sells": set(),      # symbols sold at least once today
     "flattened": set(),  # symbols force-flattened near close today
     "buy_times": {},     # sym -> datetime of last buy (UTC)
+    "sell_times": {},
 }
 
 def reset_session_state():
@@ -35,16 +36,19 @@ def reset_session_state():
     _session_state["sells"].clear()
     _session_state["flattened"].clear()
     _session_state["buy_times"].clear()
+    _session_state["sell_times"].clear()
     print("[SESSION] Session state reset for new trading day.")
 
 def mark_session_buy(sym: str):
     sym = sym.upper()
     _session_state["buys"].add(sym)
-    from datetime import datetime, timezone
-    _session_state["buy_times"][sym] = datetime.now(timezone.utc)
+    _session_state["buy_times"][sym] = _dt.now(timezone.utc)
 
 def mark_session_sell(sym: str):
-    _session_state["sells"].add(sym.upper())
+    sym = sym.upper()
+    _session_state["sells"].add(sym)
+
+    _session_state["sell_times"][sym] = _dt.now(timezone.utc)
 
 def mark_session_flattened(sym: str):
     _session_state["flattened"].add(sym.upper())
@@ -65,28 +69,34 @@ def _rebuy_allowed(sym: str, prob_up: float) -> tuple:
     if sym not in _session_state["buys"]:
         return True, ""  # Never bought today - normal first entry
 
-    if prob_up < REBUY_THRESHOLD:
+    if sym == "PLTR":
+        required_prob = max(REBUY_THRESHOLD, BUY_THRESHOLD + 0.10)
+    else:
+        required_prob = REBUY_THRESHOLD
+
+    if prob_up < required_prob:
         return False, (
             f"{sym}: same-day rebuy blocked - prob={prob_up:.3f} < "
-            f"REBUY_THRESHOLD={REBUY_THRESHOLD:.3f}."
+            f"required_rebuy_threshold={required_prob:.3f}."
         )
 
-    last_buy_time = _session_state["buy_times"].get(sym)
-    if last_buy_time is not None:
-        from datetime import datetime, timezone
-        elapsed_min = (datetime.now(timezone.utc) - last_buy_time).total_seconds() / 60
+
+    last_sell_time = _session_state["sell_times"].get(sym)
+    if last_sell_time is not None:
+        elapsed_min = (_dt.now(timezone.utc) - last_sell_time).total_seconds() / 60
         if elapsed_min < REBUY_COOLDOWN_MINUTES:
             remaining = REBUY_COOLDOWN_MINUTES - elapsed_min
             return False, (
-                f"{sym}: same-day rebuy blocked - cooldown active "
-                f"({elapsed_min:.0f}min elapsed, need {REBUY_COOLDOWN_MINUTES}min, "
+                f"{sym}: same-day rebuy blocked - sell cooldown active "
+                f"({elapsed_min:.0f}min elapsed since sell, need {REBUY_COOLDOWN_MINUTES}min, "
                 f"{remaining:.0f}min remaining)."
             )
 
     return True, (
-        f"{sym}: same-day rebuy ALLOWED - "
-        f"prob={prob_up:.3f} >= REBUY_THRESHOLD={REBUY_THRESHOLD:.3f}."
-    )
+    f"{sym}: same-day rebuy ALLOWED - "
+    f"prob={prob_up:.3f} >= required_rebuy_threshold={required_prob:.3f}."
+)
+
 
 # ---------------------------------------------------------
 # Helper for afterhours_dip
@@ -354,14 +364,14 @@ def check_stop_tp(symbol, price, pm):
             f"{symbol}: STOP blocked by PDT tiering (opened_today={opened_today:g}, loss={loss:.2%})."
         )
 
-    # â”€â”€ Fix Dollar stop cap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Fix Dollar stop cap --------------------------------------------
     if MAX_LOSS_PER_TRADE is not None:
         unrealized_loss = (entry_price - price) * shares
         if unrealized_loss >= MAX_LOSS_PER_TRADE:
             return _pdt_tiered_sell(
                 f"{symbol}: DOLLAR-STOP hit - loss ${unrealized_loss:.2f} >= cap ${MAX_LOSS_PER_TRADE:.2f}"
             )
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ---------------------------------------------------------------------
 
     # 1) HARD STOP-LOSS
     if price <= entry_price * STOP_LOSS:
@@ -381,12 +391,12 @@ def check_stop_tp(symbol, price, pm):
                 )
             )
 
-    # fix: EOD exit - don't hold a losing position overnight â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # fix: EOD exit - don't hold a losing position overnight ---------
     try:
         _ny = pytz.timezone("America/New_York")
         _now_ny = _dt.now(_ny)
         _mins_to_close = (16 * 60) - (_now_ny.hour * 60 + _now_ny.minute)
-        _is_near_close = 0 <= _mins_to_close <= 30   # last 30min: 3:30â€“4:00 PM ET
+        _is_near_close = 0 <= _mins_to_close <= 30   # last 30min: 3:30-4:00 PM ET
 
         if _is_near_close and price < entry_price * 0.99:
             return _pdt_tiered_sell(
@@ -395,7 +405,7 @@ def check_stop_tp(symbol, price, pm):
             )
     except Exception:
         pass
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ---------------------------------------------------------------------
 
     return None
 
@@ -438,7 +448,7 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
 
     effective_buy_threshold = AAPL_BUY_THRESHOLD if symbol == "AAPL" else BUY_THRESHOLD
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ---------------------------------------------------------------------
 
     explain = (
         f"{symbol}: prob_up={prob_up:.3f} "
@@ -448,17 +458,17 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
     # If already in a position, don't pyramid by default (prevents confusing "BUY but no cash")
     if shares > 0 and prob_up >= BUY_THRESHOLD:
-        # â”€â”€ Guard 2: block averaging down into a losing position â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # -- Guard 2: block averaging down into a losing position ----------
         avg_cost = float(pm.data.get("avg_price", 0.0))
         if avg_cost > 0 and price < avg_cost:
             unrealized_pct = (price - avg_cost) / avg_cost
             if unrealized_pct < -0.01:
-                # â”€â”€ Fix: check stop-loss FIRST before blocking the add â”€â”€â”€â”€
+                # -- Fix: check stop-loss FIRST before blocking the add ----
                 from strategy import check_stop_tp
                 stop_decision = check_stop_tp(symbol, price, pm)
                 if stop_decision is not None:
                     return stop_decision   # stop-loss overrides averaging-down guard
-                # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # ---------------------------------------------------------
                 return make_decision(
                     "hold", 0,
                     explain + f"HOLD - averaging-down blocked "
@@ -466,7 +476,7 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                               f"drawdown={unrealized_pct:.1%})."
                 )
 
-        # â”€â”€ Guard 2b: don't chase - block pyramid if already up >2% from entry â”€â”€
+        # -- Guard 2b: don't chase - block pyramid if already up >2% from entry --
         avg_cost = float(pm.data.get("avg_price", 0.0))
         if avg_cost > 0 and price > avg_cost:
             run_up_pct = (price - avg_cost) / avg_cost
@@ -476,7 +486,7 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                     explain + f"HOLD - pyramid blocked, already up {run_up_pct:.1%} "
                               f"from entry ${avg_cost:.2f} (chasing prevention)."
                 )
-        # â”€â”€ Guard 2c: block pyramid if SPY is declining â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # -- Guard 2c: block pyramid if SPY is declining -------------------
         try:
             spy_df = fetch_historical_data("SPY", period="5d", interval="15m")
             if spy_df is not None and len(spy_df) >= 4:
@@ -493,7 +503,7 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         except Exception:
             pass
 
-        # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # -----------------------------------------------------------------
         if prob_up < PYRAMID_THRESHOLD:
             return make_decision(
                 "hold", 0,
@@ -541,14 +551,13 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
 
 
-    # â”€â”€ Guard 3: minimum hold time before signal-based sell â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    #  Guard 3: minimum hold time before signal-based sell --------------
     if prob_up <= SELL_THRESHOLD and shares > 0:
         entry_ts = pm.data.get("entry_time")
         if entry_ts:
             try:
-                from datetime import datetime
-                entry_dt = datetime.fromisoformat(entry_ts)
-                held_min = (datetime.utcnow() - entry_dt).total_seconds() / 60
+                entry_dt = _dt.fromisoformat(entry_ts)
+                held_min = (_dt.utcnow() - entry_dt).total_seconds() / 60
                 if held_min < 15:
                     return make_decision(
                         "hold", 0,
@@ -559,9 +568,19 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                 pass
     
     # SELL
-    if prob_up <= SELL_THRESHOLD:
-        if shares > 0:
-            return make_decision("sell", int(shares), explain + "SELL. Clearing position.")
+    if prob_up <= SELL_THRESHOLD and shares > 0:
+        entry_ts = pm.data.get("entry_time")
+        if entry_ts:
+            try:
+                entry_dt = _dt.fromisoformat(entry_ts)
+                held_min = (_dt.utcnow() - entry_dt).total_seconds() / 60
+                if held_min < 45:
+                    return make_decision(
+                        "hold", 0,
+                        explain + f"SELL deferred - held only {held_min:.0f}min (min=45min)."
+                    )
+            except Exception:
+                pass
         else:
             return make_decision("hold", 0, explain + "SELL signal but no position.")
 
@@ -676,9 +695,8 @@ def compute_strategy_decisions(
     # ---------------------------------------------------------
     diagnostics = diagnostics or {}
 
-    # â”€â”€ Fix 4: reduce intraday weight in first 30min after open â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Fix 4: reduce intraday weight in first 30min after open ----------
     import pytz
-    from datetime import datetime as _dt
     _ny = pytz.timezone("America/New_York")
     _now_ny = _dt.now(_ny)
     _market_open_min = (_now_ny.hour * 60 + _now_ny.minute) - (9 * 60 + 30)
@@ -693,7 +711,7 @@ def compute_strategy_decisions(
                     d["intraday_weight"] = min(float(d["intraday_weight"]), 0.30)
                 except Exception:
                     pass
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ---------------------------------------------------------------------
 
     def _diag(sym: str) -> dict:
         return diagnostics.get(sym.upper()) or {}
@@ -835,7 +853,7 @@ def compute_strategy_decisions(
             print(f"[DEBUG _is_buy] {sym} BLOCKED: overbought guard")        # ðŸ†•
             return False
 
-        # â”€â”€ NEW: don't chase - block if intraday momentum is already extended â”€â”€
+        # -- NEW: don't chase - block if intraday momentum is already extended --
         d = _diag(sym)
         mom = d.get("intraday_mom")
         try:
