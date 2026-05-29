@@ -162,8 +162,14 @@ def train_intraday_models(sym: str):
             print_model_summary(artifact, sym, mode)
 
         except ValueError as e:
-            if "Insufficient class diversity" in str(e) or "not enough filtered data" in str(e):
-                print(f"⚠️ Skipped {sym}/{mode}: insufficient filtered data")
+            msg = str(e)
+            if (
+                "Insufficient class diversity" in msg
+                or "not enough filtered data" in msg
+                or "Not enough rows for robust train/cal/test split" in msg
+            ):
+                print(f"⚠️ Skipped {sym}/{mode}: {msg}")
+                continue
             else:
                 print(f"[ERROR] Failed to train {mode} for {sym}: {e}")
                 import traceback

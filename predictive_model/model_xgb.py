@@ -63,14 +63,23 @@ def _clean_feature_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    for col in df.columns:
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ["_".join([str(x) for x in col if str(x) != ""]).strip("_") for col in df.columns]
+
+    df = df.loc[:, ~df.columns.astype(str).str.match(r"^Unnamed")]
+
+    for col in list(df.columns):
         if isinstance(df[col], pd.DataFrame):
             df[col] = df[col].iloc[:, 0]
-        if hasattr(df[col], "values") and df[col].values.ndim > 1:
-            if df[col].values.shape[0] == len(df):
-                df[col] = pd.Series(df[col].values[:, 0], index=df.index)
+
+        if hasattr(df[col], "values") and getattr(df[col].values, "ndim", 1) > 1:
+            vals = df[col].values
+            if vals.shape[0] == len(df):
+                df[col] = pd.Series(vals[:, 0], index=df.index)
+
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    df = df.dropna(axis=1, how="all")
     return df
 
 
@@ -132,6 +141,9 @@ def _time_ordered_train_cal_test_split(
     train_frac: float = 0.70,
     cal_frac: float = 0.10,
 ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    if len(X) != len(y):
+        raise ValueError("X and y must have the same length")
+
     n = len(X)
     if n < 100:
         raise ValueError(f"Not enough rows for robust train/cal/test split: n={n}")
@@ -144,12 +156,13 @@ def _time_ordered_train_cal_test_split(
 
     X_train = X.iloc[:train_end].copy()
     y_train = y.iloc[:train_end].copy()
-
     X_cal = X.iloc[train_end:cal_end].copy()
     y_cal = y.iloc[train_end:cal_end].copy()
-
     X_test = X.iloc[cal_end:].copy()
     y_test = y.iloc[cal_end:].copy()
+
+    if len(X_cal) == 0 or len(X_test) == 0:
+        raise ValueError("Calibration or test split is empty")
 
     return X_train, y_train, X_cal, y_cal, X_test, y_test
 
@@ -159,6 +172,9 @@ def _build_thresholded_binary_target(df_feat: pd.DataFrame, mode: str) -> pd.Dat
     Binary target with a no-trade band to reduce micro-noise labels.
     """
     df_feat = df_feat.copy()
+    if "Close" not in df_feat.columns:
+        raise ValueError("Close column is required for target creation")
+
     next_ret = df_feat["Close"].shift(-1) / df_feat["Close"] - 1.0
     min_move = 0.002 if mode == "daily" else 0.0008
 
@@ -167,7 +183,7 @@ def _build_thresholded_binary_target(df_feat: pd.DataFrame, mode: str) -> pd.Dat
         1,
         np.where(next_ret < -min_move, 0, np.nan),
     )
-    df_feat = df_feat.dropna(subset=["target"])
+    df_feat = df_feat.dropna(subset=["target"]).copy()
     df_feat["target"] = df_feat["target"].astype(int)
     return df_feat
 
@@ -275,14 +291,9 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
 
     df = df.copy()
 
+    df = df.copy()
+
     print(f"\n[FEATURES] Building engineered features for {symbol}/{mode}...")
-    if mode == "daily":
-        df = build_daily_features(df)
-    else:
-        df = build_intraday_features(df)
-
-    print(f"[FEATURES] Built {len(df.columns)} total columns after feature engineering")
-
     if mode == "daily":
         df_feat = build_daily_features(df)
     elif mode in ("intraday", "intraday_mr", "intraday_mom"):
@@ -291,9 +302,11 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
             df_feat = _filter_intraday_rows_by_mode(df_feat, mode=mode)
         for c in ["ret_12", "mom_12_abs", "vol_12"]:
             if c in df_feat.columns:
-                df_feat.drop(columns=c, inplace=True)
+                df_feat = df_feat.drop(columns=[c])
     else:
         raise ValueError("mode must be 'daily' or one of 'intraday', 'intraday_mr', 'intraday_mom'")
+
+    print(f"[FEATURES] Built {len(df_feat.columns)} total columns after feature engineering")
 
     print("\n[CLEANUP] Cleaning DataFrame columns...")
     df_feat = _clean_feature_dataframe(df_feat)
