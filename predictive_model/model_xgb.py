@@ -791,11 +791,17 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
             "model_type": target_type,
         }
 
+    except ValueError as e:
+        msg = str(e)
+        if "Feature schema mismatch" in msg:
+            print(f"[WARN] predict_from_model skipped incompatible artifact: {msg}")
+            return None
+        print(f"[ERROR] predict_from_model: {e}")
+        return None
     except Exception as e:
         print(f"[ERROR] predict_from_model: {e}")
         traceback.print_exc()
         return None
-
 
 # ---------------------------------------------------------
 # HELPER: Extract final probability
@@ -1108,30 +1114,33 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                     VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
                 print(f"[CONFIG] {symU} using config: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
 
-            active_model = None
-            model_used = None
+            candidate_models = []
+
             if vol is not None and mom1h is not None:
                 if abs(mom1h) >= MOMTRIG or vol >= VOLTRIG:
-                    active_model = model_intra_mom
                     results["intraday_regime"] = "mom"
-                    model_used = "intraday_mom"
+                    candidate_models = [
+                        ("intraday_mom", model_intra_mom),
+                        ("intraday_mr", model_intra_mr),
+                        ("intraday", model_intraday_legacy),
+                    ]
                 else:
-                    active_model = model_intra_mr
                     results["intraday_regime"] = "mr"
-                    model_used = "intraday_mr"
+                    candidate_models = [
+                        ("intraday_mr", model_intra_mr),
+                        ("intraday_mom", model_intra_mom),
+                        ("intraday", model_intraday_legacy),
+                    ]
+            else:
+                candidate_models = [
+                    ("intraday_mom", model_intra_mom),
+                    ("intraday_mr", model_intra_mr),
+                    ("intraday", model_intraday_legacy),
+                ]
 
-            if active_model is None:
-                if model_intra_mom is not None:
-                    active_model = model_intra_mom
-                    model_used = "intraday_mom"
-                elif model_intra_mr is not None:
-                    active_model = model_intra_mr
-                    model_used = "intraday_mr"
-                elif model_intraday_legacy is not None:
-                    active_model = model_intraday_legacy
-                    model_used = "intraday"
+            candidate_models = [(name, mdl) for name, mdl in candidate_models if mdl is not None]
 
-            if active_model is None:
+            if not candidate_models:
                 results["allow_intraday"] = False
                 results["intraday_prob"] = None
                 results["intraday_quality_score"] = 0.0
@@ -1142,7 +1151,26 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                     results["intraday_prob"] = None
                     results["intraday_quality_score"] = 0.0
                 else:
-                    intraday_prediction = predict_from_model(active_model, df_feat_intra)
+                    intraday_prediction = None
+                    model_used = None
+
+                    for cand_name, cand_model in candidate_models:
+                        try:
+                            pred = predict_from_model(cand_model, df_feat_intra)
+                            if pred is not None:
+                                intraday_prediction = pred
+                                model_used = cand_name
+                                break
+                        except Exception as e:
+                            print(f"[WARN] Intraday fallback skipped {symU}/{cand_name}: {e}")
+                            continue
+
+                    if intraday_prediction is None:
+                        results["allow_intraday"] = False
+                        results["intraday_prob"] = None
+                        results["intraday_quality_score"] = 0.0
+                    else:
+                        results["intraday_model_used"] = model_used
                     results["intraday_prediction"] = intraday_prediction
                     results["intraday_model_used"] = model_used
                     results["intraday_signal"] = get_signal_details(intraday_prediction)
