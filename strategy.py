@@ -9,7 +9,10 @@ from config import (
     PDT_TIERING_ENABLED, PDT_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
     MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB,
     PYRAMID_THRESHOLD, MAX_LOSS_PER_TRADE, AAPL_BUY_THRESHOLD,
-    REBUY_THRESHOLD, REBUY_COOLDOWN_MINUTES, ALLOW_SAME_DAY_REBUY
+    REBUY_THRESHOLD, REBUY_COOLDOWN_MINUTES, ALLOW_SAME_DAY_REBUY,
+    USE_ARTIFACT_THRESHOLDS, ARTIFACT_THRESHOLD_FALLBACK,
+    MODEL_ENTRY_BUFFER, MODEL_EXIT_BUFFER, MODEL_REBUY_BUFFER, MODEL_PYRAMID_BUFFER,
+    SPY_USE_ARTIFACT_THRESHOLDS, SPY_MODEL_ENTRY_BUFFER, SPY_MODEL_EXIT_BUFFER
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
@@ -53,7 +56,7 @@ def mark_session_sell(sym: str):
 def mark_session_flattened(sym: str):
     _session_state["flattened"].add(sym.upper())
 
-def _rebuy_allowed(sym: str, prob_up: float) -> tuple:
+def _rebuy_allowed(sym: str, prob_up: float, diagnostics: Dict[str, dict] = None) -> tuple:
     """
     Returns (allowed: bool, reason: str).
     Called when shares=0 but symbol was already bought today.
@@ -68,11 +71,13 @@ def _rebuy_allowed(sym: str, prob_up: float) -> tuple:
 
     if sym not in _session_state["buys"]:
         return True, ""  # Never bought today - normal first entry
+    
+    required_prob = _effective_rebuy_threshold(sym, diagnostics)
 
     if sym == "PLTR":
-        required_prob = max(REBUY_THRESHOLD, BUY_THRESHOLD + 0.10)
+        required_prob = max(required_prob, _effective_buy_threshold(sym, diagnostics) + 0.04)
     else:
-        required_prob = REBUY_THRESHOLD
+        required_prob = _effective_rebuy_threshold(sym, diagnostics)
 
     if prob_up < required_prob:
         return False, (
@@ -176,15 +181,72 @@ def apply_position_limits(qty: int, price: float, cash: float, symbol: str) -> i
 # ---------------------------------------------------------
 # Helper to build clean decision dicts
 # ---------------------------------------------------------
+def _safe_float(x, default=None):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def _artifact_threshold_from_diag(sym: str, diagnostics: Dict[str, dict] = None) -> float:
+    d = (diagnostics or {}).get(sym.upper(), {}) or {}
+    thr = _safe_float(d.get("decision_threshold"), None)
+
+    if thr is not None:
+        return thr
+
+    if sym.upper() == "AAPL":
+        return float(AAPL_BUY_THRESHOLD)
+
+    return float(ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
+
+def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
+    sym = sym.upper()
+    if USE_ARTIFACT_THRESHOLDS:
+        base = _artifact_threshold_from_diag(sym, diagnostics)
+    else:
+        base = float(AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD)
+    return min(0.95, base + float(MODEL_ENTRY_BUFFER))
+
+def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
+    sym = sym.upper()
+    if USE_ARTIFACT_THRESHOLDS:
+        base = _artifact_threshold_from_diag(sym, diagnostics)
+        return max(0.05, base - float(MODEL_EXIT_BUFFER))
+    return float(SELL_THRESHOLD)
+
+def _effective_rebuy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
+    base_buy = _effective_buy_threshold(sym, diagnostics)
+    legacy = float(REBUY_THRESHOLD)
+    return max(legacy, min(0.98, base_buy + float(MODEL_REBUY_BUFFER)))
+
+def _effective_pyramid_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
+    base_buy = _effective_buy_threshold(sym, diagnostics)
+    legacy = float(PYRAMID_THRESHOLD)
+    return max(legacy, min(0.99, base_buy + float(MODEL_PYRAMID_BUFFER)))
+
+def _effective_spy_entry_threshold(diagnostics: Dict[str, dict] = None) -> float:
+    if not SPY_USE_ARTIFACT_THRESHOLDS:
+        return float(SPY_ENTRY_THRESHOLD)
+    base = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
+    return min(0.98, base + float(SPY_MODEL_ENTRY_BUFFER))
+
+def _effective_spy_exit_threshold(diagnostics: Dict[str, dict] = None) -> float:
+    if not SPY_USE_ARTIFACT_THRESHOLDS:
+        return float(SPY_EXIT_THRESHOLD)
+    base = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
+    return max(0.02, base - float(SPY_MODEL_EXIT_BUFFER))
+
+
 def make_decision(action: str, qty: int, explain: str, **meta):
     d = {"action": action, "qty": int(qty), "explain": explain.strip()}
     d.update(meta)  # allow flags like recalc_all_in=True
     return d
 
 
-def _core_buy_intent(preds: Dict[str, float], core_symbols: List[str]) -> List[str]:
+def _core_buy_intent(preds: Dict[str, float], core_symbols: List[str], diagnostics: Dict[str, dict] = None) -> List[str]:
     """Symbols that WANT to buy based on prob only (ignores cash/qty)."""
-    return [s for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD]
+    return [s for s in core_symbols if preds.get(s, 0.0) >= _effective_buy_threshold(s, diagnostics)]
+
 
 
 def _any_core_buy(decisions: Dict[str, dict], core_symbols: List[str]) -> bool:
@@ -414,9 +476,12 @@ def check_stop_tp(symbol, price, pm):
 # ---------------------------------------------------------
 # Per-symbol trading logic (baseline)
 # ---------------------------------------------------------
+# ---------------------------------------------------------
+# Per-symbol trading logic (baseline)
+# ---------------------------------------------------------
 def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
-                 concurrent_buys: int = 1, available_cash: float = None):
-
+                 concurrent_buys: int = 1, available_cash: float = None,
+                 diagnostics: Dict[str, dict] = None):
 
     pm = PortfolioManager(symbol)
     try:
@@ -424,21 +489,19 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
     except:
         pass
 
-
     shares = float(pm.data.get("shares", 0.0))
     cash = float(pm.data.get("cash", 0.0))
     price = fetch_latest_price(symbol)
 
-
     if price is None or price <= 0:
         return make_decision("hold", 0, f"{symbol}: no valid price.")
-
 
     if available_cash is not None:
         cash = float(available_cash)
 
-
+    # ---------------------------------------------------------
     # Allocation logic
+    # ---------------------------------------------------------
     if total_symbols == 1:
         max_invest = cash
     elif total_symbols == 2:
@@ -446,25 +509,41 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
     else:
         max_invest = cash * RISK_FRACTION
 
+    # ---------------------------------------------------------
+    # Effective thresholds
+    # Use model/artifact-aware thresholds so the printed message
+    # always matches the REAL thresholds used for the decision.
+    # ---------------------------------------------------------
+    effective_buy_threshold = _effective_buy_threshold(symbol, diagnostics)
+    effective_sell_threshold = _effective_sell_threshold(symbol, diagnostics)
+    effective_pyramid_threshold = _effective_pyramid_threshold(symbol, diagnostics)
 
-    effective_buy_threshold = AAPL_BUY_THRESHOLD if symbol == "AAPL" else BUY_THRESHOLD
-    # ---------------------------------------------------------------------
-
+    # ---------------------------------------------------------
+    # Explanation prefix
+    # Keep this at the top so every BUY / SELL / HOLD decision
+    # prints the correct thresholds and current share count.
+    # Example:
+    # NVDA: prob_up=0.455 (BUY>=0.570, SELL<=0.530, shares=0).
+    # ---------------------------------------------------------
     explain = (
         f"{symbol}: prob_up={prob_up:.3f} "
-        f"(BUY>={effective_buy_threshold}, SELL<={SELL_THRESHOLD}, shares={shares:.4g}). "
+        f"(BUY>={effective_buy_threshold:.3f}, "
+        f"SELL<={effective_sell_threshold:.3f}, "
+        f"shares={shares:.4g}). "
     )
 
+    # ---------------------------------------------------------
+    # If already in a position, don't pyramid by default
+    # (prevents confusing "BUY but no cash")
+    # ---------------------------------------------------------
+    if shares > 0 and prob_up >= effective_buy_threshold:
 
-    # If already in a position, don't pyramid by default (prevents confusing "BUY but no cash")
-    if shares > 0 and prob_up >= BUY_THRESHOLD:
         # -- Guard 2: block averaging down into a losing position ----------
         avg_cost = float(pm.data.get("avg_price", 0.0))
         if avg_cost > 0 and price < avg_cost:
             unrealized_pct = (price - avg_cost) / avg_cost
             if unrealized_pct < -0.01:
                 # -- Fix: check stop-loss FIRST before blocking the add ----
-                from strategy import check_stop_tp
                 stop_decision = check_stop_tp(symbol, price, pm)
                 if stop_decision is not None:
                     return stop_decision   # stop-loss overrides averaging-down guard
@@ -486,10 +565,11 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                     explain + f"HOLD - pyramid blocked, already up {run_up_pct:.1%} "
                               f"from entry ${avg_cost:.2f} (chasing prevention)."
                 )
+
         # -- Guard 2c: block pyramid if SPY is declining -------------------
         try:
             spy_df = fetch_historical_data("SPY", period="5d", interval="15m")
-            if spy_df is not None and len(spy_df) >= 4:
+            if spy_df is not None and len(spy_df) >= 8:
                 spy_close = spy_df["Close"]
                 spy_close = spy_close.iloc[:, 0] if isinstance(spy_close, pd.DataFrame) else spy_close
                 spy_recent = float(spy_close.iloc[-1])
@@ -503,39 +583,46 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         except Exception:
             pass
 
-        # -----------------------------------------------------------------
-        if prob_up < PYRAMID_THRESHOLD:
+        # ---------------------------------------------------------
+        # Only allow pyramiding above the stronger pyramid threshold
+        # ---------------------------------------------------------
+        if prob_up < effective_pyramid_threshold:
             return make_decision(
                 "hold", 0,
                 explain + f"HOLD - already in position (shares={shares:g}); "
-                f"pyramiding requires prob>={PYRAMID_THRESHOLD:.2f} (current={prob_up:.3f})."
+                          f"pyramiding requires prob>={effective_pyramid_threshold:.3f} "
+                          f"(current={prob_up:.3f})."
             )
-        
+
         # Pyramiding: use full available cash, not fractional allocation
         # (position sizing already happened on entry; we're just topping up)
         affordable = int(cash // price)
 
-
         # Apply position limits
         qty = apply_position_limits(affordable, price, cash, symbol)
-        
+
         if qty > 0:
             return make_decision(
                 "buy", qty,
-                explain + f"PYRAMID BUY - adding to position (current={shares:g}, new={qty}, prob={prob_up:.3f})."
+                explain + f"PYRAMID BUY - adding to position "
+                          f"(current={shares:g}, new={qty}, prob={prob_up:.3f})."
             )
         else:
             return make_decision(
                 "hold", 0,
-                explain + f"HOLD - pyramiding signal but insufficient cash (available=${cash:.2f})."
+                explain + f"HOLD - pyramiding signal but insufficient cash "
+                          f"(available=${cash:.2f})."
             )
 
-
+    # ---------------------------------------------------------
     # BUY - with session-state rebuy guard
+    # ---------------------------------------------------------
     if prob_up >= effective_buy_threshold:
-        # Check if this is a same-day rebuy (shares=0 but bought earlier today)
+
+        # Check if this is a same-day rebuy
+        # (shares=0 but symbol was already bought earlier today)
         if shares <= 0 and symbol.upper() in _session_state["buys"]:
-            allowed, reason = _rebuy_allowed(symbol, prob_up)
+            allowed, reason = _rebuy_allowed(symbol, prob_up, diagnostics)
             if not allowed:
                 return make_decision("hold", 0, explain + reason)
             else:
@@ -548,45 +635,54 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
         if qty > 0:
             return make_decision("buy", qty, explain + f"BUY. qty={qty}")
-        return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
 
+        return make_decision(
+            "hold", 0,
+            explain + "BUY signal but insufficient cash."
+        )
 
-    #  Guard 3: minimum hold time before signal-based sell --------------
-    if prob_up <= SELL_THRESHOLD and shares > 0:
-        entry_ts = pm.data.get("entry_time")
-        if entry_ts:
-            try:
-                entry_dt = _dt.fromisoformat(entry_ts)
-                held_min = (_dt.utcnow() - entry_dt).total_seconds() / 60
-                if held_min < 15:
-                    return make_decision(
-                        "hold", 0,
-                        explain + f"SELL deferred - held only {held_min:.0f}min "
-                                  f"(min=15min). Re-evaluating next cycle."
-                    )
-            except Exception:
-                pass
-    
-    # SELL
-    if prob_up <= SELL_THRESHOLD and shares > 0:
-        entry_ts = pm.data.get("entry_time")
-        if entry_ts:
-            try:
-                entry_dt = _dt.fromisoformat(entry_ts)
-                held_min = (_dt.utcnow() - entry_dt).total_seconds() / 60
-                if held_min < 45:
-                    return make_decision(
-                        "hold", 0,
-                        explain + f"SELL deferred - held only {held_min:.0f}min (min=45min)."
-                    )
-            except Exception:
-                pass
-        else:
-            return make_decision("hold", 0, explain + "SELL signal but no position.")
+    # ---------------------------------------------------------
+    # Guard 3: minimum hold time before signal-based sell
+    #
+    # SELL / SELL-BUT-NO-POSITION
+    # Important fix:
+    # - if SELL threshold is hit AND we hold shares -> SELL (or defer)
+    # - if SELL threshold is hit AND shares == 0 -> HOLD with
+    #   'SELL signal but no position.'
+    # This preserves correct threshold printing in the explain text.
+    # ---------------------------------------------------------
+    if prob_up <= effective_sell_threshold:
+        if shares > 0:
+            entry_ts = pm.data.get("entry_time")
+            if entry_ts:
+                try:
+                    entry_dt = _dt.fromisoformat(entry_ts)
+                    held_min = (_dt.utcnow() - entry_dt).total_seconds() / 60
+                    if held_min < 45:
+                        return make_decision(
+                            "hold", 0,
+                            explain + f"SELL deferred - held only {held_min:.0f}min "
+                                      f"(min=45min)."
+                        )
+                except Exception:
+                    pass
 
+            return make_decision(
+                "sell",
+                int(shares),
+                explain + f"SELL. qty={int(shares)}"
+            )
 
+        return make_decision(
+            "hold",
+            0,
+            explain + "SELL signal but no position."
+        )
+
+    # ---------------------------------------------------------
     # HOLD
-    return make_decision("hold", 0, explain + "Within thresholds - > HOLD.")
+    # ---------------------------------------------------------
+    return make_decision("hold", 0, explain + "Within thresholds -> HOLD.")
 
 
 # ============================================================
@@ -696,7 +792,6 @@ def compute_strategy_decisions(
     diagnostics = diagnostics or {}
 
     # -- Fix 4: reduce intraday weight in first 30min after open ----------
-    import pytz
     _ny = pytz.timezone("America/New_York")
     _now_ny = _dt.now(_ny)
     _market_open_min = (_now_ny.hour * 60 + _now_ny.minute) - (9 * 60 + 30)
@@ -836,7 +931,7 @@ def compute_strategy_decisions(
         - NOT blocked by momentum pullback guard
         - NOT blocked by weak volume guard
         """
-        threshold = AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD
+        threshold = _effective_buy_threshold(sym, diagnostics)
         if preds.get(sym, 0.0) < threshold:
             print(f"[DEBUG _is_buy] {sym} BLOCKED: prob={preds.get(sym,0):.3f} < threshold={threshold}")
             return False
@@ -1046,18 +1141,20 @@ def compute_strategy_decisions(
 
 
             if px > 0:
-                if spy_prob >= SPY_ENTRY_THRESHOLD:
+                spy_entry_threshold = _effective_spy_entry_threshold(diagnostics)
+                spy_exit_threshold = _effective_spy_exit_threshold(diagnostics)
+                if spy_prob >= spy_entry_threshold:
                     qty = int((cash * SPY_RISK_FRACTION) // px)
                     spy_candidate = make_decision(
                         "buy",
                         max(qty, 0),
-                        f"{spy_sym}: SPY fallback BUY - market weak and spy_prob={spy_prob:.3f} >= {SPY_ENTRY_THRESHOLD}"
+                        f"{spy_sym}: SPY fallback BUY - market weak and spy_prob={spy_prob:.3f} >= {spy_entry_threshold}"
                     )
-                elif spy_prob <= SPY_EXIT_THRESHOLD and sh > 0:
+                elif spy_prob <= spy_exit_threshold and sh > 0:
                     spy_candidate = make_decision(
                         "sell",
                         int(sh),
-                        f"{spy_sym}: SPY fallback SELL - spy_prob={spy_prob:.3f} <= {SPY_EXIT_THRESHOLD}"
+                        f"{spy_sym}: SPY fallback SELL - spy_prob={spy_prob:.3f} <= {spy_exit_threshold}"
                     )
                 else:
                     spy_candidate = make_decision(

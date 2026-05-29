@@ -11,10 +11,12 @@ from strategy import (
     mark_session_buy,
     mark_session_sell,
     mark_session_flattened,
+    apply_position_limits,
+    _effective_buy_threshold,
+    _effective_sell_threshold,
 )
 from portfolio import PortfolioManager
 from trader import execute_trade, get_pdt_status
-from strategy import apply_position_limits
 from predictive_model.model_monitor import get_monitor, evaluate_predictions, log_prediction
 from account_cache import account_cache
 from config import (
@@ -45,13 +47,55 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 # ===============================================================
 # ✅ Helper Function
 # ===============================================================
+def print_banner(title: str = "", width: int = 60, char: str = "=") -> None:
+    """
+    Print a clean section banner.
+
+    Examples:
+        print_banner("RUNTIME ENVIRONMENT CHECK")
+        print_banner()
+        print_banner(width=60)
+        print_banner(char="-")
+    """
+    # ---------------------------------------------------------
+    # Normalize inputs
+    # ---------------------------------------------------------
+    title = str(title or "").strip()
+
+    try:
+        width = int(width)
+    except Exception:
+        width = 60
+
+    if width < 1:
+        width = 60
+
+    # Use only the first character if a longer string is passed
+    char = str(char or "=")[0]
+
+    # ---------------------------------------------------------
+    # Build banner line
+    # ---------------------------------------------------------
+    line = char * width
+
+    # ---------------------------------------------------------
+    # Print output
+    # - with title: blank line + line + title + line
+    # - without title: just the separator line
+    # ---------------------------------------------------------
+    if title:
+        print()
+        print(line)
+        print(title)
+        print(line)
+    else:
+        print(line)
+
 def verify_runtime_environment():
     bot_env = os.getenv("BOT_ENV", "live").lower()
     base_url = globals().get("CONFIG_BASE_URL", None)
 
-    print("=" * 70)
-    print("RUNTIME ENVIRONMENT CHECK")
-    print("=" * 70)
+    print_banner("RUNTIME ENVIRONMENT CHECK")
     print(f"BOT_ENV={bot_env}")
     try:
         from config import ENV_NAME
@@ -61,7 +105,7 @@ def verify_runtime_environment():
     print(f"ENV_NAME={ENV_NAME}")
     print(f"USE_LIVE_TRADING={USE_LIVE_TRADING}")
     print(f"BASE_URL={base_url}")
-    print("=" * 70)
+    print_banner()
 
     if bot_env == "paper":
         if ENV_NAME != "paper":
@@ -211,17 +255,19 @@ def get_predictions(symbols, debug=True):
 
         final_prob = sig.get("final_prob")
         if final_prob is None:
+            final_prob = sig.get("daily_prob")
+
+        if final_prob is None:
             print(f"[WARN] Invalid prediction for {sym}, skipping.")
             continue
 
-
+        final_prob = float(final_prob)
         predictions[sym] = final_prob
-
 
         diagnostics[sym] = {
             "daily_prob": sig.get("daily_prob"),
             "intraday_prob": sig.get("intraday_prob"),
-            "final_prob": sig.get("final_prob"),
+            "final_prob": final_prob,
             "intraday_weight": sig.get("intraday_weight"),
             "intraday_model_used": sig.get("intraday_model_used"),
             "intraday_quality_score": sig.get("intraday_quality_score"),
@@ -233,6 +279,7 @@ def get_predictions(symbols, debug=True):
             "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
             "price": sig.get("price"),
         }
+
 
     # ✅ EVALUATE PAST PREDICTIONS (monitoring)
     print("\n📊 Evaluating past predictions...")
@@ -284,63 +331,85 @@ def print_cycle_summary(decisions):
 
 def print_signal_diagnostics(decisions, diagnostics):
     print("🔍 SIGNAL DIAGNOSTICS")
-    
+
     def fmt(x, n=3):
         try:
             return "NA" if x is None else f"{float(x):.{n}f}"
         except:
             return "NA"
-    
+
     def fmt_div(x):
         try:
             return "NA" if x is None else f"{float(x):.3f}"
         except:
             return "NA"
-    
+
     decisions = decisions or {}
     diagnostics = diagnostics or {}
-    
+
     for sym, d in decisions.items():
-        sig = diagnostics.get(sym, {})
-        dp, ip, fp = sig.get("daily_prob"), sig.get("intraday_prob"), sig.get("final_prob")
-        w, model_used = sig.get("intraday_weight"), sig.get("intraday_model_used") or sig.get("model")
-        vol, mom, q = sig.get("intraday_vol"), sig.get("intraday_mom"), sig.get("intraday_quality_score")
-        
+        sig = diagnostics.get(sym, {}) or {}
+        dp = sig.get("daily_prob")
+        ip = sig.get("intraday_prob")
+        fp = sig.get("final_prob")
+        w = sig.get("intraday_weight")
+        model_used = sig.get("intraday_model_used") or sig.get("model")
+        vol = sig.get("intraday_vol")
+        mom = sig.get("intraday_mom")
+        q = sig.get("intraday_quality_score")
+
         div = fmt_div(ip - dp) if dp is not None and ip is not None else "NA"
         action = d.get("action", "hold").upper()
-        
+
+        # ---------------------------------------------------------
+        # Effective thresholds used by strategy.py
+        # ---------------------------------------------------------
+        buy_thr = _effective_buy_threshold(sym, diagnostics)
+        sell_thr = _effective_sell_threshold(sym, diagnostics)
+
         # 🔥 VR FIX: intraday_vol / daily_vol
         vr = "NA"
+        df_daily = None
         if vol is not None:
             try:
                 df_daily = fetch_historical_data(sym, period="1mo", interval="1d")
                 if df_daily is not None and len(df_daily) >= 20:
-                    daily_close = df_daily["Close"].iloc[:, 0] if isinstance(df_daily["Close"], pd.DataFrame) else df_daily["Close"]
+                    daily_close = df_daily["Close"]
+                    daily_close = daily_close.iloc[:, 0] if isinstance(daily_close, pd.DataFrame) else daily_close
                     daily_rets = daily_close.pct_change().dropna()
                     daily_vol = float(daily_rets.std()) if len(daily_rets) >= 5 else 0.0024
                     vr = f"{vol/daily_vol:.2f}" if daily_vol > 0 else "NA"
             except:
                 vr = f"{vol/0.0024:.1f}"  # fallback
-        
-         # ── Temporary NVDA volume debug ──────────────────────────────
+
+        # ── Temporary NVDA volume debug ──────────────────────────────
         if sym == "NVDA":
             try:
-                _vol_series = df_daily["Volume"]   # reuses df_daily already fetched above
+                if df_daily is None:
+                    df_daily = fetch_historical_data(sym, period="1mo", interval="1d")
+                _vol_series = df_daily["Volume"]
                 if isinstance(_vol_series, pd.DataFrame):
                     _vol_series = _vol_series.iloc[:, 0]
                 _today_vol = float(_vol_series.iloc[-1])
-                _avg_vol   = float(_vol_series.iloc[:-1].tail(20).mean())
-                _avg_vol_mean   = float(_vol_series.iloc[:-1].tail(20).mean())
+                _avg_vol_mean = float(_vol_series.iloc[:-1].tail(20).mean())
                 _avg_vol_median = float(_vol_series.iloc[:-1].tail(20).median())
-                _vr_mean   = _today_vol / _avg_vol_mean   if _avg_vol_mean   > 0 else 0
+                _vr_mean = _today_vol / _avg_vol_mean if _avg_vol_mean > 0 else 0
                 _vr_median = _today_vol / _avg_vol_median if _avg_vol_median > 0 else 0
-                print(f"[DEBUG NVDA VOL] today={_today_vol:,.0f}  20d_avg(mean)={_avg_vol_mean:,.0f} ratio={_vr_mean:.2f}  |  20d_avg(median)={_avg_vol_median:,.0f} ratio={_vr_median:.2f}")
+                print(
+                    f"[DEBUG NVDA VOL] today={_today_vol:,.0f}  "
+                    f"20d_avg(mean)={_avg_vol_mean:,.0f} ratio={_vr_mean:.2f}  |  "
+                    f"20d_avg(median)={_avg_vol_median:,.0f} ratio={_vr_median:.2f}"
+                )
             except Exception as _e:
                 print(f"[DEBUG NVDA VOL] failed: {_e}")
         # ─────────────────────────────────────────────────────────────
-        
-        print(f"  {sym:<5} D={fmt(dp)} I={fmt(ip)} Δ={div} W={fmt(w):>5} → F={fmt(fp)} | q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} | regime={sig.get('intraday_regime')} | model={model_used} | {action}")
 
+        print(
+            f"  {sym:<5} D={fmt(dp)} I={fmt(ip)} Δ={div} W={fmt(w):>5} → F={fmt(fp)} "
+            f"| buy>={buy_thr:.3f} sell<={sell_thr:.3f} "
+            f"| q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} "
+            f"| regime={sig.get('intraday_regime')} | model={model_used} | {action}"
+        )
 # ===============================================================
 # Close-time de-risk
 # ===============================================================
@@ -407,17 +476,16 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
 # ===============================================================
 # Execute decisions (clean & safe)
 # ===============================================================
-def execute_decisions(decisions):
+def execute_decisions(decisions, diagnostics=None):
     """
     Execute SELLs first (to free capital), then BUYs.
 
-    
     Supports flags from strategy.py:
       - recalc_all_in=True        -> recompute qty from live cash after SELLs
       - recalc_after_sells=True   -> recompute qty using remaining cash after higher-priority buys
       - priority_rank=int         -> lower rank executes first (1 before 2)
     """
-
+    diagnostics = diagnostics or {}
 
     def _get_live_account_cash(proxy_symbol: str = "NVDA") -> float:
         # cash is account-level; any symbol PM works, proxy_symbol is just a handle
@@ -434,30 +502,54 @@ def execute_decisions(decisions):
             except Exception:
                 return 0.0
 
+    def _fmt(x, n=3):
+        try:
+            return "NA" if x is None else f"{float(x):.{n}f}"
+        except Exception:
+            return "NA"
 
-    sell_syms = [s for s, d in decisions.items()
-                if d.get("action") == "sell" and int(d.get("qty", 0)) > 0]
+    def _print_probabilities_with_thresholds(sym: str) -> None:
+        sig = diagnostics.get(sym, {}) or {}
 
-    
-    buy_syms = [s for s, d in decisions.items()
-               if d.get("action") == "buy" and int(d.get("qty", 0)) > 0]
+        dp = sig.get("daily_prob")
+        ip = sig.get("intraday_prob")
+        fp = sig.get("final_prob")
+        w = sig.get("intraday_weight")
+        regime = sig.get("intraday_regime")
+        model_used = sig.get("intraday_model_used") or sig.get("model")
 
-    
-    hold_syms = [s for s, d in decisions.items()
-                if d.get("action") not in ("buy", "sell") or int(d.get("qty", 0)) <= 0]
+        buy_thr = _effective_buy_threshold(sym, diagnostics)
+        sell_thr = _effective_sell_threshold(sym, diagnostics)
 
-    
+        print(
+            f"Probabilities: D={_fmt(dp)} I={_fmt(ip)} F={_fmt(fp)} "
+            f"| BUY>={buy_thr:.3f} SELL<={sell_thr:.3f} "
+            f"| regime={regime} | model={model_used} | w={_fmt(w)}"
+        )
+
+    sell_syms = [
+        s for s, d in decisions.items()
+        if d.get("action") == "sell" and int(d.get("qty", 0)) > 0
+    ]
+
+    buy_syms = [
+        s for s, d in decisions.items()
+        if d.get("action") == "buy" and int(d.get("qty", 0)) > 0
+    ]
+
+    hold_syms = [
+        s for s, d in decisions.items()
+        if d.get("action") not in ("buy", "sell") or int(d.get("qty", 0)) <= 0
+    ]
+
     any_sell_filled = False
-    
     sell_failed = set()
 
-    
     # ✅ Fetch account state ONCE at the beginning
     account_cache.invalidate()  # Force fresh data for this cycle
     account_state = account_cache.get_account()
     remaining_cash = account_state.get("cash", 0.0)
 
-    
     # -------------------------
     # PASS 1: SELLs
     # -------------------------
@@ -466,36 +558,32 @@ def execute_decisions(decisions):
         qty = int(decision.get("qty", 0))
         explain = decision.get("explain", "")
 
-     
         pm = PortfolioManager(sym)
         price = fetch_latest_price(sym)
 
-        
         print(f"\n--- {sym} Decision ---")
         print(f"Action: SELL | Qty: {qty} | Price: {price}")
         print(f"Reason: {explain}")
+        _print_probabilities_with_thresholds(sym)
 
         # 🚨 NEW: Emergency logging
-        if decision.get('pdt_emergency'):
+        if decision.get("pdt_emergency"):
             print(f"🚨 PDT EMERGENCY SELL: {sym}")
             print(f"   Reason: {explain}")
             print(f"   prob_up: {decision.get('prob_up', 'N/A')}")
-        
+
         if price is None or qty <= 0:
             print(f"[WARN] {sym} invalid sell input, skipping.")
             sell_failed.add(sym)
             continue
 
-        
         filled_qty, filled_price = execute_trade("sell", qty, sym, decision=decision)
 
-       
         if not filled_qty:
             print(f"[WARN] {sym} SELL not filled.")
             sell_failed.add(sym)
             continue
 
-        
         any_sell_filled = True
         pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
@@ -503,19 +591,16 @@ def execute_decisions(decisions):
         mark_session_sell(sym)
         print(f"Updated Snapshot (cash + {sym} position): ${pm.value():.2f}")
 
-    
     # -------------------------
     # Refresh cash after SELLs
     # -------------------------
     global_cash_after_sells = _get_live_account_cash(proxy_symbol="NVDA")
     remaining_cash = global_cash_after_sells
 
-    
     # If strategy required SPY liquidation to fund core and it failed, we should not "all-in" core.
     spy_required_sell = ("SPY" in decisions and decisions["SPY"].get("action") == "sell")
     spy_sell_failed = (spy_required_sell and "SPY" in sell_failed)
 
-    
     # -------------------------
     # PASS 2: BUYs (priority order)
     # -------------------------
@@ -525,85 +610,69 @@ def execute_decisions(decisions):
         # if missing, default to 999 so it runs after priority buys
         return int(d.get("priority_rank", 999))
 
-    
     buy_syms_sorted = sorted(buy_syms, key=_buy_sort_key)
 
-    
     for sym in buy_syms_sorted:
         decision = decisions[sym]
         explain = (decision.get("explain", "") or "")
         price = fetch_latest_price(sym)
 
-        
         print(f"\n--- {sym} Decision ---")
         print(f"Action: BUY | Price: {price}")
         print(f"Reason: {explain}")
+        _print_probabilities_with_thresholds(sym)
 
-        
         if price is None or price <= 0:
             print(f"[WARN] No valid price for {sym}, skipping.")
             continue
 
-        
         qty = int(decision.get("qty", 0))
 
-        
         # Flag-based recompute (preferred, no string matching)
         recalc_all_in = bool(decision.get("recalc_all_in", False))
         recalc_after_sells = bool(decision.get("recalc_after_sells", False))
 
-        
         # If strategy expected SPY to be sold first but it didn't fill, skip flagged buys.
         if (recalc_all_in or recalc_after_sells) and spy_sell_failed:
             print("[INFO] BUY skipped because required SPY SELL did not fill (cannot fund priority buy).")
             continue
 
-        
         # Recompute qty from remaining cash if flagged
         if recalc_all_in:
             # refresh live cash in case SELL filled changed it (and to avoid stale state)
             remaining_cash = _get_live_account_cash(proxy_symbol=sym)
             qty = int(remaining_cash // price)
 
-        
             # ✅ Apply limits
             qty = apply_position_limits(qty, price, remaining_cash, sym)
 
-        
             print(f"[INFO] {sym} recalc_all_in: cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}")
 
-        
         elif recalc_after_sells:
             # use the cash remaining after earlier buys in this same cycle
             qty = int(remaining_cash // price)
             print(f"[INFO] {sym} recalc_after_sells: remaining_cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}")
 
-        
         if qty <= 0:
             print("[INFO] BUY skipped — insufficient cash.")
             continue
 
-        
         pm = PortfolioManager(sym)
         filled_qty, filled_price = execute_trade("buy", qty, sym)
 
-        
         if not filled_qty:
             print(f"[WARN] {sym} BUY not filled.")
             continue
 
-        
         pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
         pm._apply("buy", filled_price, filled_qty, account_cash=account_cash)
         mark_session_buy(sym)
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
-        
         # update remaining cash after successful buy
         remaining_cash = _get_live_account_cash(proxy_symbol=sym)
 
-    
     # -------------------------
     # PASS 3: HOLD prints
     # -------------------------
@@ -612,9 +681,9 @@ def execute_decisions(decisions):
         price = fetch_latest_price(sym)
         print(f"\n--- {sym} Decision ---")
         print(f"Action: HOLD | Qty: 0 | Price: {price}")
-        print(f"Reason: {decision.get('explain','')}")
+        print(f"Reason: {decision.get('explain', '')}")
+        _print_probabilities_with_thresholds(sym)
         print("[INFO] HOLD — No trade executed.")
-
 
 
 # ===============================================================
@@ -697,7 +766,7 @@ def process_all_symbols(symbols):
     # ----------------------------
     # Step 3: Execute trades
     # ----------------------------
-    execute_decisions(decisions)
+    execute_decisions(decisions, diagnostics=diagnostics)
     
     # ----------------------------
     # Step 4: Execute Cycle Summary
@@ -733,9 +802,6 @@ def reconcile_portfolio_state(symbol: str, verbose: bool = False):
             'corrected': bool
         }
     """
-    from portfolio import PortfolioManager
-    from account_cache import account_cache
-
     result = {
         'drift_detected': False,
         'local_shares': 0.0,
@@ -802,7 +868,7 @@ def reconcile_portfolio_state(symbol: str, verbose: bool = False):
 
             # Reset local to 0
             pm.data["shares"] = 0
-            pm.data["cash"] = pm.data.get("cash", 0) + (local_shares * local_avg_price)
+            pm.data["cash"] = pm.data.get("cash", 0)  (local_shares * local_avg_price)
             pm.save()
 
             result['corrected'] = True
@@ -829,16 +895,13 @@ def reconcile_portfolio_state(symbol: str, verbose: bool = False):
 
 
 def reconcile_all_symbols(symbols: list, verbose: bool = False):
+    print_banner("🔄 PORTFOLIO RECONCILIATION", width=60)
     """
     Reconcile portfolio state for all symbols.
 
     Returns:
         dict: Summary of reconciliation results
     """
-    print("\n" + "="*60)
-    print("🔄 PORTFOLIO RECONCILIATION")
-    print("="*60)
-
     results = {
         'total': len(symbols),
         'drifts_detected': 0,
@@ -854,38 +917,35 @@ def reconcile_all_symbols(symbols: list, verbose: bool = False):
         if result['corrected']:
             results['corrected'] += 1
 
-    print("\n" + "="*60)
-    print(f"Reconciliation complete:")
+    print("\nReconciliation complete:")
     print(f"  Total symbols: {results['total']}")
     print(f"  Drifts detected: {results['drifts_detected']}")
     print(f"  Auto-corrected: {results['corrected']}")
-    print("="*60 + "\n")
+    print_banner()
 
     return results
+
 
 def verify_trading_config():
     """
     Verify trading configuration on startup.
     Shows which symbols are live vs paper.
     """
-    print("\n" + "="*70)
-    print("🔧 TRADING CONFIGURATION")
-    print("="*70)
-    
+    print_banner("🔧 TRADING CONFIGURATION")
+
     print(f"\n📊 Global Mode: {'LIVE TRADING' if USE_LIVE_TRADING else 'SIMULATION'}")
-    
+
     if USE_LIVE_TRADING:
         print(f"\n✅ Live Trading Symbols:")
         for symbol in SYMBOL:
             if symbol.upper() not in [s.upper() for s in PAPER_TRADE_SYMBOLS]:
                 print(f"   🟢 {symbol} → LIVE")
-        
+
         if PAPER_TRADE_SYMBOLS:
             print(f"\n📝 Paper Trading Symbols:")
             for symbol in PAPER_TRADE_SYMBOLS:
                 print(f"   📝 {symbol} → PAPER ONLY")
-                
-                # Show notes if available
+
                 if symbol in PAPER_TRADE_NOTES:
                     notes = PAPER_TRADE_NOTES[symbol]
                     print(f"      Reason: {notes.get('reason', 'N/A')}")
@@ -894,8 +954,8 @@ def verify_trading_config():
         print(f"\n📝 All symbols in simulation mode:")
         for symbol in SYMBOL:
             print(f"   📝 {symbol}")
-    
-    print("\n" + "="*70 + "\n")
+
+    print_banner()
 
 # ===============================================================
 # Entry Point
@@ -910,7 +970,7 @@ def main():
     # Wait for confirmation if live trading
     if USE_LIVE_TRADING and ENV_NAME == "live":
         print("⚠️  Starting LIVE trading in 5 seconds...")
-        print("   Press Ctrl+C to abort")
+        print("   Press CtrlC to abort")
         time.sleep(5)
     elif USE_LIVE_TRADING and ENV_NAME == "paper":
         print("🧪 Starting PAPER order execution in 3 seconds...")
@@ -925,10 +985,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display

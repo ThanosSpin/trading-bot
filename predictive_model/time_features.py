@@ -8,6 +8,28 @@ import pandas as pd
 import numpy as np
 from typing import Dict
 
+######## Helper  functions ########
+NY_TZ = "America/New_York"
+MARKET_OPEN_MIN = 9 * 60 + 30
+MARKET_CLOSE_MIN = 16 * 60
+FULL_SESSION_MIN = MARKET_CLOSE_MIN - MARKET_OPEN_MIN  # 390
+
+def _ensure_ny_index(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("add_time_features requires a DatetimeIndex")
+
+    out = df.copy()
+
+    if out.index.tz is None:
+        raise ValueError(
+            "DatetimeIndex must be timezone-aware. "
+            "Pass UTC or market-time timestamps explicitly."
+        )
+
+    out.index = out.index.tz_convert(NY_TZ)
+    return out
+
+
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -43,7 +65,8 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     if df.empty:
         return df
-
+    
+    df = _ensure_ny_index(df)
     df = df.copy()
 
     # Extract time components from index
@@ -52,70 +75,98 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # === Basic Time Features ===
 
-    # Time as decimal (9:30 = 9.5, 16:00 = 16.0)
-    df['time_of_day'] = df['hour'] + df['minute'] / 60.0
-
+    df['clock_minute'] = df['hour'] * 60 + df['minute']
+    
     # Distance from market open (9:30 AM = 9.5)
-    df['minutes_since_open'] = (df['time_of_day'] - 9.5) * 60
-    df['minutes_since_open'] = df['minutes_since_open'].clip(lower=0)  # Pre-market = 0
+    df['minutes_since_open'] = (df['clock_minute'] - MARKET_OPEN_MIN).clip(lower=0)
+    df['minutes_to_close'] = (MARKET_CLOSE_MIN - df['clock_minute']).clip(lower=0)
 
-    # Distance to market close (16:00)
-    df['minutes_to_close'] = (16.0 - df['time_of_day']) * 60
-    df['minutes_to_close'] = df['minutes_to_close'].clip(lower=0)  # After-hours = 0
-
-    # Normalized time (0 at open, 1 at close) - useful for neural networks
-    df['normalized_time'] = df['minutes_since_open'] / 390.0
-    df['normalized_time'] = df['normalized_time'].clip(0, 1)
+    df['time_of_day'] = df['clock_minute'] / 60.0
+    # df['normalized_time'] = (df['minutes_since_open'] / FULL_SESSION_MIN).clip(0, 1)
 
     # === Session Phase (One-Hot Encoded) ===
 
-    def get_session_phase(minutes: float) -> str:
-        """Classify into opening/midday/closing session."""
-        if minutes <= 30:
-            return 'opening'
-        elif minutes >= 330:  # Last 60 minutes (5.5h from open)
-            return 'closing'
-        else:
-            return 'midday'
+    # def get_session_phase(minutes: float) -> str:
+    #     """Classify into opening/midday/closing session."""
+    #     if minutes <= 30:
+    #         return 'opening'
+    #     elif minutes >= 330:  # Last 60 minutes (5.5h from open)
+    #         return 'closing'
+    #     else:
+    #         return 'midday'
 
-    df['session_phase'] = df['minutes_since_open'].apply(get_session_phase)
+    # df['session_phase'] = df['minutes_since_open'].apply(get_session_phase)
+
+    df['is_regular_session'] = (
+        (df['clock_minute'] >= MARKET_OPEN_MIN) &
+        (df['clock_minute'] < MARKET_CLOSE_MIN)
+    ).astype(int)
 
     # One-hot encode (drop session_phase after)
-    df['is_opening'] = (df['session_phase'] == 'opening').astype(int)
-    df['is_midday'] = (df['session_phase'] == 'midday').astype(int)
-    df['is_closing'] = (df['session_phase'] == 'closing').astype(int)
+    df['is_opening'] = (
+        (df['minutes_since_open'] <= 30) &
+        (df['is_regular_session'] == 1)
+    ).astype(int)
+
+    df['is_closing'] = (
+        (df['minutes_since_open'] >= 330) &
+        (df['is_regular_session'] == 1)
+    ).astype(int)
+
+    df['is_midday'] = (
+        (df['is_regular_session'] == 1) &
+        (df['is_opening'] == 0) &
+        (df['is_closing'] == 0)
+    ).astype(int)
+    
+    # Lunch hour (12:00-13:00) - low liquidity, avoid trading
+    df['is_lunch_hour'] = (
+        (df['clock_minute'] >= 12 * 60) &
+        (df['clock_minute'] < 13 * 60) &
+        (df['is_regular_session'] == 1)
+    ).astype(int)
 
     # === Non-Linear Time Effects ===
 
-    # Polynomial features (capture acceleration/deceleration)
-    df['time_squared'] = df['minutes_since_open'] ** 2
-    df['time_cubed'] = df['minutes_since_open'] ** 3
+    # # Polynomial features (capture acceleration/deceleration)
+    # df['time_squared'] = df['minutes_since_open'] ** 2
+    # df['time_cubed'] = df['minutes_since_open'] ** 3
 
     # Cyclical encoding (sine/cosine for full trading day cycle)
     # 390 minutes = full cycle
-    df['time_sin'] = np.sin(2 * np.pi * df['minutes_since_open'] / 390)
-    df['time_cos'] = np.cos(2 * np.pi * df['minutes_since_open'] / 390)
+    session_pos = df['minutes_since_open'].clip(0, FULL_SESSION_MIN) / FULL_SESSION_MIN
+    df['time_sin'] = np.where(
+        df['is_regular_session'] == 1,
+        np.sin(2 * np.pi * session_pos),
+        0.0
+    )
+    df['time_cos'] = np.where(
+        df['is_regular_session'] == 1,
+        np.cos(2 * np.pi * session_pos),
+        0.0
+    )
+
 
     # === Special Period Indicators ===
-
-    # Lunch hour (12:00-13:00) - low liquidity, avoid trading
-    df['is_lunch_hour'] = (
-        (df['time_of_day'] >= 12.0) & (df['time_of_day'] < 13.0)
+    df['is_first_hour'] = (
+        (df['minutes_since_open'] <= 60) &
+        (df['is_regular_session'] == 1)
     ).astype(int)
 
-    # First hour (9:30-10:30) - high volatility, news reactions
-    df['is_first_hour'] = (df['minutes_since_open'] <= 60).astype(int)
+    df['is_last_hour'] = (
+        (df['minutes_to_close'] <= 60) &
+        (df['is_regular_session'] == 1)
+    ).astype(int)
 
-    # Last hour (15:00-16:00) - institutional rebalancing
-    df['is_last_hour'] = (df['minutes_to_close'] <= 60).astype(int)
+    df['is_first_15min'] = (
+        (df['minutes_since_open'] <= 15) &
+        (df['is_regular_session'] == 1)
+    ).astype(int)
 
-    # First/last 15 minutes (most extreme)
-    df['is_first_15min'] = (df['minutes_since_open'] <= 15).astype(int)
-    df['is_last_15min'] = (df['minutes_to_close'] <= 15).astype(int)
-
-    # Morning vs afternoon
-    df['is_morning'] = (df['time_of_day'] < 12.0).astype(int)
-    df['is_afternoon'] = (df['time_of_day'] >= 13.0).astype(int)
+    df['is_last_15min'] = (
+        (df['minutes_to_close'] <= 15) &
+        (df['is_regular_session'] == 1)
+    ).astype(int)
 
     # === Cleanup ===
 
@@ -142,18 +193,20 @@ def get_time_feature_stats(df: pd.DataFrame) -> Dict[str, any]:
     stats = {}
 
     # Returns by session
-    df['forward_ret'] = df['Close'].pct_change().shift(-1)
+    work = df.copy()
+    work['forward_ret'] = work['Close'].pct_change().shift(-1)
+
 
     for phase in ['opening', 'midday', 'closing']:
-        mask = df[f'is_{phase}'] == 1
-        phase_data = df[mask]
+        mask = work[f'is_{phase}'] == 1
+        phase_data = work[mask]
 
         if len(phase_data) > 0:
             stats[phase] = {
                 'count': len(phase_data),
                 'avg_return': phase_data['forward_ret'].mean(),
                 'volatility': phase_data['forward_ret'].std(),
-                'avg_volume': phase_data['Volume'].mean() if 'Volume' in df.columns else None,
+                'avg_volume': phase_data['Volume'].mean() if 'Volume' in work.columns else None,
                 'win_rate': (phase_data['forward_ret'] > 0).mean()
             }
 
@@ -199,17 +252,19 @@ if __name__ == "__main__":
     print("="*60)
 
     # Create sample data
-    import pandas as pd
-    from datetime import datetime, timedelta
+    ny_tz = "America/New_York"
 
-    # Simulate 1 day of 15min bars
-    start = datetime(2026, 2, 3, 9, 30)
-    dates = [start + timedelta(minutes=15*i) for i in range(26)]  # 9:30-16:00 = 26 bars
+    dates = pd.date_range(
+        start="2026-02-03 09:30:00",
+        periods=26,
+        freq="15min",
+        tz=ny_tz
+    )
 
     df = pd.DataFrame({
         'Close': np.random.randn(26).cumsum() + 100,
-        'Volume': np.random.randint(1000000, 5000000, 26)
-    }, index=pd.DatetimeIndex(dates))
+        'Volume': np.random.randint(1_000_000, 5_000_000, 26)
+    }, index=dates)
 
     print(f"\nBefore: {df.shape[1]} columns")
     print(df.columns.tolist())
@@ -220,3 +275,4 @@ if __name__ == "__main__":
     print(df.columns.tolist())
 
     print_time_feature_summary(df)
+
