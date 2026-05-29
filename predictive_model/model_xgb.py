@@ -1,4 +1,4 @@
-# patched_model_xgb.py
+# model_xgb.py
 import os
 import traceback
 import warnings
@@ -275,13 +275,13 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
 
     df = df.copy()
 
-    print(f"\n[FEATURES] Adding enhanced indicators for {symbol}/{mode}...")
-    try:
-        df = add_indicators(df)
-        print(f"[FEATURES] Added {len(df.columns)} total columns before feature build")
-    except Exception as e:
-        print(f"[FEATURES] Enhanced indicators failed: {e}")
-        print("[FEATURES] Falling back to base feature engineering")
+    print(f"\n[FEATURES] Building engineered features for {symbol}/{mode}...")
+    if mode == "daily":
+        df = build_daily_features(df)
+    else:
+        df = build_intraday_features(df)
+
+    print(f"[FEATURES] Built {len(df.columns)} total columns after feature engineering")
 
     if mode == "daily":
         df_feat = build_daily_features(df)
