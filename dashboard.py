@@ -1319,9 +1319,6 @@ for sym in symbols:
 
 
 
-# -------------------------------------------------
-# TOTAL DAILY PORTFOLIO PERFORMANCE
-# -------------------------------------------------
 st.header("📈 Total Portfolio Performance (All Symbols Combined)")
 
 if os.path.exists(portfolio_path):
@@ -1348,20 +1345,63 @@ if os.path.exists(portfolio_path):
             st.stop()
 
         df["total_equity"] = pd.to_numeric(df[value_col], errors="coerce").fillna(0.0)
-        if "external_flow" in df.columns:
-            df["external_flow"] = pd.to_numeric(df["external_flow"], errors="coerce").fillna(0.0)
+
+        # -------------------------------------------------
+        # MERGE DEPOSITS / WITHDRAWALS INTO DAILY PORTFOLIO
+        # -------------------------------------------------
+        df = df.sort_values("date").reset_index(drop=True).copy()
+        df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+        df["day"] = df["date"].dt.normalize()
+
+        if df_dep is not None and not df_dep.empty:
+            df_dep_flow = df_dep.copy()
+            df_dep_flow["date"] = pd.to_datetime(df_dep_flow["date"], utc=True, errors="coerce")
+            df_dep_flow["amount"] = pd.to_numeric(df_dep_flow["amount"], errors="coerce").fillna(0.0)
+            df_dep_flow = df_dep_flow.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+            df_dep_flow["day"] = df_dep_flow["date"].dt.normalize()
+            df_dep_flow["deposit_amt"] = df_dep_flow["amount"].clip(lower=0.0)
+            df_dep_flow["withdrawal_amt"] = -df_dep_flow["amount"].clip(upper=0.0)
+            df_dep_flow["net_flow"] = df_dep_flow["deposit_amt"] - df_dep_flow["withdrawal_amt"]
+
+            dep_daily = df_dep_flow.groupby("day", as_index=True)["deposit_amt"].sum()
+            wdr_daily = df_dep_flow.groupby("day", as_index=True)["withdrawal_amt"].sum()
+            net_daily = df_dep_flow.groupby("day", as_index=True)["net_flow"].sum()
+
+            df["deposit_flow"] = df["day"].map(dep_daily).fillna(0.0)
+            df["withdrawal_flow"] = df["day"].map(wdr_daily).fillna(0.0)
+            df["external_flow"] = df["day"].map(net_daily).fillna(0.0)
         else:
-            df["external_flow"] = 0.0
+            if "external_flow" in df.columns:
+                df["external_flow"] = pd.to_numeric(df["external_flow"], errors="coerce").fillna(0.0)
+            else:
+                df["external_flow"] = 0.0
+
+            df["deposit_flow"] = df["external_flow"].clip(lower=0.0)
+            df["withdrawal_flow"] = -df["external_flow"].clip(upper=0.0)
+
+        # pick a realistic starting capital
+        first_equity = float(df["total_equity"].iloc[0])
 
         if "initial_cash" in df.columns:
-            initial_cash = pd.to_numeric(df["initial_cash"], errors="coerce").fillna(0.0).iloc[0]
+            raw_ic = float(pd.to_numeric(df["initial_cash"], errors="coerce").fillna(0.0).iloc[0])
+            # if initial_cash is clearly smaller than first equity, prefer first equity
+            if raw_ic > 0 and raw_ic >= 0.5 * first_equity:
+                initial_cash = raw_ic
+            else:
+                initial_cash = first_equity
         else:
-            initial_cash = float(df["total_equity"].iloc[0])
+            initial_cash = first_equity
 
-        df["cum_external_flow"] = df["external_flow"].cumsum()
-        df["total_deposited"] = initial_cash + df["cum_external_flow"]
-        df["pnl_value"] = df["total_equity"] - df["total_deposited"]
+        df["cum_external_flow"] = pd.to_numeric(df["external_flow"], errors="coerce").fillna(0.0).cumsum()
+        df["cum_deposits"] = pd.to_numeric(df["deposit_flow"], errors="coerce").fillna(0.0).cumsum()
+        df["cum_withdrawals"] = pd.to_numeric(df["withdrawal_flow"], errors="coerce").fillna(0.0).cumsum()
 
+        df["total_deposited"] = initial_cash + df["cum_deposits"]
+        df["total_withdrawn"] = df["cum_withdrawals"]
+        df["net_cash_flow"] = initial_cash + df["cum_external_flow"]
+        df["pnl_value"] = df["total_equity"] - df["net_cash_flow"]
+        
         # -------------------------------------------------
         # TOTAL PERFORMANCE STATS
         # -------------------------------------------------
@@ -1379,11 +1419,13 @@ if os.path.exists(portfolio_path):
             total_pnl = float(df_stats["pnl_value"].iloc[-1])
 
             # Prefer a real positive starting capital
+                        # Prefer a real positive starting capital for Total Return / CAGR
             base_capital = None
             if "total_deposited" in df_stats.columns:
-                first_dep = float(pd.to_numeric(df_stats["total_deposited"], errors="coerce").fillna(0.0).iloc[0])
-                if first_dep > 0:
-                    base_capital = first_dep
+                dep_series = pd.to_numeric(df_stats["total_deposited"], errors="coerce").dropna()
+                dep_series = dep_series[dep_series > 0]
+                if not dep_series.empty:
+                    base_capital = float(dep_series.iloc[0])
 
             if base_capital is None or base_capital <= 0:
                 if "initial_cash" in locals() and initial_cash and float(initial_cash) > 0:
@@ -1394,9 +1436,37 @@ if os.path.exists(portfolio_path):
 
             total_return = total_pnl / base_capital if base_capital > 0 else 0.0
 
+            # ROI should use current invested capital, not starting capital
+            roi_base = None
+
+            if "net_cash_flow" in df_stats.columns:
+                net_flow_series = pd.to_numeric(df_stats["net_cash_flow"], errors="coerce").dropna()
+                if not net_flow_series.empty:
+                    roi_base = float(net_flow_series.iloc[-1])
+
+            if (roi_base is None or roi_base <= 0) and {"total_deposited", "total_withdrawn"}.issubset(df_stats.columns):
+                deposited_now = float(pd.to_numeric(df_stats["total_deposited"], errors="coerce").fillna(0.0).iloc[-1])
+                withdrawn_now = float(pd.to_numeric(df_stats["total_withdrawn"], errors="coerce").fillna(0.0).iloc[-1])
+                roi_base = deposited_now - withdrawn_now
+
+            if (roi_base is None or roi_base <= 0) and "total_deposited" in df_stats.columns:
+                deposited_now = float(pd.to_numeric(df_stats["total_deposited"], errors="coerce").fillna(0.0).iloc[-1])
+                if deposited_now > 0:
+                    roi_base = deposited_now
+
+            if roi_base is None or roi_base <= 0:
+                roi_base = base_capital
+
+            roi_value = total_pnl / roi_base if roi_base > 0 else 0.0
+
             elapsed_days = max((end_date - start_date).total_seconds() / 86400.0, 1.0)
             annual_return = (1.0 + total_return) ** (365.25 / elapsed_days) - 1.0 if total_return > -1 else -1.0
             annual_label = "Annualized Return"
+
+            st.caption(
+                f"Base capital=${base_capital:,.2f} | ROI base=${roi_base:,.2f} | "
+                f"Window={start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}"
+            )
 
             # Build a positive equity curve for drawdown / Sharpe
             df_stats["strategy_equity"] = base_capital + df_stats["pnl_value"]
@@ -1525,10 +1595,10 @@ if os.path.exists(portfolio_path):
             c4.metric(annual_label, f"{annual_return * 100:.2f}%")
 
             c5, c6, c7, c8 = st.columns(4)
-            c5.metric("Max Drawdown", f"{max_drawdown * 100:.2f}%")
+            c5.metric("ROI", f"{roi_value * 100:.2f}%")
             c6.metric("Sharpe Ratio", "N/A" if sharpe is None else f"{sharpe:.2f}")
             c7.metric("Win Rate", "N/A" if win_rate is None else f"{win_rate * 100:.1f}%")
-            c8.metric("Profit Factor", "∞" if profit_factor == float("inf") else ("N/A" if profit_factor is None else f"{profit_factor:.2f}"))
+            c8.metric("Profit Factor", "∞" if profit_factor == float('inf') else ("N/A" if profit_factor is None else f"{profit_factor:.2f}"))
 
             c9, c10, c11 = st.columns(3)
             c9.metric("Volatility", "N/A" if volatility is None else f"{volatility * 100:.2f}%")
