@@ -2,9 +2,11 @@ import os
 import csv
 import pandas as pd
 import pytz
+from alpaca_trade_api.rest import REST
 
-from trader import api as api_market
-from config.config import SYMBOL, TIMEZONE, PORTFOLIO_PATH, SPY_SYMBOL
+from config import SYMBOL, TIMEZONE, PORTFOLIO_PATH, SPY_SYMBOL, API_KEY, API_SECRET, BASE_URL
+
+api_market = REST(API_KEY, API_SECRET, BASE_URL)
 
 
 # -----------------------------
