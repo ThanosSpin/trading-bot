@@ -1420,17 +1420,17 @@ if os.path.exists(portfolio_path):
 
             # Prefer a real positive starting capital
                         # Prefer a real positive starting capital for Total Return / CAGR
+            # Prefer a real positive starting capital for Total Return / CAGR
             base_capital = None
+
+            # 1) Prefer first positive total_deposited (from Alpaca deposits or deposits.csv)
             if "total_deposited" in df_stats.columns:
                 dep_series = pd.to_numeric(df_stats["total_deposited"], errors="coerce").dropna()
                 dep_series = dep_series[dep_series > 0]
                 if not dep_series.empty:
                     base_capital = float(dep_series.iloc[0])
 
-            if base_capital is None or base_capital <= 0:
-                if "initial_cash" in locals() and initial_cash and float(initial_cash) > 0:
-                    base_capital = float(initial_cash)
-
+            # 2) Fallback: implied capital from equity and PnL
             if base_capital is None or base_capital <= 0:
                 base_capital = max(start_equity - total_pnl, 1e-9)
 
@@ -1463,9 +1463,15 @@ if os.path.exists(portfolio_path):
             annual_return = (1.0 + total_return) ** (365.25 / elapsed_days) - 1.0 if total_return > -1 else -1.0
             annual_label = "Annualized Return"
 
-            st.caption(
-                f"Base capital=${base_capital:,.2f} | ROI base=${roi_base:,.2f} | "
-                f"Window={start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}"
+            st.markdown(
+                f"""
+                <div style="font-size: 0.85rem; color: var(--text-muted, rgba(255,255,255,0.75));">
+                    <strong>Base capital:</strong> ${base_capital:,.2f}<br>
+                    <strong>ROI base:</strong> ${roi_base:,.2f}<br>
+                    <strong>Window:</strong> {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
             # Build a positive equity curve for drawdown / Sharpe
