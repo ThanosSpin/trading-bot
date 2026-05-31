@@ -23,8 +23,7 @@ import joblib
 
 from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
 from predictive_model.model_xgb import train_model, MODEL_DIR
-from config.config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS
-
+from config.config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
 
 MAX_BACKUPS = 6
 USE_MULTICLASS = USE_MULTICLASS_MODELS
@@ -35,8 +34,6 @@ DAILY_INTERVAL = "1d"
 INTRADAY_LOOKBACK = 2400
 INTRADAY_INTERVAL = "15m"
 
-
-# ---------------- existing helpers (unchanged) ----------------
 
 def save_model_with_backup(artifact, symbol: str, mode: str = "daily"):
     """Save full patched artifact and maintain rolling monthly backups."""
@@ -187,55 +184,41 @@ def train_intraday_models(sym: str):
             traceback.print_exc()
 
 
-# ---------------- email + main orchestration ----------------
+# ---------------- email helper (mirroring balance_monitor) ----------------
 
 def send_status_email(success: bool, details: str) -> None:
     """
-    Send status email for daily retrain.
-    Uses SMTP_* and RETRAIN_EMAIL_* environment variables.
+    Send a short status email after retrain.
+    Reuses EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_RECEIVER from config.
     """
-    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     status_symbol = "✅" if success else "❌"
     status_word = "Success" if success else "FAILED"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     subject = f"Model Retrain {status_symbol} {status_word} - {now_str}"
-    body = (
-        f"Model retrain status: {status_word}\n"
-        f"Time: {now_str}\n\n"
-        f"{details}\n"
-    )
-
-    sender = os.environ.get("RETRAIN_EMAIL_SENDER", os.environ.get("SMTP_USER", ""))
-    receiver = os.environ.get("RETRAIN_EMAIL_RECEIVER", "roispinola@gmail.com")
-
-    if not sender:
-        print("[WARN] No RETRAIN_EMAIL_SENDER/SMTP_USER set; skipping status email.")
-        return
-
-    smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    smtp_user = os.environ.get("SMTP_USER", sender)
-    smtp_pass = os.environ.get("SMTP_PASS", "")
-
-    if not smtp_pass:
-        print("[WARN] SMTP_PASS not set; skipping status email.")
-        return
+    body = f"Model retrain status: {status_word}\nTime: {now_str}\n\n{details}\n"
 
     msg = EmailMessage()
-    msg["From"] = sender
-    msg["To"] = receiver
-    msg["Subject"] = subject
     msg.set_content(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_SENDER
+    msg["To"] = EMAIL_RECEIVER
 
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as s:
-            s.starttls()
-            s.login(smtp_user, smtp_pass)
-            s.send_message(msg)
-        print(f"[INFO] Retrain status email sent to {receiver}")
+        print(f"[DEBUG] Preparing retrain email: subject={subject}")
+        print(f"[DEBUG] Email sender={EMAIL_SENDER}")
+        print(f"[DEBUG] Email receiver={EMAIL_RECEIVER}")
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("[INFO] Retrain status email sent successfully.")
     except Exception as e:
-        print(f"[ERROR] Failed to send retrain status email: {e}")
+        print(f"[Email Error] Failed to send retrain status email: {e}")
 
+
+# ---------------- main with success/failure email ----------------
 
 def main() -> int:
     symbols = TRAIN_SYMBOLS if isinstance(TRAIN_SYMBOLS, list) else [TRAIN_SYMBOLS]
@@ -265,7 +248,7 @@ def main() -> int:
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        print("[ERROR] Fatal error in retrain_model.main():", e)
+        print(f"[ERROR] Fatal error in retrain_model.main(): {e}")
         print(tb)
         details = f"Fatal error in retrain_model.main():\n{e}\n\n{tb}"
         send_status_email(success=False, details=details)
