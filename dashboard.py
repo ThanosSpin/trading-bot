@@ -1489,7 +1489,7 @@ if os.path.exists(portfolio_path):
                 max_drawdown = 0.0
 
             daily_curve = (
-                df_stats.set_index("date")[["strategy_equity"]]
+            df_stats.set_index("date")[["strategy_equity"]]
                 .resample("1D")
                 .last()
                 .dropna()
@@ -1498,12 +1498,29 @@ if os.path.exists(portfolio_path):
             daily_curve["ret"] = daily_curve["strategy_equity"].pct_change()
             daily_rets = daily_curve["ret"].replace([float("inf"), float("-inf")], pd.NA).dropna()
 
+            # ---- Full-period Sharpe & volatility ----
             if len(daily_rets) >= 2 and daily_rets.std() > 0:
                 sharpe = float((daily_rets.mean() / daily_rets.std()) * (252 ** 0.5))
                 volatility = float(daily_rets.std() * (252 ** 0.5))
             else:
                 sharpe = None
                 volatility = None
+
+            # ---- Rolling 30-day Sharpe (annualized) ----
+            rolling_sharpe_30 = None
+            if len(daily_rets) >= 30:
+                # Use the same daily_curve["ret"] series, aligned on dates
+                roll_mean = daily_curve["ret"].rolling(window=30).mean()
+                roll_std = daily_curve["ret"].rolling(window=30).std()
+
+                roll_sharpe_daily = roll_mean / roll_std
+                # Annualize each 30-day window's Sharpe
+                roll_sharpe_annual = roll_sharpe_daily * (252 ** 0.5)
+
+                # Take the last valid rolling Sharpe as the "current 30d Sharpe"
+                roll_sharpe_annual = roll_sharpe_annual.replace([float("inf"), float("-inf")], pd.NA).dropna()
+                if not roll_sharpe_annual.empty:
+                    rolling_sharpe_30 = float(roll_sharpe_annual.iloc[-1])
 
             # Closed-trade stats across all symbols
             all_cycle_pnls = []
@@ -1603,13 +1620,15 @@ if os.path.exists(portfolio_path):
             c5, c6, c7, c8 = st.columns(4)
             c5.metric("ROI", f"{roi_value * 100:.2f}%")
             c6.metric("Sharpe Ratio", "N/A" if sharpe is None else f"{sharpe:.2f}")
+            # c7.metric("Sharpe (30d)", "N/A" if rolling_sharpe_30 is None else f"{rolling_sharpe_30:.2f}")
             c7.metric("Win Rate", "N/A" if win_rate is None else f"{win_rate * 100:.1f}%")
             c8.metric("Profit Factor", "∞" if profit_factor == float('inf') else ("N/A" if profit_factor is None else f"{profit_factor:.2f}"))
 
-            c9, c10, c11 = st.columns(3)
-            c9.metric("Volatility", "N/A" if volatility is None else f"{volatility * 100:.2f}%")
-            c10.metric("Avg Closed Trade", "N/A" if avg_trade is None else f"${avg_trade:,.2f}")
-            c11.metric("Closed Trades", f"{closed_trades}")
+            c10, c11, c12, c13 = st.columns(4)
+            c10.metric("Max Drawdown", f"{max_drawdown * 100:.2f}%")
+            c11.metric("Volatility", "N/A" if volatility is None else f"{volatility * 100:.2f}%")
+            c12.metric("Avg Closed Trade", "N/A" if avg_trade is None else f"${avg_trade:,.2f}")
+            c13.metric("Closed Trades", f"{closed_trades}")
 
             
             broker_equity = None
