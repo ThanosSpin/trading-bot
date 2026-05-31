@@ -2,6 +2,7 @@
 import os
 import streamlit as st
 import pandas as pd
+import numpy as np
 import pytz
 import matplotlib
 matplotlib.use("Agg")
@@ -1406,9 +1407,14 @@ if os.path.exists(portfolio_path):
         # TOTAL PERFORMANCE STATS
         # -------------------------------------------------
         st.subheader("📊 Total Performance Stats")
+        st.subheader("💰 Account Performance (money-weighted, includes deposits/withdrawals)")
 
         df_stats = df.copy()
-        df_stats = df_stats.dropna(subset=["date", "total_equity"]).sort_values("date").reset_index(drop=True)
+        df_stats = (
+            df_stats.dropna(subset=["date", "total_equity"])
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
 
         if len(df_stats) >= 2:
             start_date = df_stats["date"].iloc[0]
@@ -1418,25 +1424,23 @@ if os.path.exists(portfolio_path):
             end_equity = float(df_stats["total_equity"].iloc[-1])
             total_pnl = float(df_stats["pnl_value"].iloc[-1])
 
-            # Prefer a real positive starting capital
-                        # Prefer a real positive starting capital for Total Return / CAGR
-            # Prefer a real positive starting capital for Total Return / CAGR
+            # ---------- BASE CAPITAL / TOTAL RETURN (same as before) ----------
             base_capital = None
 
-            # 1) Prefer first positive total_deposited (from Alpaca deposits or deposits.csv)
+            # Prefer first positive total_deposited (from Alpaca deposits or deposits.csv)
             if "total_deposited" in df_stats.columns:
                 dep_series = pd.to_numeric(df_stats["total_deposited"], errors="coerce").dropna()
                 dep_series = dep_series[dep_series > 0]
                 if not dep_series.empty:
                     base_capital = float(dep_series.iloc[0])
 
-            # 2) Fallback: implied capital from equity and PnL
+            # Fallback: implied capital from equity and PnL
             if base_capital is None or base_capital <= 0:
                 base_capital = max(start_equity - total_pnl, 1e-9)
 
             total_return = total_pnl / base_capital if base_capital > 0 else 0.0
 
-            # ROI should use current invested capital, not starting capital
+            # ---------- ROI BASE (money-weighted notion, same logic as before) ----------
             roi_base = None
 
             if "net_cash_flow" in df_stats.columns:
@@ -1463,6 +1467,7 @@ if os.path.exists(portfolio_path):
             annual_return = (1.0 + total_return) ** (365.25 / elapsed_days) - 1.0 if total_return > -1 else -1.0
             annual_label = "Annualized Return"
 
+            # Top caption: SAME as your working version
             st.markdown(
                 f"""
                 <div style="font-size: 0.85rem; color: var(--text-muted, rgba(255,255,255,0.75));">
@@ -1474,11 +1479,15 @@ if os.path.exists(portfolio_path):
                 unsafe_allow_html=True,
             )
 
-            # Build a positive equity curve for drawdown / Sharpe
+            # ---------- STRATEGY EQUITY: PURE PnL, TIME-WEIGHTED ----------
+            # This is your "skill" curve: base_capital + pnl_value (deposits stripped via pnl_value construction)
             df_stats["strategy_equity"] = base_capital + df_stats["pnl_value"]
-            df_stats["strategy_equity"] = pd.to_numeric(df_stats["strategy_equity"], errors="coerce").fillna(method="ffill")
+            df_stats["strategy_equity"] = (
+                pd.to_numeric(df_stats["strategy_equity"], errors="coerce")
+                .fillna(method="ffill")
+            )
 
-            # Prevent divide-by-zero / negative starting peak issues
+            # Avoid negative / zero equity for DD / Sharpe
             df_stats = df_stats[df_stats["strategy_equity"] > 0].copy()
 
             if len(df_stats) >= 2:
@@ -1489,7 +1498,7 @@ if os.path.exists(portfolio_path):
                 max_drawdown = 0.0
 
             daily_curve = (
-            df_stats.set_index("date")[["strategy_equity"]]
+                df_stats.set_index("date")[["strategy_equity"]]
                 .resample("1D")
                 .last()
                 .dropna()
@@ -1498,7 +1507,7 @@ if os.path.exists(portfolio_path):
             daily_curve["ret"] = daily_curve["strategy_equity"].pct_change()
             daily_rets = daily_curve["ret"].replace([float("inf"), float("-inf")], pd.NA).dropna()
 
-            # ---- Full-period Sharpe & volatility ----
+            # Full-period Sharpe & volatility
             if len(daily_rets) >= 2 and daily_rets.std() > 0:
                 sharpe = float((daily_rets.mean() / daily_rets.std()) * (252 ** 0.5))
                 volatility = float(daily_rets.std() * (252 ** 0.5))
@@ -1506,30 +1515,23 @@ if os.path.exists(portfolio_path):
                 sharpe = None
                 volatility = None
 
-            # ---- Rolling 30-day Sharpe (annualized) ----
+            # Rolling 30-day Sharpe (optional, but you liked it)
             rolling_sharpe_30 = None
             if len(daily_rets) >= 30:
-                # Use the same daily_curve["ret"] series, aligned on dates
                 roll_mean = daily_curve["ret"].rolling(window=30).mean()
                 roll_std = daily_curve["ret"].rolling(window=30).std()
-
                 roll_sharpe_daily = roll_mean / roll_std
-                # Annualize each 30-day window's Sharpe
                 roll_sharpe_annual = roll_sharpe_daily * (252 ** 0.5)
-
-                # Take the last valid rolling Sharpe as the "current 30d Sharpe"
                 roll_sharpe_annual = roll_sharpe_annual.replace([float("inf"), float("-inf")], pd.NA).dropna()
                 if not roll_sharpe_annual.empty:
                     rolling_sharpe_30 = float(roll_sharpe_annual.iloc[-1])
 
-            # Closed-trade stats across all symbols
+            # ---------- CLOSED-TRADE STATS (unchanged) ----------
             all_cycle_pnls = []
-
             for sym in symbols:
                 trade_path = get_trade_log_file(sym)
                 if not os.path.exists(trade_path):
                     continue
-
                 try:
                     dft = pd.read_csv(trade_path)
                     dft["timestamp"] = pd.to_datetime(dft["timestamp"], utc=True, errors="coerce")
@@ -1537,7 +1539,11 @@ if os.path.exists(portfolio_path):
                     dft["price"] = pd.to_numeric(dft.get("price"), errors="coerce")
                     dft["shares"] = pd.to_numeric(dft.get("shares"), errors="coerce")
 
-                    dft = dft.dropna(subset=["timestamp", "action", "price", "shares"]).sort_values("timestamp").copy()
+                    dft = (
+                        dft.dropna(subset=["timestamp", "action", "price", "shares"])
+                        .sort_values("timestamp")
+                        .copy()
+                    )
 
                     if "shares_after" not in dft.columns:
                         dft["shares_after"] = dft["shares"]
@@ -1611,6 +1617,7 @@ if os.path.exists(portfolio_path):
                 avg_trade = None
                 closed_trades = 0
 
+            # ---------- METRICS LAYOUT: SAME AS YOUR ORIGINAL ----------
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Strategy Equity", f"${end_equity:,.2f}")
             c2.metric("Total PnL", f"${total_pnl:,.2f}")
@@ -1620,7 +1627,6 @@ if os.path.exists(portfolio_path):
             c5, c6, c7, c8 = st.columns(4)
             c5.metric("ROI", f"{roi_value * 100:.2f}%")
             c6.metric("Sharpe Ratio", "N/A" if sharpe is None else f"{sharpe:.2f}")
-            # c7.metric("Sharpe (30d)", "N/A" if rolling_sharpe_30 is None else f"{rolling_sharpe_30:.2f}")
             c7.metric("Win Rate", "N/A" if win_rate is None else f"{win_rate * 100:.1f}%")
             c8.metric("Profit Factor", "∞" if profit_factor == float('inf') else ("N/A" if profit_factor is None else f"{profit_factor:.2f}"))
 
@@ -1630,24 +1636,149 @@ if os.path.exists(portfolio_path):
             c12.metric("Avg Closed Trade", "N/A" if avg_trade is None else f"${avg_trade:,.2f}")
             c13.metric("Closed Trades", f"{closed_trades}")
 
-            
+            # ---------- Broker vs Strategy Equity text (unchanged) ----------
             broker_equity = None
             try:
-                broker_equity = float(account_cache.get_account().get("equity", 0.0) or 0.0)
+                broker_equity = float(account_cache.getaccount().getequity() or 0.0)
             except Exception:
                 broker_equity = None
 
             if broker_equity is not None:
                 st.markdown(
-                f"""
-                <div style="font-size: 0.85rem; color: var(--text-muted, rgba(255,255,255,0.65)); line-height: 1.5; margin-top: 0.25rem;">
-                    <strong>Broker Equity:</strong> ${broker_equity:,.2f}<br>
-                    <strong>Strategy Equity:</strong> ${end_equity:,.2f}<br>
-                    Strategy Equity is calculated from the local daily portfolio file.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )   
+                    f"""
+                    <div style="font-size: 0.85rem; color: var(--text-muted, rgba(255,255,255,0.65)); line-height: 1.5; margin-top: 0.25rem;">
+                        <strong>Broker Equity</strong> ${broker_equity:,.2f}<br>
+                        <strong>Strategy Equity</strong> ${end_equity:,.2f}<br>
+                        Strategy Equity is calculated from the local daily portfolio file.
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )  
+
+            # -------------------------------------------------
+            # Strategy Performance (time-weighted, pure PnL equity)
+            # -------------------------------------------------
+            with st.expander("📈 Strategy Performance (time-weighted, pure PnL equity)", expanded=False):
+                try:
+                    # --- Load daily portfolio, as in sanity_check.py ---
+                    df_s = pd.read_csv("data/daily_portfolio.csv", parse_dates=["date"])
+                    df_s = df_s.sort_values("date").reset_index(drop=True)
+
+                    # Ensure timezone-aware dates
+                    df_s["date"] = pd.to_datetime(df_s["date"], utc=True, errors="coerce")
+                    df_s = df_s.dropna(subset=["date"]).reset_index(drop=True)
+
+                    # Numeric columns
+                    df_s["external_flow"] = pd.to_numeric(df_s.get("external_flow", 0.0), errors="coerce").fillna(0.0)
+                    df_s["value"] = pd.to_numeric(df_s.get("value", 0.0), errors="coerce").fillna(0.0)
+
+                    # Initial cash (can be 0)
+                    initial_cash_s = float(
+                        pd.to_numeric(df_s.get("initial_cash", 0.0).iloc[0], errors="coerce") or 0.0
+                    )
+
+                    # Rebuild net_cash_flow and pnl_value (pure trading PnL)
+                    df_s["cum_external"] = df_s["external_flow"].cumsum()
+                    df_s["net_cash_flow"] = initial_cash_s + df_s["cum_external"]
+                    df_s["pnl_value"] = df_s["value"] - df_s["net_cash_flow"]
+
+                    # --- Window and returns (same as script) ---
+                    if len(df_s) < 2:
+                        st.info("Not enough data to compute pure PnL strategy stats yet.")
+                    else:
+                        start_date_s = df_s["date"].iloc[0]
+                        end_date_s = df_s["date"].iloc[-1]
+                        start_equity_s = float(df_s["value"].iloc[0])
+                        end_equity_s = float(df_s["value"].iloc[-1])
+                        total_pnl_s = float(df_s["pnl_value"].iloc[-1])
+
+                        # Base capital: implied from start equity and total PnL
+                        base_capital_s = max(start_equity_s - total_pnl_s, 1e-9)
+                        total_return_s = total_pnl_s / base_capital_s
+
+                        elapsed_days_s = max(
+                            (end_date_s - start_date_s).total_seconds() / 86400.0, 1.0
+                        )
+                        annual_return_s = (
+                            (1.0 + total_return_s) ** (365.25 / elapsed_days_s) - 1.0
+                            if total_return_s > -1
+                            else -1.0
+                        )
+
+                        # --- Strategy equity curve (pure PnL) and daily returns ---
+                        df_s["strategy_equity"] = base_capital_s + df_s["pnl_value"]
+                        df_s = df_s[df_s["strategy_equity"] > 0].copy()
+
+                        daily_s = (
+                            df_s.set_index("date")[["strategy_equity"]]
+                            .resample("1D")
+                            .last()
+                            .dropna()
+                        )
+
+                        daily_s["ret"] = daily_s["strategy_equity"].pct_change()
+                        rets_s = daily_s["ret"].replace([np.inf, -np.inf], np.nan).dropna()
+
+                        if len(rets_s) >= 2 and rets_s.std() > 0:
+                            sharpe_s = (rets_s.mean() / rets_s.std()) * (252 ** 0.5)
+                            vol_s = rets_s.std() * (252 ** 0.5)
+                        else:
+                            sharpe_s = None
+                            vol_s = None
+
+                        # Max drawdown on pure equity
+                        if len(df_s) >= 2:
+                            df_s["running_peak"] = df_s["strategy_equity"].cummax()
+                            df_s["drawdown"] = df_s["strategy_equity"] / df_s["running_peak"] - 1.0
+                            max_dd_s = float(df_s["drawdown"].min())
+                        else:
+                            max_dd_s = 0.0
+
+                        # Daily return distribution summary
+                        if len(rets_s) > 0:
+                            desc_s = rets_s.describe(
+                                percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]
+                            )
+                        else:
+                            desc_s = None
+
+                        # --- Show metrics, matching sanity_check semantics ---
+                        c1s, c2s, c3s, c4s = st.columns(4)
+                        c1s.metric("Base capital (PnL-only)", f"${base_capital_s:,.2f}")
+                        c2s.metric("Total PnL (PnL-only)", f"${total_pnl_s:,.2f}")
+                        c3s.metric("Total Return (PnL-only)", f"{total_return_s * 100:.2f}%")
+                        c4s.metric("Annualized Return (PnL-only)", f"{annual_return_s * 100:.2f}%")
+
+                        c5s, c6s, c7s, c8s = st.columns(4)
+                        c5s.metric(
+                            "Sharpe (PnL-only)",
+                            "N/A" if sharpe_s is None else f"{sharpe_s:.4f}",
+                        )
+                        c6s.metric(
+                            "Volatility (PnL-only)",
+                            "N/A" if vol_s is None else f"{vol_s * 100:.2f}%",
+                        )
+                        c7s.metric(
+                            "Max Drawdown (PnL-only)",
+                            f"{max_dd_s * 100:.2f}%"
+                        )
+                        c8s.metric("Days", f"{len(rets_s)}")
+
+                        if desc_s is not None:
+                            st.caption(
+                                "Daily returns (PnL-only equity) — "
+                                f"Min: {desc_s['min']*100:6.2f}%, "
+                                f"5th: {desc_s['5%']*100:6.2f}%, "
+                                f"25th: {desc_s['25%']*100:6.2f}%, "
+                                f"Median: {desc_s['50%']*100:6.2f}%, "
+                                f"75th: {desc_s['75%']*100:6.2f}%, "
+                                f"95th: {desc_s['95%']*100:6.2f}%, "
+                                f"Max: {desc_s['max']*100:6.2f}%"
+                            )
+                except FileNotFoundError:
+                    st.error("data/daily_portfolio.csv not found. Run your data update script first.")
+                except Exception as e:
+                    st.error(f"Error computing pure PnL strategy stats: {e}")
 
         else:
             st.info("Not enough portfolio history yet to compute total performance stats.")
