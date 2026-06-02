@@ -28,6 +28,8 @@ from predictive_model.data_loader import fetch_historical_data, fetch_intraday_h
 from plotly.subplots import make_subplots
 
 
+# At the top of dashboard.py, near other config-like settings
+SHOW_DEBUG_BLOCKS = False  # set True for debugging purposes
 # -------------------------------------------------
 # Streamlit setup
 # -------------------------------------------------
@@ -229,13 +231,15 @@ if df_dep is not None and not df_dep.empty:
     df_dep = df_dep.sort_values("date").reset_index(drop=True)
 
 # ── Debug: show what deposits were loaded ────────────────────────────────────
-with st.expander("🔍 Deposit Debug (expand to verify deposit data)", expanded=False):
-    if df_dep is None or df_dep.empty:
-        st.error("❌ No deposits loaded — PnL and Raw Equity will be identical!")
-        st.info("Add entries to deposits.csv  OR  ensure Alpaca API credentials are correct.")
-    else:
-        st.success(f"✅ {len(df_dep)} deposit/withdrawal entries loaded:")
-        st.dataframe(df_dep, use_container_width=True)
+
+if SHOW_DEBUG_BLOCKS:
+    with st.expander("🔍 Deposit Debug (expand to verify deposit data)", expanded=False):
+        if df_dep is None or df_dep.empty:
+            st.error("❌ No deposits loaded — PnL and Raw Equity will be identical!")
+            st.info("Add entries to deposits.csv  OR  ensure Alpaca API credentials are correct.")
+        else:
+            st.success(f"✅ {len(df_dep)} deposit/withdrawal entries loaded:")
+            st.dataframe(df_dep, use_container_width=True)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # -------------------------------------------------
@@ -1164,8 +1168,9 @@ for sym in symbols:
             cD.metric("Largest Win / Loss", f"{largest_win:.2f} / {largest_loss:.2f}")
 
 
-            with st.expander("🔍 Closed-trade cycle PnLs (debug)"):
-                st.dataframe(pd.DataFrame({"cycle_pnl": s}))
+            if SHOW_DEBUG_BLOCKS:
+                with st.expander("🔍 Closed-trade cycle PnLs (debug)"):
+                    st.dataframe(pd.DataFrame({"cycle_pnl": s}))
 
 
 # -------------------------------------------------
@@ -1467,13 +1472,31 @@ if os.path.exists(portfolio_path):
             annual_return = (1.0 + total_return) ** (365.25 / elapsed_days) - 1.0 if total_return > -1 else -1.0
             annual_label = "Annualized Return"
 
-            # Top caption: SAME as your working version
+            broker_equity = None
+            try:
+                broker_equity = float(account_cache.get_account().get("equity", 0.0) or 0.0)
+            except Exception:
+                broker_equity = None
+
+            lines = [
+                f"<strong>Base capital:</strong> ${base_capital:,.2f}",
+                f"<strong>ROI base:</strong> ${roi_base:,.2f}",
+                f"<strong>Window:</strong> {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}",
+            ]
+
+            if broker_equity is not None:
+                lines.append(f"<strong>Broker Equity:</strong> ${broker_equity:,.2f}")
+
+            # Disclaimer about how strategy equity is built
+            lines.append(
+                "<em>Strategy Equity is reconstructed from trade logs (trades CSV), "
+                "not broker-reported equity.</em>"
+            )
+
             st.markdown(
                 f"""
-                <div style="font-size: 0.85rem; color: var(--text-muted, rgba(255,255,255,0.75));">
-                    <strong>Base capital:</strong> ${base_capital:,.2f}<br>
-                    <strong>ROI base:</strong> ${roi_base:,.2f}<br>
-                    <strong>Window:</strong> {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}
+                <div style="font-size: 0.85rem; color: var(--text-muted, rgba(255,255,255,0.75)); line-height: 1.5;">
+                    {'<br>'.join(lines)}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1863,14 +1886,39 @@ if os.path.exists(portfolio_path):
         )
         st.plotly_chart(fig_eq, use_container_width=True, key="portfolio_chart")
 
+        if SHOW_DEBUG_BLOCKS:
+            with st.expander("🔍 PnL debug around deposits"):
+                # Select the key columns
+                debug_cols = ["date", "total_equity", "external_flow", "net_cash_flow", "pnl_value"]
+
+                df_debug = df.copy()
+                df_debug = df_debug.sort_values("date")
+
+                # Option 1: show the last 50 rows
+                st.write("Last 50 rows of portfolio data:")
+                st.dataframe(df_debug[debug_cols].tail(50), use_container_width=True)
+
+                # Option 2 (better): filter manually around the spike date
+                # Example: between 2026-03-01 and 2026-04-15
+                # df_window = df_debug[(df_debug["date"] >= "2026-03-01") & (df_debug["date"] <= "2026-04-15")]
+                # st.dataframe(df_window[debug_cols], use_container_width=True)
+            
         st.subheader("🤖 Bot PnL — Trading Gains Only (deposits stripped)")
         if len(df) < 2:
             st.info("⏳ Not enough data yet to show PnL curve — needs at least 2 days of portfolio history.")
         else:
+            df_pnl = df.sort_values("date").copy()
+            # Ensure pnl_value is numeric and forward-filled
+            df_pnl["pnl_value"] = pd.to_numeric(df_pnl["pnl_value"], errors="coerce").fillna(method="ffill")
+
+            # Re-base so curve starts at 0 (pure PnL from first point)
+            first_pnl = float(df_pnl["pnl_value"].iloc[0])
+            df_pnl["pnl_rebased"] = df_pnl["pnl_value"] - first_pnl
+
             fig_pnl = go.Figure()
             fig_pnl.add_trace(go.Scatter(
-                x=df["date"],
-                y=df["pnl_value"],
+                x=df_pnl["date"],
+                y=df_pnl["pnl_rebased"],
                 mode="lines",
                 name="PnL-Only Equity",
                 line=dict(width=2, color="#00b4d8"),
