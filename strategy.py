@@ -1022,7 +1022,7 @@ def compute_strategy_decisions(
     # Fetch live state + prices (for stop/tp + funding calcs)
     # ---------------------------------------------------------
 
-    # âœ… Fetch account state ONCE
+    # Fetch account state ONCE
     account_cache.invalidate()  # Fresh data for this strategy cycle
     account_state = account_cache.get_account()
 
@@ -1041,6 +1041,28 @@ def compute_strategy_decisions(
         d = diagnostics.get(sym.upper()) or {}
         prices[sym] = float(d.get("price") or 0.0) or (fetch_latest_price(sym) or 0.0)
 
+    # ---------------------------------------------------------
+    # Cross-sectional intraday volume ratio (vr) stats
+    # ---------------------------------------------------------
+    vr_values = []
+    for sym in symbols:
+        d_vr = diagnostics.get(sym.upper()) or {}
+        vr = d_vr.get("intraday_volume_ratio")
+        try:
+            if vr is not None:
+                vr_values.append(float(vr))
+        except Exception:
+            continue
+
+    group_median_vr = None
+    if vr_values:
+        try:
+            group_median_vr = float(pd.Series(vr_values).median())
+        except Exception:
+            group_median_vr = None
+
+    if group_median_vr is not None:
+        print(f"[VR] group_median_vr={group_median_vr:.3f} from {len(vr_values)} symbols")
 
     # Ensure SPY state exists even if not in symbols (safe)
     if spy_sym not in pms:
@@ -1337,9 +1359,52 @@ def compute_strategy_decisions(
                     except Exception as e:
                         print(f"[WARN] PDT check failed for AAPL: {e}")
 
+    # ---------------------------------------------------------
+    # Cross-sectional low-volume guardrail for MR BUYs
+    # ---------------------------------------------------------
+    if group_median_vr is not None and group_median_vr > 0:
+        for sym in core_symbols:
+            d_diag = diagnostics.get(sym.upper()) or {}
+            regime = d_diag.get("intraday_regime")
+            stock_vr = d_diag.get("intraday_volume_ratio")
+
+            # Only apply to mean-reversion regime
+            if regime != "mr":
+                continue
+
+            try:
+                if stock_vr is None:
+                    continue
+                stock_vr = float(stock_vr)
+            except Exception:
+                continue
+
+            prev = decisions.get(sym) or {}
+            if prev.get("action") != "buy":
+                # Only care about NEW BUYs
+                continue
+
+            # Optional tiny absolute floor to avoid completely dead tape
+            if stock_vr < 0.02:
+                decisions[sym] = make_decision(
+                    "hold",
+                    0,
+                    f"{sym}: MR BUY blocked - vr={stock_vr:.3f} < 0.02 (dead tape). "
+                    f"orig_reason=({prev.get('explain','')})"
+                )
+                continue
+
+            # Relative rule: block only if far below peers
+            if stock_vr < 0.5 * group_median_vr:
+                decisions[sym] = make_decision(
+                    "hold",
+                    0,
+                    f"{sym}: MR BUY blocked - vr={stock_vr:.3f} << group_median_vr={group_median_vr:.3f}. "
+                    f"orig_reason=({prev.get('explain','')})"
+                )
 
 
-   # ---------------------------------------------------------
+    # ---------------------------------------------------------
     # 4.5) BUY CONFIRMATION GUARDRAIL
     # ---------------------------------------------------------
     def _safe_f(x, default=None):
