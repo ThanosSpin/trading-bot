@@ -9,6 +9,7 @@ import pytz
 from config.config import PORTFOLIO_PATH, TIMEZONE
 from broker import get_trading_api
 from account_cache import account_cache
+from json.decoder import JSONDecodeError
 
 
 # ============================================================
@@ -87,17 +88,25 @@ class PortfolioManager:
     # ------------------------
 
     def _load(self):
-        """Load JSON portfolio; fallback to live if missing."""
+        """Load JSON portfolio; fallback to live if missing or corrupted."""
         if os.path.exists(self.file):
-            with open(self.file, "r") as f:
-                data = json.load(f)
+            try:
+                with open(self.file, "r") as f:
+                    data = json.load(f)
+            except (JSONDecodeError, OSError) as e:
+                print(f"[WARN] Corrupted portfolio file for {self.symbol}: {e}. Resetting.")
+                # Optional: backup corrupted file
+                try:
+                    os.rename(self.file, self.file + ".corrupted")
+                except OSError:
+                    pass
+                return self._new_from_live()
 
             # Backwards-compatible defaults
             data.setdefault("cash", 0.0)
             data.setdefault("shares", 0.0)
             data.setdefault("last_price", 0.0)
 
-            # If missing, initialize from last_price (or 0)
             lp = float(data.get("last_price", 0.0) or 0.0)
             sh = float(data.get("shares", 0.0) or 0.0)
 
@@ -106,20 +115,21 @@ class PortfolioManager:
 
             return data
 
-        # If no local file → create initial state
+        # If no local file → create initial state from live account
+        return self._new_from_live()
+
+    def _new_from_live(self):
         live = get_live_portfolio(self.symbol)
         sh = float(live.get("shares", 0.0) or 0.0)
         lp = float(live.get("last_price", 0.0) or 0.0)
-        ap = float(live.get("avg_price", 0.0) or 0.0)
 
-        data = {
-            "cash": live["cash"],
-            "shares": live.get("shares", 0.0),
-            "last_price": live.get("last_price", 0.0),
-            "avg_price": live.get("last_price", 0.0) if live.get("shares", 0.0) > 0 else 0.0,
-            "max_price": live.get("last_price", 0.0) if live.get("shares", 0.0) > 0 else 0.0,
+        return {
+            "cash": live.get("cash", 0.0),
+            "shares": sh,
+            "last_price": lp,
+            "avg_price": lp if sh > 0 else 0.0,
+            "max_price": lp if sh > 0 else 0.0,
         }
-        return data
 
     # ------------------------
     # Live synchronization

@@ -1,330 +1,357 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-Auto-retrain models when performance degrades (drift detection)
+auto_retrain.py
 
-Features:
-- Monitors model accuracy and calibration
-- Automatically retrains degraded models
-- Validates new models before deployment
-- Backs up and restores models if validation fails
-- Blacklist for models requiring manual review
+Automatic retraining script that:
+- Analyzes recent live performance from prediction logs
+- Decides which models are degraded
+- Retrains them using the patched retrain_model.py pipeline
+- Validates new models using accuracy + calibration_error + brier_score
+- Keeps or rolls back models based on those metrics
 """
 
 import os
-import shutil
+import sys
 from datetime import datetime
-from predictive_model.model_monitor import get_monitor
-from train_model.retrain_model import train_intraday_models_with_shap, train_daily_model_with_shap
-from config.config import TRAIN_SYMBOLS
+import joblib
+import traceback
+import shutil
 
+import pandas as pd
+import numpy as np
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+from config import (
+    TRAIN_SYMBOLS,
+    LOGS_DIR,
+    MODEL_DIR,
+)
 
-ACCURACY_THRESHOLD = 0.52      # Retrain if accuracy drops below 52%
-CALIBRATION_THRESHOLD = 0.12   # Retrain if calibration error > 12%
-MIN_SAMPLES = 20               # Minimum predictions needed for valid assessment
+# Use the patched retrain functions
+from train_model.retrain_model import (
+    train_daily_model,
+    train_intraday_models,
+)
 
-# Models that require manual review (skip auto-retrain)
-RETRAIN_BLACKLIST = {
-    ("PLTR", "intraday_mom"),  # Known to produce unstable predictions
-    # Add more as needed: ("SYMBOL", "mode")
-}
+# -------------------------------------------------------------------
+# CONFIG
+# -------------------------------------------------------------------
 
+DAILY_DEGRADATION_MIN_SAMPLES = 40
+DAILY_DEGRADATION_MIN_ACC = 0.55
+DAILY_DEGRADATION_MAX_CAL_ERR = 0.12  # for flagging as degraded
 
-# ============================================================
-# MODEL VALIDATION
-# ============================================================
+# Acceptance criteria for new daily models (from artifact metrics)
+MIN_ACC = 0.55
+MAX_CAL_ERR = 0.07   # 7%
+MAX_BRIER = 0.27
 
-def validate_retrained_model(sym: str, mode: str, min_accuracy: float = 0.55) -> bool:
+INTRADAY_MIN_OUTCOMES = 25  # to even consider intraday performance
+
+# -------------------------------------------------------------------
+# HELPERS FOR READING LOGS
+# -------------------------------------------------------------------
+
+def _daily_log_path(symbol: str) -> str:
+    return os.path.join(LOGS_DIR, f"predictions_{symbol}_daily.csv")
+
+def _load_daily_eval(symbol: str):
     """
-    Validate newly trained model before deploying it.
-    
-    Args:
-        sym: Stock symbol
-        mode: Model mode (daily, intraday_mr, intraday_mom)
-        min_accuracy: Minimum acceptable accuracy
-    
-    Returns:
-        True if model passes validation, False otherwise
+    Load recent daily prediction log for a symbol.
+    Returns (accuracy, calibration_error, count) or (None, None, 0).
     """
-    import joblib
-    
-    model_path = os.path.join("models", f"{sym}_{mode}_xgb.pkl")
-    
-    if not os.path.exists(model_path):
-        print(f"  ❌ Model file not found: {model_path}")
-        return False
-    
+    path = _daily_log_path(symbol)
+    if not os.path.exists(path):
+        return None, None, 0
+
     try:
-        artifact = joblib.load(model_path)
-        metrics = artifact.get("metrics", {})
-        
-        # Extract metrics
-        test_acc = metrics.get("accuracy", 0.0)
-        test_logloss = metrics.get("logloss", 999.0)
-        calibration_error = metrics.get("calibration_error")
-        brier_score = metrics.get("brier_score")
-        
-        print(f"  📊 Validation metrics:")
-        print(f"     Accuracy: {test_acc:.1%}")
-        print(f"     LogLoss: {test_logloss:.3f}")
-        if calibration_error:
-            print(f"     Calibration Error: {calibration_error:.1%}")
-        if brier_score:
-            print(f"     Brier Score: {brier_score:.3f}")
-        
-        # VALIDATION RULES
-        if test_acc < min_accuracy:
-            print(f"  ❌ REJECT: Accuracy {test_acc:.1%} < {min_accuracy:.1%}")
-            return False
-        
-        if calibration_error and calibration_error > 0.20:
-            print(f"  ❌ REJECT: Calibration error {calibration_error:.1%} > 20%")
-            return False
-        
-        if test_logloss > 0.80:
-            print(f"  ❌ REJECT: LogLoss {test_logloss:.3f} > 0.80 (too uncertain)")
-            return False
-        
-        # Additional sanity checks
-        if test_acc > 0.95:
-            print(f"  ⚠️ WARNING: Suspiciously high accuracy {test_acc:.1%} - possible overfitting")
-            # Don't reject, but flag for review
-        
-        print(f"  ✅ PASS: Model meets quality standards")
-        return True
-        
+        df = pd.read_csv(path)
     except Exception as e:
-        print(f"  ❌ Validation error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[WARN] Failed to read daily log for {symbol}: {e}")
+        return None, None, 0
+
+    if "actual_outcome" not in df.columns or "predicted_prob" not in df.columns:
+        return None, None, len(df)
+
+    df = df.copy()
+    df = df.dropna(subset=["actual_outcome", "predicted_prob"])
+    if len(df) == 0:
+        return None, None, 0
+
+    y = df["actual_outcome"].astype(int)
+    p = df["predicted_prob"].astype(float)
+
+    # Simple 0.5 threshold accuracy for diagnostics
+    y_hat = (p >= 0.5).astype(int)
+    acc = (y_hat == y).mean()
+
+    # Calibration error: |mean(p) - mean(y)|
+    cal_err = float(abs(p.mean() - y.mean()))
+
+    return float(acc), float(cal_err), int(len(df))
+
+
+def _intraday_log_path(symbol: str, mode: str) -> str:
+    # e.g. predictions_SPY_intraday_mr.csv
+    return os.path.join(LOGS_DIR, f"predictions_{symbol}_{mode}.csv")
+
+def _load_intraday_eval(symbol: str, mode: str):
+    path = _intraday_log_path(symbol, mode)
+    if not os.path.exists(path):
+        return None, 0
+
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        print(f"[WARN] Failed to read intraday log for {symbol}/{mode}: {e}")
+        return None, 0
+
+    if "actual_outcome" not in df.columns or "predicted_prob" not in df.columns:
+        return None, len(df)
+
+    df = df.copy()
+    df = df.dropna(subset=["actual_outcome", "predicted_prob"])
+    if len(df) == 0:
+        return None, 0
+
+    y = df["actual_outcome"].astype(int)
+    p = df["predicted_prob"].astype(float)
+    y_hat = (p >= 0.5).astype(int)
+    acc = (y_hat == y).mean()
+    return float(acc), int(len(df))
+
+
+# -------------------------------------------------------------------
+# MODEL ARTIFACT HELPERS
+# -------------------------------------------------------------------
+
+def _artifact_path(symbol: str, mode: str) -> str:
+    """
+    Current active model path (patched artifact).
+    """
+    return os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
+
+def _backup_path(symbol: str, mode: str) -> str:
+    """
+    Temporary backup used by auto_retrain for rollback.
+    """
+    return os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl.backup")
+
+
+def _backup_active_model(symbol: str, mode: str) -> bool:
+    """
+    Make a .backup copy of the current active model, if it exists.
+    """
+    active = _artifact_path(symbol, mode)
+    backup = _backup_path(symbol, mode)
+
+    if not os.path.exists(active):
+        print(f"  [INFO] No active {symbol}/{mode} model to back up.")
+        return False
+
+    try:
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        # simple overwrite backup
+        if os.path.exists(backup):
+            os.remove(backup)
+        shutil.copy2(active, backup)
+        print(f"  💾 Backed up existing model to {backup}")
+        return True
+    except Exception as e:
+        print(f"  [WARN] Failed to create backup for {symbol}/{mode}: {e}")
         return False
 
 
-# ============================================================
-# BACKUP/RESTORE UTILITIES
-# ============================================================
-
-def backup_existing_model(sym: str, mode: str) -> bool:
+def _restore_backup_model(symbol: str, mode: str) -> None:
     """
-    Backup current model before retraining.
-    
-    Args:
-        sym: Stock symbol
-        mode: Model mode
-    
-    Returns:
-        True if backup successful, False otherwise
+    Restore from .backup if a new retrain fails validation.
     """
-    model_path = os.path.join("models", f"{sym}_{mode}_xgb.pkl")
-    backup_path = os.path.join("models", f"{sym}_{mode}_xgb.pkl.backup")
-    
-    if os.path.exists(model_path):
-        try:
-            shutil.copy2(model_path, backup_path)
-            print(f"  💾 Backed up existing model to {backup_path}")
-            return True
-        except Exception as e:
-            print(f"  ⚠️ Backup failed: {e}")
-            return False
-    else:
-        print(f"  ℹ️ No existing model to backup")
-        return False
+    active = _artifact_path(symbol, mode)
+    backup = _backup_path(symbol, mode)
+
+    if not os.path.exists(backup):
+        print(f"  [WARN] No backup found to restore for {symbol}/{mode}.")
+        return
+
+    try:
+        if os.path.exists(active):
+            os.remove(active)
+        shutil.copy2(backup, active)
+        print(f"  ↩️ Restored backup model")
+    except Exception as e:
+        print(f"  [ERROR] Failed to restore backup for {symbol}/{mode}: {e}")
 
 
-def restore_backup_model(sym: str, mode: str) -> bool:
-    """
-    Restore backup if new model fails validation.
-    
-    Args:
-        sym: Stock symbol
-        mode: Model mode
-    
-    Returns:
-        True if restore successful, False otherwise
-    """
-    model_path = os.path.join("models", f"{sym}_{mode}_xgb.pkl")
-    backup_path = os.path.join("models", f"{sym}_{mode}_xgb.pkl.backup")
-    
-    if os.path.exists(backup_path):
-        try:
-            shutil.copy2(backup_path, model_path)
-            print(f"  ↩️ Restored backup model")
-            return True
-        except Exception as e:
-            print(f"  ❌ Restore failed: {e}")
-            return False
-    else:
-        print(f"  ⚠️ No backup found to restore")
-        return False
+def _load_artifact(symbol: str, mode: str):
+    path = _artifact_path(symbol, mode)
+    if not os.path.exists(path):
+        return None
+    try:
+        return joblib.load(path)
+    except Exception as e:
+        print(f"[WARN] Failed to load artifact {path}: {e}")
+        return None
 
 
-# ============================================================
-# MAIN RETRAINING LOGIC
-# ============================================================
+# -------------------------------------------------------------------
+# MAIN CHECK + RETRAIN LOGIC
+# -------------------------------------------------------------------
 
 def check_and_retrain():
-    """Check each model's performance and retrain if needed"""
-    
-    print(f"\n{'='*80}")
+    symbols = TRAIN_SYMBOLS if isinstance(TRAIN_SYMBOLS, list) else [TRAIN_SYMBOLS]
+
+    print("\n" + "=" * 80)
     print(f"🔍 AUTO-RETRAIN CHECK - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*80}\n")
-    
-    monitor = get_monitor()
-    symbols_to_retrain = set()
-    
-    for sym in TRAIN_SYMBOLS:
+    print("=" * 80 + "\n")
+
+    degraded_daily = []   # list of symbols
+    # intraday degradation detection is currently informational only
+    intraday_info = {}
+
+    # ------------------ DIAGNOSTICS PHASE -------------------
+
+    for sym in symbols:
         print(f"\n📊 Checking {sym}...")
-        
-        # ============================================================
-        # Check daily model
-        # ============================================================
-        try:
-            daily_metrics = monitor.get_performance_metrics(sym, "daily", lookback_days=14)
-            
-            if daily_metrics['sample_size'] >= MIN_SAMPLES:
-                acc = daily_metrics['accuracy']
-                cal_err = daily_metrics['calibration_error']
-                samples = daily_metrics['sample_size']
-                
-                print(f"  Daily: {samples} samples, acc={acc:.1%}, cal_err={cal_err:.1%}")
-                
-                if acc < ACCURACY_THRESHOLD or cal_err > CALIBRATION_THRESHOLD:
-                    print(f"  ⚠️ Daily model degraded!")
-                    
-                    # Check blacklist
-                    if (sym, "daily") in RETRAIN_BLACKLIST:
-                        print(f"  🚫 {sym} daily is blacklisted - skipping auto-retrain")
-                    else:
-                        symbols_to_retrain.add((sym, 'daily'))
-            else:
-                print(f"  Daily: Insufficient data ({daily_metrics['sample_size']} samples)")
-                
-        except Exception as e:
-            print(f"  Daily: Error - {e}")
-        
-        # ============================================================
-        # Check intraday models
-        # ============================================================
+
+        # Daily
+        daily_acc, daily_cal_err, daily_n = _load_daily_eval(sym)
+        if daily_acc is not None:
+            print(f"  Daily: {daily_n} samples, acc={daily_acc*100:.1f}%, "
+                  f"cal_err={daily_cal_err*100:.1f}%")
+        else:
+            print(f"  Daily: No usable outcomes")
+
+        degraded = False
+        if daily_acc is not None and daily_n >= DAILY_DEGRADATION_MIN_SAMPLES:
+            if daily_acc < DAILY_DEGRADATION_MIN_ACC or daily_cal_err > DAILY_DEGRADATION_MAX_CAL_ERR:
+                print("  ⚠️ Daily model degraded!")
+                degraded = True
+
+        if degraded:
+            degraded_daily.append(sym)
+
+        # Intraday (just log for now)
+        intraday_info[sym] = {}
         for mode in ["intraday_mr", "intraday_mom"]:
-            try:
-                metrics = monitor.get_performance_metrics(sym, mode, lookback_days=7)
-                
-                if metrics['sample_size'] >= MIN_SAMPLES:
-                    acc = metrics['accuracy']
-                    cal_err = metrics['calibration_error']
-                    samples = metrics['sample_size']
-                    
-                    print(f"  {mode}: {samples} samples, acc={acc:.1%}, cal_err={cal_err:.1%}")
-                    
-                    if acc < ACCURACY_THRESHOLD or cal_err > CALIBRATION_THRESHOLD:
-                        print(f"  ⚠️ {mode} degraded!")
-                        
-                        # Check blacklist
-                        if (sym, mode) in RETRAIN_BLACKLIST:
-                            print(f"  🚫 {sym} {mode} is blacklisted - skipping auto-retrain")
-                        else:
-                            # Add to retrain set (both MR and MOM will be retrained together)
-                            symbols_to_retrain.add((sym, 'intraday'))
-                            break  # No need to check the other intraday model
-                else:
-                    print(f"  {mode}: Insufficient data ({metrics['sample_size']} samples)")
-                    
-            except Exception as e:
-                print(f"  {mode}: Error - {e}")
-    
-    # ============================================================
-    # Execute retraining with validation
-    # ============================================================
-    print(f"\n{'='*80}")
-    print(f"🔄 RETRAINING SUMMARY")
-    print(f"{'='*80}\n")
-    
-    if symbols_to_retrain:
-        symbols_daily = {s for s, m in symbols_to_retrain if m == 'daily'}
-        symbols_intraday = {s for s, m in symbols_to_retrain if m == 'intraday'}
-        
-        # Retrain daily models
-        for sym in symbols_daily:
-            print(f"\n{'─'*60}")
-            print(f"🔄 Retraining {sym} daily model...")
-            print(f"{'─'*60}")
-            
-            # Backup existing model
-            backup_existing_model(sym, "daily")
-            
-            try:
-                train_daily_model_with_shap(sym)
-                
-                # ✅ VALIDATE before deploying
-                if validate_retrained_model(sym, "daily", min_accuracy=0.55):
-                    print(f"✅ {sym} daily retrained and validated")
-                else:
-                    print(f"❌ {sym} daily FAILED VALIDATION - restoring backup")
-                    restore_backup_model(sym, "daily")
-                    print(f"⚠️ Manual review required for {sym} daily model!")
-                    
-            except Exception as e:
-                print(f"❌ {sym} daily training failed: {e}")
-                import traceback
-                traceback.print_exc()
-                restore_backup_model(sym, "daily")
-        
-        # Retrain intraday models
-        for sym in symbols_intraday:
-            print(f"\n{'─'*60}")
-            print(f"🔄 Retraining {sym} intraday models (MR + MOM)...")
-            print(f"{'─'*60}")
-            
-            # Backup both MR and MOM models
-            backup_existing_model(sym, "intraday_mr")
-            backup_existing_model(sym, "intraday_mom")
-            
-            try:
-                train_intraday_models_with_shap(sym)
-                
-                # ✅ VALIDATE both models
-                print(f"\n  Validating intraday_mr...")
-                mr_valid = validate_retrained_model(sym, "intraday_mr", min_accuracy=0.55)
-                
-                print(f"\n  Validating intraday_mom...")
-                mom_valid = validate_retrained_model(sym, "intraday_mom", min_accuracy=0.55)
-                
-                if mr_valid and mom_valid:
-                    print(f"\n✅ {sym} intraday models retrained and validated")
-                else:
-                    if not mr_valid:
-                        print(f"\n❌ {sym} intraday_mr FAILED - restoring backup")
-                        restore_backup_model(sym, "intraday_mr")
-                    if not mom_valid:
-                        print(f"❌ {sym} intraday_mom FAILED - restoring backup")
-                        restore_backup_model(sym, "intraday_mom")
-                    print(f"⚠️ Manual review required for {sym} intraday models!")
-                    
-            except Exception as e:
-                print(f"❌ {sym} intraday training failed: {e}")
-                import traceback
-                traceback.print_exc()
-                restore_backup_model(sym, "intraday_mr")
-                restore_backup_model(sym, "intraday_mom")
-        
-        print(f"\n{'='*80}")
-        print(f"✅ Auto-retrain complete!")
-        print(f"{'='*80}\n")
-    else:
-        print("✅ All models performing well - no retraining needed\n")
+            acc_i, n_i = _load_intraday_eval(sym, mode)
+            if acc_i is None or n_i < INTRADAY_MIN_OUTCOMES:
+                print(f"  {mode}: Insufficient data ({n_i} samples)")
+                intraday_info[sym][mode] = ("insufficient", acc_i, n_i)
+            else:
+                print(f"  {mode}: {n_i} samples, acc={acc_i*100:.1f}%")
+                intraday_info[sym][mode] = ("ok", acc_i, n_i)
+
+    print("\n" + "=" * 80)
+    print("🔄 RETRAINING SUMMARY")
+    print("=" * 80 + "\n")
+
+    # ------------------ RETRAINING PHASE (DAILY) -------------------
+
+    for sym in degraded_daily:
+        mode = "daily"
+        print("─" * 60)
+        print(f"🔄 Retraining {sym} {mode} model...")
+        print("─" * 60)
+
+        # Backup current active model
+        _backup_active_model(sym, mode)
+
+        try:
+            # This calls the patched train_daily_model, which:
+            # - fetches data
+            # - calls train_model(...)
+            # - saves the artifact
+            # - prints its own summary
+            train_daily_model(sym)
+
+            # Now load the newly trained artifact to validate
+            artifact = _load_artifact(sym, mode)
+            if artifact is None:
+                print(f"  ❌ Could not load new {sym}/{mode} artifact after retrain.")
+                _restore_backup_model(sym, mode)
+                continue
+
+            metrics = artifact.get("metrics", {}) or {}
+            acc = metrics.get("accuracy")
+            logloss = metrics.get("logloss")
+            cal_err = metrics.get("calibration_error")
+            brier = metrics.get("brier_score")
+
+            print("\n" + "─" * 60)
+            print(f"📊 {sym} - {mode.upper()}")
+            print("─" * 60)
+            print(f"  Target type: {artifact.get('target_type', 'binary')}")
+            print(f"  Classes: {artifact.get('num_classes', 2)}")
+            print(f"  Calibrated: {artifact.get('calibrated', False)}")
+            print(f"  Selected features: {len(artifact.get('features', []))}")
+            full_schema = artifact.get('full_feature_schema') or {}
+            print(f"  Full feature schema: {len(full_schema) if isinstance(full_schema, dict) else full_schema}")
+
+            print("─" * 60)
+            print("  📊 Validation metrics:")
+            if acc is not None:
+                print(f"     Accuracy: {acc:.3f}")
+            else:
+                print("     Accuracy: N/A")
+            if logloss is not None:
+                print(f"     LogLoss: {logloss:.3f}")
+            else:
+                print("     LogLoss: N/A")
+            if cal_err is not None:
+                print(f"     Calibration Error: {cal_err:.3f}")
+            else:
+                print("     Calibration Error: N/A")
+            if brier is not None:
+                print(f"     Brier Score: {brier:.3f}")
+            else:
+                print("     Brier Score: N/A")
+
+            # Combined acceptance decision
+            ok = True
+
+            if acc is None or cal_err is None or brier is None:
+                ok = False
+            else:
+                if acc < MIN_ACC:
+                    ok = False
+                if cal_err > MAX_CAL_ERR:
+                    ok = False
+                if brier > MAX_BRIER:
+                    ok = False
+
+            if ok:
+                print(f"  ✅ PASS: Model meets quality standards")
+                print(f"✅ {sym} {mode} retrained and validated")
+                # keep new model (backup stays as historical snapshot)
+            else:
+                print(f"  ❌ REJECT: "
+                      f"Accuracy {acc*100:.1f}% < {MIN_ACC*100:.1f}% "
+                      f"or Calibration Error/Brier too high")
+                print(f"❌ {sym} {mode} FAILED VALIDATION - restoring backup")
+                _restore_backup_model(sym, mode)
+                print(f"⚠️ Manual review required for {sym} {mode} model!")
+
+        except Exception as e:
+            print(f"❌ {sym} {mode} training failed: {e}")
+            traceback.print_exc()
+            _restore_backup_model(sym, mode)
+
+    print("\n" + "=" * 80)
+    print("✅ Auto-retrain complete!")
+    print("=" * 80 + "\n")
 
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
+def main():
     try:
         check_and_retrain()
+        return 0
+    except KeyboardInterrupt:
+        print("\n[INFO] Interrupted by user.")
+        return 1
     except Exception as e:
-        print(f"\n❌ Auto-retrain failed: {e}")
-        import traceback
+        print(f"[ERROR] Fatal error in auto_retrain.main(): {e}")
         traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

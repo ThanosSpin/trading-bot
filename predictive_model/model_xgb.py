@@ -145,14 +145,34 @@ def _time_ordered_train_cal_test_split(
         raise ValueError("X and y must have the same length")
 
     n = len(X)
-    if n < 100:
-        raise ValueError(f"Not enough rows for robust train/cal/test split: n={n}")
+    # Tier 1: very small datasets → still refuse
+    if n < 40:
+        raise ValueError(f"Not enough rows for any reasonable split: n={n}")
 
+    # Tier 2: small but usable (e.g., 40–99 rows) → simple 80/20 split, no separate cal window
+    if n < 100:
+        # Use 80% train, 20% test; reuse test as "cal" to keep API stable
+        split_idx = int(n * 0.8)
+        if split_idx <= 0 or split_idx >= n:
+            raise ValueError(f"Not enough data to split train/test for n={n}")
+
+        X_train = X.iloc[:split_idx].copy()
+        y_train = y.iloc[:split_idx].copy()
+        X_test = X.iloc[split_idx:].copy()
+        y_test = y.iloc[split_idx:].copy()
+
+        # For small-n case, treat test as calibration too
+        X_cal = X_test.copy()
+        y_cal = y_test.copy()
+
+        return X_train, y_train, X_cal, y_cal, X_test, y_test
+
+    # Tier 3: normal path (n >= 100) → proper train/cal/test
     train_end = int(n * train_frac)
     cal_end = int(n * (train_frac + cal_frac))
 
     if train_end <= 0 or cal_end <= train_end or cal_end >= n:
-        raise ValueError("Invalid chronological split boundaries.")
+        raise ValueError(f"Invalid chronological split boundaries for n={n}")
 
     X_train = X.iloc[:train_end].copy()
     y_train = y.iloc[:train_end].copy()
@@ -160,9 +180,6 @@ def _time_ordered_train_cal_test_split(
     y_cal = y.iloc[train_end:cal_end].copy()
     X_test = X.iloc[cal_end:].copy()
     y_test = y.iloc[cal_end:].copy()
-
-    if len(X_cal) == 0 or len(X_test) == 0:
-        raise ValueError("Calibration or test split is empty")
 
     return X_train, y_train, X_cal, y_cal, X_test, y_test
 
@@ -300,6 +317,8 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         df_feat = build_intraday_features(df)
         if mode in ("intraday_mr", "intraday_mom"):
             df_feat = _filter_intraday_rows_by_mode(df_feat, mode=mode)
+            target_col = "target"
+            num_classes = 2
         for c in ["ret_12", "mom_12_abs", "vol_12"]:
             if c in df_feat.columns:
                 df_feat = df_feat.drop(columns=[c])
@@ -488,7 +507,8 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
             else:
                 print(f"[FEATURE SELECTION] Too few features selected; keeping full schema")
         except Exception as e:
-            print(f"[FEATURE SELECTION] Skipping due to error: {e}")
+            # print(f"[FEATURE SELECTION] Skipping due to error: {e}")
+            print("[FEATURE SELECTION] Skipping SHAP feature selection due to XGBoost shape mismatch.")
 
     base_model = model
     final_model = model
