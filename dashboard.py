@@ -1422,28 +1422,77 @@ if os.path.exists(portfolio_path):
         )
 
         if len(df_stats) >= 2:
+            # Window
             start_date = df_stats["date"].iloc[0]
             end_date = df_stats["date"].iloc[-1]
+            elapsed_days = max((end_date - start_date).days, 1)  # integer calendar days
 
             start_equity = float(df_stats["total_equity"].iloc[0])
             end_equity = float(df_stats["total_equity"].iloc[-1])
             total_pnl = float(df_stats["pnl_value"].iloc[-1])
 
-            # ---------- BASE CAPITAL / TOTAL RETURN (same as before) ----------
+            # Option B (if you know initial_cash is your true 1,510):
+            # investor_initial_capital = float(initial_cash)
+
+            investor_final_equity = end_equity
+
+            # ------------------------------
+            # Strategy PnL-only performance
+            # (keep your existing basecapital heuristic)
+            # ------------------------------
             base_capital = None
-
-            # Prefer first positive total_deposited (from Alpaca deposits or deposits.csv)
             if "total_deposited" in df_stats.columns:
-                dep_series = pd.to_numeric(df_stats["total_deposited"], errors="coerce").dropna()
-                dep_series = dep_series[dep_series > 0]
-                if not dep_series.empty:
-                    base_capital = float(dep_series.iloc[0])
+                first_dep = float(
+                    pd.to_numeric(df_stats["total_deposited"], errors="coerce").fillna(0.0).iloc[0]
+                )
+                if first_dep > 0:
+                    base_capital = first_dep
 
-            # Fallback: implied capital from equity and PnL
+            if base_capital is None or base_capital <= 0:
+                if "initial_cash" in locals() and initial_cash and float(initial_cash) > 0:
+                    base_capital = float(initial_cash)
+
             if base_capital is None or base_capital <= 0:
                 base_capital = max(start_equity - total_pnl, 1e-9)
 
             total_return = total_pnl / base_capital if base_capital > 0 else 0.0
+            annual_return = (
+                (1.0 + total_return) ** (365.25 / elapsed_days) - 1.0
+                if total_return > -1
+                else -1.0
+            )
+
+            # ------------------------------
+            # Investor-style metrics using total_deposited
+            # ------------------------------
+
+            # Earliest and latest net capital invested (deposits - withdrawals)
+            total_deposited_series = pd.to_numeric(df_stats["total_deposited"], errors="coerce").fillna(0.0)
+            total_withdrawn_series = pd.to_numeric(df_stats.get("total_withdrawn", 0.0), errors="coerce").fillna(0.0)
+
+            initial_net_invested = float(total_deposited_series.iloc[0] - total_withdrawn_series.iloc[0])
+            latest_net_invested = float(total_deposited_series.iloc[-1] - total_withdrawn_series.iloc[-1])
+
+            # final equity = latest total_equity
+            investor_final_equity = end_equity
+
+            # For investor total return, use *latest* net capital invested as denominator.
+            # This is: "how much has my account grown relative to the cash I have put in net of withdrawals?"
+            if latest_net_invested > 0 and investor_final_equity > 0:
+                investor_total_return = investor_final_equity / latest_net_invested - 1.0
+                investor_annual_return = (
+                    (investor_final_equity / latest_net_invested) ** (365.25 / elapsed_days) - 1.0
+                )
+            else:
+                investor_total_return = 0.0
+                investor_annual_return = 0.0
+            # ------------------------------
+            # Strategy equity curve (PnL-only) for Sharpe / drawdown
+            # ------------------------------
+            df_stats["strategy_equity"] = base_capital + df_stats["pnl_value"]
+            df_stats["strategy_equity"] = pd.to_numeric(
+                df_stats["strategy_equity"], errors="coerce"
+            ).fillna(method="ffill")
 
             # ---------- ROI BASE (money-weighted notion, same logic as before) ----------
             roi_base = None
@@ -1468,7 +1517,6 @@ if os.path.exists(portfolio_path):
 
             roi_value = total_pnl / roi_base if roi_base > 0 else 0.0
 
-            elapsed_days = max((end_date - start_date).total_seconds() / 86400.0, 1.0)
             annual_return = (1.0 + total_return) ** (365.25 / elapsed_days) - 1.0 if total_return > -1 else -1.0
             annual_label = "Annualized Return"
 
@@ -1658,6 +1706,12 @@ if os.path.exists(portfolio_path):
             c11.metric("Volatility", "N/A" if volatility is None else f"{volatility * 100:.2f}%")
             c12.metric("Avg Closed Trade", "N/A" if avg_trade is None else f"${avg_trade:,.2f}")
             c13.metric("Closed Trades", f"{closed_trades}")
+
+            with st.expander("📈 Investor KPIs", expanded=False):
+                c14, c15, c16 = st.columns(3)
+                c14.metric("Investor Total Return", f"{investor_total_return*100:.2f}%")
+                c15.metric("Investor Annualized Return", f"{investor_annual_return*100:.2f}%")
+                c16.metric("Days", f"{elapsed_days}")
 
             # ---------- Broker vs Strategy Equity text (unchanged) ----------
             broker_equity = None
