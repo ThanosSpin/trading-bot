@@ -64,7 +64,7 @@ def evaluate_calibration(df_eval, platt_model):
 def main():
     results = defaultdict(list)
 
-    for csv_path in sorted(LOGS_DIR.glob("predictions_*_old.csv")):
+    for csv_path in sorted(LOGS_DIR.glob("predictions_*.csv")):
         symbol = csv_path.stem.replace("predictions_", "")
         print(f"\n=========== Symbol: {symbol} ===========")
 
