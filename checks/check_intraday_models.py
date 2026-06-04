@@ -57,7 +57,7 @@ def analyze_time_of_day_performance(symbol: str, model_type: str, lookback_days:
         df = pd.read_csv(log_path)
         # Filter by mode for this analysis
         df = df[df["mode"] == model_type].copy()  
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, format='mixed')
         
         # Filter recent data
         cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=lookback_days)
@@ -187,7 +187,7 @@ def analyze_regime_balance(symbol: str, lookback_days: int = 30):
             if df.empty:
                 print(f"⚠️ No predictions found for {symbol} / {model_type}")
                 return
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, format='mixed')
             
             # Filter recent data
             cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=lookback_days)
@@ -278,7 +278,7 @@ def plot_calibration_curve(symbol: str, model_type: str, lookback_days: int = 30
         if df.empty:
             print(f"⚠️ No predictions found for {symbol} / {model_type}")
             return
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, format='mixed')
         
         # Filter recent data
         cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=lookback_days)
@@ -404,7 +404,7 @@ def analyze_recent_predictions(symbol: str, model_type: str, hours: int = 6):
         if df.empty:
             print(f"⚠️ No predictions found for {symbol} / {model_type}")
             return
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, format='mixed')
         
         # Filter recent hours
         cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=hours)
