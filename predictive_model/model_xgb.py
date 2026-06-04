@@ -4,6 +4,7 @@ import traceback
 import warnings
 from datetime import datetime
 from typing import Dict, Optional, Tuple, Union
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -45,6 +46,8 @@ from config.config import (
 
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
+CALIBRATOR_DIR = Path("models") / "calibrators"
+_calibrator_cache = {}
 
 warnings.filterwarnings("ignore", message=".*cv='prefit'.*")
 
@@ -52,6 +55,28 @@ warnings.filterwarnings("ignore", message=".*cv='prefit'.*")
 # ---------------------------------------------------------
 # Utility
 # ---------------------------------------------------------
+def load_platt_calibrator(symbol: str, mode: str):
+    """
+    Load Platt calibrator for (symbol, mode) from models/calibrators.
+    Returns None if missing. Uses simple in-memory cache.
+    """
+    sym = symbol.upper()
+    key = (sym, mode)
+    if key in _calibrator_cache:
+        return _calibrator_cache[key]
+
+    path = CALIBRATOR_DIR / f"{sym}_{mode}_platt.joblib"
+    if path.exists():
+        try:
+            platt = joblib.load(path)
+        except Exception:
+            platt = None
+    else:
+        platt = None
+
+    _calibrator_cache[key] = platt
+    return platt
+
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
@@ -739,6 +764,22 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         if num_classes == 2 or target_type == "binary":
             prob = float(proba[1])
             decision_threshold = float(model_dict.get("decision_threshold", 0.5))
+
+            # NEW: Platt calibration if available
+            try:
+                sym = str(model_dict.get("symbol") or "").upper()
+                mode = str(model_dict.get("mode") or "")
+                platt = load_platt_calibrator(sym, mode) if sym and mode else None
+            except Exception:
+                platt = None
+
+            if platt is not None:
+                try:
+                    prob = float(platt.predict_proba([[prob]])[0, 1])
+                except Exception:
+                    # Fail safe: if calibration breaks, keep raw prob
+                    pass
+                
             return {
                 "final_prob": prob,
                 "decision_threshold": decision_threshold,
