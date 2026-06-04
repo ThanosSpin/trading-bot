@@ -100,56 +100,6 @@ def calculate_return(start_price: float, end_price: float) -> float:
         return None
     return (end_price - start_price) / start_price
 
-
-def get_next_day_close(symbol: str, pred_time: pd.Timestamp) -> float:
-    """
-    Get next trading day's close price relative to the prediction date (NY time).
-    """
-    try:
-        # Convert prediction time to America/New_York to get the trade date
-        pred_time_ny = pred_time.tz_convert("America/New_York")
-        pred_date = pred_time_ny.date()
-
-        # Fetch recent daily data
-        df = fetch_historical_data(symbol, period="10d", interval="1d")
-        if df is None or len(df) == 0:
-            return None
-
-        # Normalize index
-        df = df.copy()
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-
-        df = df.sort_index()
-
-        # Map index to dates (NY)
-        idx_ny = df.index.tz_localize("UTC").tz_convert("America/New_York")
-        df = df.set_index(idx_ny.date)
-
-        if pred_date not in df.index:
-            return None
-
-        # Find the row after pred_date → next trading day
-        dates = sorted(df.index.unique())
-        i = dates.index(pred_date)
-        if i + 1 >= len(dates):
-            return None  # no next day yet
-
-        next_date = dates[i + 1]
-        row_next = df.loc[next_date]
-
-        # Handle possible multiindex row
-        if isinstance(row_next, pd.DataFrame):
-            close_price = float(row_next["Close"].iloc[-1])
-        else:
-            close_price = float(row_next["Close"])
-
-        return close_price
-
-    except Exception as e:
-        print(f"[ERROR] get_next_day_close({symbol}): {e}")
-        return None
-
 # ============================================================
 # MAIN OUTCOME UPDATE LOGIC
 # ============================================================
@@ -163,8 +113,8 @@ def get_next_day_close(symbol: str, pred_time: pd.Timestamp) -> float:
         pred_time_ny = pred_time.tz_convert("America/New_York")
         pred_date = pred_time_ny.date()
 
-        # Fetch recent daily data
-        df = fetch_historical_data(symbol, period="10d", interval="1d")
+        # Fetch recent daily data (use a larger window, e.g. 60d)
+        df = fetch_historical_data(symbol, period="60d", interval="1d")
         if df is None or len(df) == 0:
             return None
 
@@ -177,21 +127,23 @@ def get_next_day_close(symbol: str, pred_time: pd.Timestamp) -> float:
 
         # Map index to dates in NY time
         idx_ny = df.index.tz_localize("UTC").tz_convert("America/New_York")
-        df = df.set_index(idx_ny.date)
+        dates = sorted(set(idx_ny.date))
 
-        if pred_date not in df.index:
+        if pred_date not in dates:
+            # Prediction older than our daily window or date mismatch
             return None
 
-        # Find next trading day after pred_date
-        dates = sorted(df.index.unique())
         i = dates.index(pred_date)
         if i + 1 >= len(dates):
-            return None  # no next day yet
+            # No next trading day yet in the data
+            return None
 
         next_date = dates[i + 1]
-        row_next = df.loc[next_date]
 
-        # Handle potential multi-row case
+        # Select row(s) where NY date == next_date
+        mask = (idx_ny.date == next_date)
+        row_next = df.loc[mask]
+
         if isinstance(row_next, pd.DataFrame):
             close_price = float(row_next["Close"].iloc[-1])
         else:
@@ -203,24 +155,22 @@ def get_next_day_close(symbol: str, pred_time: pd.Timestamp) -> float:
         print(f"[ERROR] get_next_day_close({symbol}): {e}")
         return None
 
-
-def update_outcomes_for_symbol(symbol: str, model_type: str, lookback_hours: int = None):
+def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None):
     """
     Update actual outcomes for a specific symbol (all modes) using next-day close.
 
     Args:
         symbol: Stock symbol
-        model_type: Ignored for now (kept for backward compatibility)
         lookback_hours: Only update predictions from last N hours (None = all)
 
     Returns:
         Number of outcomes updated
     """
-    log_file = os.path.join(LOGS_DIR, f"predictions_{symbol}.csv")
+    log_file = os.path.join(LOGS_DIR, f"predictions_{symbol}_old.csv")
     core_cols = ["timestamp", "symbol", "mode", "predicted_prob", "price"]
 
     if not os.path.exists(log_file):
-        print(f"[SKIP] {symbol} {model_type}: Log file not found")
+        print(f"[SKIP] {symbol} : Log file not found")
         return 0
 
     try:
@@ -228,7 +178,7 @@ def update_outcomes_for_symbol(symbol: str, model_type: str, lookback_hours: int
         df = pd.read_csv(log_file)
 
         if len(df) == 0:
-            print(f"[SKIP] {symbol} {model_type}: Empty log")
+            print(f"[SKIP] {symbol} : Empty log")
             return 0
 
         # Ensure core columns exist
@@ -263,10 +213,10 @@ def update_outcomes_for_symbol(symbol: str, model_type: str, lookback_hours: int
         ].copy()
 
         if len(df_pending) == 0:
-            print(f"[SKIP] {symbol} {model_type}: No pending outcomes to update")
+            print(f"[SKIP] {symbol} : No pending outcomes to update")
             return 0
 
-        print(f"\n[UPDATE] {symbol} {model_type}: Processing {len(df_pending)} predictions...")
+        print(f"\n[UPDATE] {symbol} : Processing {len(df_pending)} predictions...")
 
         updated_count = 0
         min_move = 0.002  # 0.2% daily min-move band
@@ -279,11 +229,9 @@ def update_outcomes_for_symbol(symbol: str, model_type: str, lookback_hours: int
                 print(f"[DEBUG] {symbol} row {idx}: missing pred_price, skipping")
                 continue
 
-            if (now_utc - pred_time) < pd.Timedelta(days=1):
-                print(f"[DEBUG] {symbol} row {idx}: too recent ({now_utc - pred_time}), skipping")
-                continue
-
             start_price = float(pred_price)
+
+            # Get next day's close
             actual_price = get_next_day_close(symbol, pred_time)
             if actual_price is None:
                 print(f"[DEBUG] {symbol} row {idx}: no next-day close found, skipping")
@@ -294,6 +242,7 @@ def update_outcomes_for_symbol(symbol: str, model_type: str, lookback_hours: int
                 print(f"[DEBUG] {symbol} row {idx}: ret is None, skipping")
                 continue
 
+            # Apply min-move band
             if ret >= min_move:
                 actual_outcome = 1
             elif ret <= -min_move:
@@ -302,36 +251,6 @@ def update_outcomes_for_symbol(symbol: str, model_type: str, lookback_hours: int
                 print(f"[DEBUG] {symbol} row {idx}: ret {ret:.4%} inside noise band, skipping")
                 continue
 
-            # Skip rows with missing price
-            if pred_price is None or pred_price == 0:
-                continue
-
-            # Ensure we are at least 1 trading day past the prediction date
-            # (rough check: prediction must be at least ~1 day old)
-            if (now_utc - pred_time) < pd.Timedelta(days=1):
-                continue
-
-            start_price = float(pred_price)
-
-            # Get next day's close
-            actual_price = get_next_day_close(symbol, pred_time)
-            if actual_price is None:
-                continue
-
-            ret = calculate_return(start_price, actual_price)
-            if ret is None:
-                continue
-
-            # Apply min-move band
-            if ret >= min_move:
-                actual_outcome = 1
-            elif ret <= -min_move:
-                actual_outcome = 0
-            else:
-                # Inside noise band; leave as NaN so it's ignored in accuracy
-                continue
-
-            # Update dataframe (full df, not just df_update)
             df.loc[idx, "actual_outcome"] = actual_outcome
             df.loc[idx, "actual_price"] = actual_price
             df.loc[idx, "return_pct"] = ret * 100.0  # percentage
@@ -340,14 +259,14 @@ def update_outcomes_for_symbol(symbol: str, model_type: str, lookback_hours: int
 
         if updated_count > 0:
             df.to_csv(log_file, index=False)
-            print(f"[SUCCESS] {symbol} {model_type}: Updated {updated_count} outcome(s)")
+            print(f"[SUCCESS] {symbol} : Updated {updated_count} outcome(s)")
         else:
-            print(f"[SKIP] {symbol} {model_type}: No outcomes could be resolved")
+            print(f"[SKIP] {symbol} : No outcomes could be resolved")
 
         return updated_count
 
     except Exception as e:
-        print(f"[ERROR] {symbol} {model_type}: {e}")
+        print(f"[ERROR] {symbol} : {e}")
         import traceback
         traceback.print_exc()
         return 0
