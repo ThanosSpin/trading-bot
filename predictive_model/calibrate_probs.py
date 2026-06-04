@@ -66,6 +66,12 @@ def main():
 
     for csv_path in sorted(LOGS_DIR.glob("predictions_*.csv")):
         symbol = csv_path.stem.replace("predictions_", "")
+        
+        # Skip backups or any other variants you don't want
+        name = csv_path.name
+        if "_backup" in name:
+                continue
+
         print(f"\n=========== Symbol: {symbol} ===========")
 
         df_all = pd.read_csv(csv_path)
