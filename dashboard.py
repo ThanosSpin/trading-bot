@@ -1713,6 +1713,19 @@ if os.path.exists(portfolio_path):
                 c15.metric("Investor Annualized Return", f"{investor_annual_return*100:.2f}%")
                 c16.metric("Days", f"{elapsed_days}")
 
+            st.markdown(
+                """
+                <div style="font-size:0.85rem; color:var(--text-muted, rgba(255,255,255,0.70)); line-height:1.4; margin-top:0.25rem;">
+                    <strong>How to read these metrics:</strong><br>
+                    <ul style="margin-top:0.25rem; padding-left:1.2rem;">
+                        <li><strong>Strategy Total Return</strong> = trading PnL divided by the original base capital (first deposit). This shows the bot's performance on the initial risk capital only.</li>
+                        <li><strong>Investor Annualized Return</strong> = account value growth over time divided by total net deposits (all deposits minus withdrawals), annualized. This shows what an investor actually earned on their money.</li>
+                    </ul>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
             # ---------- Broker vs Strategy Equity text (unchanged) ----------
             broker_equity = None
             try:
