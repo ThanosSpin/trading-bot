@@ -166,7 +166,7 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None):
     Returns:
         Number of outcomes updated
     """
-    log_file = os.path.join(LOGS_DIR, f"predictions_{symbol}_old.csv")
+    log_file = os.path.join(LOGS_DIR, f"predictions_{symbol}.csv")
     core_cols = ["timestamp", "symbol", "mode", "predicted_prob", "price"]
 
     if not os.path.exists(log_file):
