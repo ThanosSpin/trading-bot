@@ -16,6 +16,7 @@ predictive_model/data_cache/
 logs/
 logs_paper/
 models/
+diagnostics/
 
 # Logs
 *.log

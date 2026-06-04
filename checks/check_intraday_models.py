@@ -47,7 +47,7 @@ def analyze_time_of_day_performance(symbol: str, model_type: str, lookback_days:
     print(f"⏰ TIME-OF-DAY ANALYSIS: {symbol} {model_type}")
     print(f"{'─'*70}")
     
-    log_path = os.path.join(LOGS_DIR, f"predictions_{symbol}_{model_type}.csv")
+    log_path = os.path.join(LOGS_DIR, f"predictions_{symbol}.csv")
     
     if not os.path.exists(log_path):
         print(f"❌ Log file not found: {log_path}")
@@ -55,6 +55,8 @@ def analyze_time_of_day_performance(symbol: str, model_type: str, lookback_days:
     
     try:
         df = pd.read_csv(log_path)
+        # Filter by mode for this analysis
+        df = df[df["mode"] == model_type].copy()  
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         
         # Filter recent data
@@ -171,7 +173,7 @@ def analyze_regime_balance(symbol: str, lookback_days: int = 30):
     recent_data = {}
     
     for model_type in ['intraday_mom', 'intraday_mr']:
-        log_path = os.path.join(LOGS_DIR, f"predictions_{symbol}_{model_type}.csv")
+        log_path = os.path.join(LOGS_DIR, f"predictions_{symbol}.csv")
         
         if not os.path.exists(log_path):
             print(f"⚠️ {model_type} log not found")
@@ -180,6 +182,11 @@ def analyze_regime_balance(symbol: str, lookback_days: int = 30):
         
         try:
             df = pd.read_csv(log_path)
+            # Filter for this intraday model_type
+            df = df[df["mode"] == model_type].copy()
+            if df.empty:
+                print(f"⚠️ No predictions found for {symbol} / {model_type}")
+                return
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
             
             # Filter recent data
@@ -258,14 +265,19 @@ def plot_calibration_curve(symbol: str, model_type: str, lookback_days: int = 30
     print(f"📈 CALIBRATION ANALYSIS: {symbol} {model_type}")
     print(f"{'─'*70}")
     
-    log_path = os.path.join(LOGS_DIR, f"predictions_{symbol}_{model_type}.csv")
+    log_path = os.path.join(LOGS_DIR, f"predictions_{symbol}.csv")
     
     if not os.path.exists(log_path):
         print(f"❌ Log file not found: {log_path}")
         return None
-    
+
     try:
         df = pd.read_csv(log_path)
+        # Filter for this intraday model_type
+        df = df[df["mode"] == model_type].copy()
+        if df.empty:
+            print(f"⚠️ No predictions found for {symbol} / {model_type}")
+            return
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         
         # Filter recent data
@@ -380,7 +392,7 @@ def analyze_recent_predictions(symbol: str, model_type: str, hours: int = 6):
     print(f"🕐 RECENT PREDICTIONS: {symbol} {model_type} (last {hours}h)")
     print(f"{'─'*70}")
     
-    log_path = os.path.join(LOGS_DIR, f"predictions_{symbol}_{model_type}.csv")
+    log_path = os.path.join(LOGS_DIR, f"predictions_{symbol}.csv")
     
     if not os.path.exists(log_path):
         print(f"❌ Log file not found: {log_path}")
@@ -388,6 +400,10 @@ def analyze_recent_predictions(symbol: str, model_type: str, hours: int = 6):
     
     try:
         df = pd.read_csv(log_path)
+        df = df[df["mode"] == model_type].copy()
+        if df.empty:
+            print(f"⚠️ No predictions found for {symbol} / {model_type}")
+            return
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         
         # Filter recent hours
