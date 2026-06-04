@@ -3,7 +3,7 @@
 Test enhanced compute_signals() with multi-class predictions
 """
 
-from model_xgb import compute_signals
+from predictive_model.model_xgb import compute_signals
 import json
 
 def test_signals(symbol="NVDA"):
