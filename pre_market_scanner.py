@@ -20,7 +20,7 @@ from predictive_model.model_xgb import compute_signals
 from predictive_model.data_loader import fetch_latest_price
 from account_cache import account_cache
 from market import is_trading_day
-from trader import api
+from broker import get_trading_api
 from pdt.pdt_tracker import get_opened_today_qty
 from order_utils import get_order_params, print_market_status, get_market_session
 
@@ -40,6 +40,8 @@ from config.config import (
 # Set timezone
 os.environ["TZ"] = "America/New_York"
 
+# Initialize broker API once for this module
+api = get_trading_api()
 
 # ============================================================
 # ✨ NEW: Session-aware order submission function
