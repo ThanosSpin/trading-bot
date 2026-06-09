@@ -31,6 +31,7 @@ _session_state: dict = {
     "flattened": set(),  # symbols force-flattened near close today
     "buy_times": {},     # sym -> datetime of last buy (UTC)
     "sell_times": {},
+    "soft_stops": {},    # NEW: sym -> ISO timestamp of last soft stop today
 }
 
 def reset_session_state():
@@ -40,6 +41,7 @@ def reset_session_state():
     _session_state["flattened"].clear()
     _session_state["buy_times"].clear()
     _session_state["sell_times"].clear()
+    _session_state["soft_stops"].clear()
     print("[SESSION] Session state reset for new trading day.")
 
 def mark_session_buy(sym: str):
@@ -78,6 +80,13 @@ def _rebuy_allowed(sym: str, prob_up: float, diagnostics: Dict[str, dict] = None
         required_prob = max(required_prob, _effective_buy_threshold(sym, diagnostics) + 0.04)
     else:
         required_prob = _effective_rebuy_threshold(sym, diagnostics)
+
+    # --- NEW: extra penalty after a same-day soft stop ---
+    soft_ts = _session_state.get("soft_stops", {}).get(sym)
+    if soft_ts is not None:
+        # use MODEL_REBUY_BUFFER as penalty, or define a new constant if you prefer
+        penalty = float(MODEL_REBUY_BUFFER)
+        required_prob = max(required_prob, _effective_buy_threshold(sym, diagnostics) + penalty)
 
     if prob_up < required_prob:
         return False, (
@@ -309,19 +318,43 @@ def _any_stock_trade(decisions: Dict[str, dict], symbols: List[str]) -> bool:
 # ---------------------------------------------------------
 # Evaluate STOP-LOSS / TAKE-PROFIT (universal)
 # ---------------------------------------------------------
-def check_stop_tp(symbol, price, pm):
+def check_stop_tp(
+    symbol: str,
+    price: float,
+    pm: PortfolioManager,
+    prob_up: float = None,
+    effective_buy_threshold: float = None,
+):
+    """
+    Check hard stop-loss / trailing stop / dollar stop / EOD exits
+    and NEW soft stop (loss + strong signal disagreement).
+    Returns a decision dict or None.
+    """
     symbol = str(symbol).upper().strip()
 
 
+    symbol = symbol.upper()
     shares = float(pm.data.get("shares", 0.0))
-    if shares <= 0:
+    entry_price = float(pm.data.get("avg_price", 0.0))
+
+    if shares <= 0 or entry_price <= 0 or price <= 0:
         return None
 
+    # soft stop: if down ~1.5% even though signal is strong, exit and mark soft_stop ---
+    if prob_up is not None and effective_buy_threshold is not None:
+        unrealized_pct = (price - entry_price) / entry_price
+        if unrealized_pct <= -0.015 and prob_up > effective_buy_threshold:
+            # record that we bailed via soft stop today
+            _session_state.setdefault("soft_stops", {})[symbol] = _dt.now(timezone.utc).isoformat()
 
-    entry_price = float(pm.data.get("avg_price", pm.data.get("last_price", 0.0)) or 0.0)
-    if entry_price <= 0:
-        return None
-
+            return make_decision(
+                "sell",
+                int(shares),
+                (
+                    f"{symbol}: SOFT STOP hit - loss {unrealized_pct:.1%} despite strong signal "
+                    f"(prob_up={prob_up:.3f} > BUY={effective_buy_threshold:.3f})."
+                ),
+            )
 
     # ---------------------------------------------------------
     # PDT context (only used to limit selling opened-today shares)
@@ -543,8 +576,15 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         if avg_cost > 0 and price < avg_cost:
             unrealized_pct = (price - avg_cost) / avg_cost
             if unrealized_pct < -0.01:
+                
                 # -- Fix: check stop-loss FIRST before blocking the add ----
-                stop_decision = check_stop_tp(symbol, price, pm)
+                stop_decision = check_stop_tp(
+                    symbol,
+                    price,
+                    pm,
+                    prob_up=prob_up,
+                    effective_buy_threshold=effective_buy_threshold,
+                )                
                 if stop_decision is not None:
                     return stop_decision   # stop-loss overrides averaging-down guard
                 # ---------------------------------------------------------
