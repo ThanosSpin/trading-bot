@@ -27,13 +27,14 @@ df = pd.read_csv("logs/predictions_NVDA.csv")
 # import pandas as pd
 # df = pd.read_csv("logs/predictions_ABBV_old.csv")
 print(df.columns.tolist())
-print("Non-NaN actual_outcome:", df["actual_outcome"].notna().sum())
-
 
 # Show how many rows got labeled
 print("NVDA non-NaN actual_outcome:", df["actual_outcome"].notna().sum())
 
-# See a few labeled rows (only rows with outcome 0 or 1)
-print(df[df["actual_outcome"].notna()][
-    ["timestamp", "symbol", "mode", "predicted_prob", "price", "actual_outcome", "return_pct"]
-].head(20))
+# # See a few labeled rows (only rows with outcome 0 or 1)
+# print(df[df["actual_outcome"].notna()][
+#     ["timestamp", "symbol", "mode", "predicted_prob", "price", "actual_outcome", "return_pct"]
+# ].head(20))
+
+daily = df[(df["symbol"] == "NVDA") & (df["mode"] == "daily")]
+print(daily["actual_outcome"].value_counts(normalize=True))
