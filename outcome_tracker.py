@@ -187,6 +187,7 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None):
                 raise ValueError(f"Missing required column '{col}' in {log_file}")
 
         # Ensure timestamp is datetime with UTC tz
+        df["timestamp"] = df["timestamp"].str.replace("T", " ", regex=False)
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
         # Add outcome columns if missing

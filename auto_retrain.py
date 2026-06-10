@@ -52,7 +52,7 @@ INTRADAY_MIN_OUTCOMES = 25  # to even consider intraday performance
 # -------------------------------------------------------------------
 
 def _daily_log_path(symbol: str) -> str:
-    return os.path.join(LOGS_DIR, f"predictions_{symbol}_daily.csv")
+    return os.path.join(LOGS_DIR, f"predictions_{symbol}.csv")
 
 def _load_daily_eval(symbol: str):
     """
