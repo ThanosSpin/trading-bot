@@ -509,12 +509,14 @@ def check_stop_tp(
 # ---------------------------------------------------------
 # Per-symbol trading logic (baseline)
 # ---------------------------------------------------------
-# ---------------------------------------------------------
-# Per-symbol trading logic (baseline)
-# ---------------------------------------------------------
-def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
-                 concurrent_buys: int = 1, available_cash: float = None,
-                 diagnostics: Dict[str, dict] = None):
+def should_trade(
+    symbol: str,
+    prob_up: float,
+    total_symbols: int = 1,
+    concurrent_buys: int = 1,
+    available_cash: float = None,
+    diagnostics: Dict[str, dict] = None,
+):
 
     pm = PortfolioManager(symbol)
     try:
@@ -543,9 +545,7 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         max_invest = cash * RISK_FRACTION
 
     # ---------------------------------------------------------
-    # Effective thresholds
-    # Use model/artifact-aware thresholds so the printed message
-    # always matches the REAL thresholds used for the decision.
+    # Effective thresholds (artifact / model aware)
     # ---------------------------------------------------------
     effective_buy_threshold = _effective_buy_threshold(symbol, diagnostics)
     effective_sell_threshold = _effective_sell_threshold(symbol, diagnostics)
@@ -553,10 +553,6 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
     # ---------------------------------------------------------
     # Explanation prefix
-    # Keep this at the top so every BUY / SELL / HOLD decision
-    # prints the correct thresholds and current share count.
-    # Example:
-    # NVDA: prob_up=0.455 (BUY>=0.570, SELL<=0.530, shares=0).
     # ---------------------------------------------------------
     explain = (
         f"{symbol}: prob_up={prob_up:.3f} "
@@ -566,8 +562,14 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
     )
 
     # ---------------------------------------------------------
+    # Intraday momentum (price-direction filter)
+    # Use diagnostics: intraday_mom > 0 => price going up
+    # ---------------------------------------------------------
+    d_diag = (diagnostics or {}).get(symbol.upper(), {}) or {}
+    intraday_mom = d_diag.get("intraday_mom")
+
+    # ---------------------------------------------------------
     # If already in a position, don't pyramid by default
-    # (prevents confusing "BUY but no cash")
     # ---------------------------------------------------------
     if shares > 0 and prob_up >= effective_buy_threshold:
 
@@ -576,7 +578,6 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         if avg_cost > 0 and price < avg_cost:
             unrealized_pct = (price - avg_cost) / avg_cost
             if unrealized_pct < -0.01:
-                
                 # -- Fix: check stop-loss FIRST before blocking the add ----
                 stop_decision = check_stop_tp(
                     symbol,
@@ -584,15 +585,17 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                     pm,
                     prob_up=prob_up,
                     effective_buy_threshold=effective_buy_threshold,
-                )                
+                )
                 if stop_decision is not None:
-                    return stop_decision   # stop-loss overrides averaging-down guard
-                # ---------------------------------------------------------
+                    return stop_decision  # stop-loss overrides averaging-down guard
+
                 return make_decision(
-                    "hold", 0,
-                    explain + f"HOLD - averaging-down blocked "
-                              f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
-                              f"drawdown={unrealized_pct:.1%})."
+                    "hold",
+                    0,
+                    explain
+                    + f"HOLD - averaging-down blocked "
+                      f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
+                      f"drawdown={unrealized_pct:.1%})."
                 )
 
         # -- Guard 2b: don't chase - block pyramid if already up >2% from entry --
@@ -601,9 +604,11 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
             run_up_pct = (price - avg_cost) / avg_cost
             if run_up_pct > 0.02:
                 return make_decision(
-                    "hold", 0,
-                    explain + f"HOLD - pyramid blocked, already up {run_up_pct:.1%} "
-                              f"from entry ${avg_cost:.2f} (chasing prevention)."
+                    "hold",
+                    0,
+                    explain
+                    + f"HOLD - pyramid blocked, already up {run_up_pct:.1%} "
+                      f"from entry ${avg_cost:.2f} (chasing prevention)."
                 )
 
         # -- Guard 2c: block pyramid if SPY is declining -------------------
@@ -611,14 +616,18 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
             spy_df = fetch_historical_data("SPY", period="5d", interval="15m")
             if spy_df is not None and len(spy_df) >= 8:
                 spy_close = spy_df["Close"]
-                spy_close = spy_close.iloc[:, 0] if isinstance(spy_close, pd.DataFrame) else spy_close
+                if isinstance(spy_close, pd.DataFrame):
+                    spy_close = spy_close.iloc[:, 0]
                 spy_recent = float(spy_close.iloc[-1])
                 spy_2h_ago = float(spy_close.iloc[-8])  # ~2h ago (8 x 15min bars)
                 spy_trend = (spy_recent - spy_2h_ago) / spy_2h_ago
                 if spy_trend < -0.003:  # SPY down >0.3% in last 2h
                     return make_decision(
-                        "hold", 0,
-                        explain + f"HOLD - pyramid blocked, SPY declining {spy_trend:.2%} over 2h."
+                        "hold",
+                        0,
+                        explain
+                        + f"HOLD - pyramid blocked, SPY declining "
+                          f"{spy_trend:.2%} over 2h."
                     )
         except Exception:
             pass
@@ -628,14 +637,15 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
         # ---------------------------------------------------------
         if prob_up < effective_pyramid_threshold:
             return make_decision(
-                "hold", 0,
-                explain + f"HOLD - already in position (shares={shares:g}); "
-                          f"pyramiding requires prob>={effective_pyramid_threshold:.3f} "
-                          f"(current={prob_up:.3f})."
+                "hold",
+                0,
+                explain
+                + f"HOLD - already in position (shares={shares:g}); "
+                  f"pyramiding requires prob>={effective_pyramid_threshold:.3f} "
+                  f"(current={prob_up:.3f})."
             )
 
         # Pyramiding: use full available cash, not fractional allocation
-        # (position sizing already happened on entry; we're just topping up)
         affordable = int(cash // price)
 
         # Apply position limits
@@ -643,24 +653,39 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
         if qty > 0:
             return make_decision(
-                "buy", qty,
-                explain + f"PYRAMID BUY - adding to position "
-                          f"(current={shares:g}, new={qty}, prob={prob_up:.3f})."
+                "buy",
+                qty,
+                explain
+                + f"PYRAMID BUY - adding to position "
+                  f"(current={shares:g}, new={qty}, prob={prob_up:.3f})."
             )
         else:
             return make_decision(
-                "hold", 0,
-                explain + f"HOLD - pyramiding signal but insufficient cash "
-                          f"(available=${cash:.2f})."
+                "hold",
+                0,
+                explain
+                + f"HOLD - pyramiding signal but insufficient cash "
+                  f"(available=${cash:.2f})."
             )
 
     # ---------------------------------------------------------
     # BUY - with session-state rebuy guard
+    # Now: prob_up must clear buy threshold AND intraday momentum positive
     # ---------------------------------------------------------
     if prob_up >= effective_buy_threshold:
 
+        # If we have intraday_mom and it's not positive, block the buy
+        if intraday_mom is not None and intraday_mom <= 0:
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + f"HOLD - final_prob>=BUY threshold but intraday momentum "
+                  f"is non-positive ({intraday_mom:.3%}); waiting for "
+                  f"price to turn up."
+            )
+
         # Check if this is a same-day rebuy
-        # (shares=0 but symbol was already bought earlier today)
         if shares <= 0 and symbol.upper() in _session_state["buys"]:
             allowed, reason = _rebuy_allowed(symbol, prob_up, diagnostics)
             if not allowed:
@@ -677,19 +702,13 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
             return make_decision("buy", qty, explain + f"BUY. qty={qty}")
 
         return make_decision(
-            "hold", 0,
+            "hold",
+            0,
             explain + "BUY signal but insufficient cash."
         )
 
     # ---------------------------------------------------------
     # Guard 3: minimum hold time before signal-based sell
-    #
-    # SELL / SELL-BUT-NO-POSITION
-    # Important fix:
-    # - if SELL threshold is hit AND we hold shares -> SELL (or defer)
-    # - if SELL threshold is hit AND shares == 0 -> HOLD with
-    #   'SELL signal but no position.'
-    # This preserves correct threshold printing in the explain text.
     # ---------------------------------------------------------
     if prob_up <= effective_sell_threshold:
         if shares > 0:
@@ -700,9 +719,11 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
                     held_min = (_dt.utcnow() - entry_dt).total_seconds() / 60
                     if held_min < 45:
                         return make_decision(
-                            "hold", 0,
-                            explain + f"SELL deferred - held only {held_min:.0f}min "
-                                      f"(min=45min)."
+                            "hold",
+                            0,
+                            explain
+                            + f"SELL deferred - held only {held_min:.0f}min "
+                              f"(min=45min)."
                         )
                 except Exception:
                     pass
@@ -726,7 +747,7 @@ def should_trade(symbol: str, prob_up: float, total_symbols: int = 1,
 
 
 # ============================================================
-# ðŸš€ MOMENTUM BREAKOUT DETECTION
+# MOMENTUM BREAKOUT DETECTION
 # ============================================================
 def check_momentum_breakout(sym: str, diagnostics: dict, preds: dict) -> tuple:
     """
