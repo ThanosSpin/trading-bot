@@ -1762,7 +1762,8 @@ if os.path.exists(portfolio_path):
                     else:
                         ann_y = -1.0
 
-                    label = f"Year {k+1}"
+                    year_number = year_start.year
+                    label = f"Year {year_number}"
                     if year_end == today:
                         label += " (current)"
 
