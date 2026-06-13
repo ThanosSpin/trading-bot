@@ -1713,6 +1713,80 @@ if os.path.exists(portfolio_path):
                 c15.metric("Investor Annualized Return", f"{investor_annual_return*100:.2f}%")
                 c16.metric("Days", f"{elapsed_days}")
 
+            # Investor KPIs already computed above:
+            # start_date, end_date, df_stats, df_dep, etc. exist here
+
+            with st.expander("📈 Investor KPIs – Yearly Breakdown", expanded=False):
+                # How many past full years to show
+                max_years_back = 3
+
+                rows = []
+                launch_date = start_date.normalize()
+                today = end_date.normalize()
+                min_days_for_note = 90
+
+                for k in range(0, max_years_back + 1):
+                    year_start = launch_date + pd.DateOffset(years=k)
+                    year_end   = launch_date + pd.DateOffset(years=k+1) - pd.Timedelta(days=1)
+
+                    if year_start > today:
+                        break
+                    if year_end > today:
+                        year_end = today
+
+                    mask = (df_stats["date"] >= year_start) & (df_stats["date"] <= year_end)
+                    df_y = df_stats.loc[mask].copy()
+                    if df_y.empty:
+                        continue
+
+                    E_start = float(df_y["total_equity"].iloc[0])
+                    E_end   = float(df_y["total_equity"].iloc[-1])
+
+                    D_year = 0.0
+                    if df_dep is not None and not df_dep.empty:
+                        dep_mask = (df_dep["date"] >= year_start) & (df_dep["date"] <= year_end)
+                        D_year = float(pd.to_numeric(df_dep.loc[dep_mask, "amount"], errors="coerce").sum() or 0.0)
+
+                    base_adj = max(E_start + D_year, 1e-9)
+                    ret_y = (E_end / base_adj) - 1.0
+
+                    # Inclusive day count: add +1
+                    days_y = max((year_end - year_start).days + 1, 1)
+
+                    if ret_y > -1.0:
+                        if days_y == 365:
+                            # Full 1-year window: by definition annualized == total return
+                            ann_y = ret_y
+                        else:
+                            ann_y = (1.0 + ret_y) ** (365.25 / days_y) - 1.0
+                    else:
+                        ann_y = -1.0
+
+                    label = f"Year {k+1}"
+                    if year_end == today:
+                        label += " (current)"
+
+                    # Short-window note
+                    note = ""
+                    if days_y < min_days_for_note:
+                        note = "Short window, annualized is volatile."
+
+                    rows.append({
+                        "Year": label,
+                        "Start date": year_start.date().isoformat(),
+                        "End date": year_end.date().isoformat(),
+                        "Days": days_y,
+                        "Return %": f"{ret_y * 100:.2f}%",
+                        "Annualized %": f"{ann_y * 100:.2f}%",
+                        "Note": note,
+                    })
+
+                if rows:
+                    df_years = pd.DataFrame(rows)
+                    st.dataframe(df_years, use_container_width=True)
+                else:
+                    st.info("Not enough history yet to compute yearly investor KPIs.")
+
             st.markdown(
                 """
                 <div style="font-size:0.85rem; color:var(--text-muted, rgba(255,255,255,0.70)); line-height:1.4; margin-top:0.25rem;">
