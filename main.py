@@ -476,20 +476,27 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
 
 def _get_portfolio_pnl_today() -> float:
     """
-    Try to use Alpaca's own daily PnL field if available.
-    Fallback: equity - last_equity, but only if last_equity != 0.
+    Use Alpaca equity vs last_equity as today's PnL.
     """
     try:
         acct = account_cache.get_account()
-        # 1) Direct daily PnL field (adjust key name to what you actually see)
-        if "equity_day_change" in acct:
-            pnl_today = float(acct.get("equity_day_change") or 0.0)
-            print(f"[PNL TODAY] using equity_day_change={pnl_today:.2f}")
-            return pnl_today
 
-        # 2) Fallback: equity - last_equity, but only if last_equity is non-zero
-        equity_now = float(acct.get("equity") or 0.0)
-        last_equity = float(acct.get("last_equity") or 0.0)
+        # `equity` is available both on top-level and inside `account`
+        equity_now = None
+        if "equity" in acct:
+            equity_now = float(acct.get("equity") or 0.0)
+        else:
+            inner = acct.get("account")
+            if inner is not None:
+                equity_now = float(getattr(inner, "equity", 0.0) or 0.0)
+        if equity_now is None:
+            equity_now = 0.0
+
+        # `last_equity` lives inside the `account` object
+        last_equity = 0.0
+        inner = acct.get("account")
+        if inner is not None:
+            last_equity = float(getattr(inner, "last_equity", 0.0) or 0.0)
 
         if last_equity != 0.0:
             pnl_today = equity_now - last_equity
@@ -499,8 +506,6 @@ def _get_portfolio_pnl_today() -> float:
             )
             return pnl_today
 
-        # 3) If last_equity is 0, we don't know today's PnL yet
-        print("[ACCOUNT DEBUG]", account_cache.get_account())
         print("[PNL TODAY] last_equity=0; treating pnl_today=0 to avoid false triggers.")
         return 0.0
 
