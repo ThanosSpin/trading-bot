@@ -291,16 +291,29 @@ def _force_spy_exit_if_core_buy(decisions: Dict[str, dict], spy_sym: str, explai
 # Helper for weak market
 # ---------------------------------------------------------
 def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
-    """Return True if enough of the non-SPY symbols are weak."""
+    """
+    Return True if enough of the non-SPY symbols are weak.
+    A symbol is "weak" if its prob_up <= WEAK_PROB_THRESHOLD.
+    """
     universe = [s for s in symbols if s != SPY_SYMBOL]
     if not universe:
+        print("WEAK-MARKET: universe empty, treating as NOT weak.")
         return False
-
 
     weak = [s for s in universe if preds.get(s, 1.0) <= WEAK_PROB_THRESHOLD]
     ratio = len(weak) / max(len(universe), 1)
-    return ratio >= WEAK_RATIO_THRESHOLD
 
+    # Debug logs so you can see what the filter sees
+    print(
+        f"WEAK-MARKET DEBUG: universe={universe} "
+        f"weak={weak} (prob <= {WEAK_PROB_THRESHOLD:.2f}) "
+        f"ratio={ratio:.2f} "
+        f"ratio_threshold={WEAK_RATIO_THRESHOLD:.2f}"
+    )
+
+    is_weak = ratio >= WEAK_RATIO_THRESHOLD
+    print(f"WEAK-MARKET RESULT: is_weak={is_weak}")
+    return is_weak
 
 
 def _any_stock_trade(decisions: Dict[str, dict], symbols: List[str]) -> bool:
@@ -1795,21 +1808,21 @@ def compute_strategy_decisions(
     # WEAK-MARKET BUY BLOCKER (core symbols only)
     # ---------------------------------------------------------
     market_weak = _weak_market(symbols, preds)
-    if market_weak:
-        print(f"[WEAK-MARKET] Blocking new core BUYs "
-              f"(WEAK_PROB_THRESHOLD={WEAK_PROB_THRESHOLD}, "
-              f"WEAK_RATIO_THRESHOLD={WEAK_RATIO_THRESHOLD})")
 
+    if market_weak:
+        print(
+            f"WEAK-MARKET BLOCK: Blocking new core BUYs "
+            f"(prob_threshold={WEAK_PROB_THRESHOLD:.2f}, "
+            f"ratio_threshold={WEAK_RATIO_THRESHOLD:.2f})"
+        )
         for sym in core_symbols:
             d = decisions.get(sym) or {}
             if d.get("action") == "buy":
-                # Turn BUY into HOLD, keep explanation for audit
                 decisions[sym] = make_decision(
                     "hold",
                     0,
-                    f"{sym}: BUY blocked by weak-market filter. "
-                    f"orig_reason=({d.get('explain','')})"
+                    f"{sym} BUY blocked by weak-market filter. {d.get('explain','')}"
                 )
-
-
-    return decisions
+        return decisions
+    else:
+        print("WEAK-MARKET: market NOT weak (no filter applied).")
