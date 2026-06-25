@@ -476,17 +476,17 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
 
 def _get_portfolio_pnl_today() -> float:
     """
-    TODO: Replace this stub with your actual daily PnL logic.
-    For now, it returns 0 so guard never triggers accidentally.
+    Use Alpaca equity vs last_equity as today's PnL.
     """
     try:
         acct = account_cache.get_account()
-        # Use equity if available, fallback to cash
-        equity_now = float(acct.get("equity") or acct.get("cash") or 0.0)
-        # You should cache today's start-of-day equity somewhere and load it here.
-        start_equity = 0.0  # <-- replace with real value later
-        return equity_now - start_equity
-    except Exception:
+        equity_now = float(acct.get("equity") or 0.0)
+        last_equity = float(acct.get("last_equity") or 0.0)
+        pnl_today = equity_now - last_equity
+        print(f"[PNL TODAY] equity={equity_now:.2f} last_equity={last_equity:.2f} pnl_today={pnl_today:.2f}")
+        return pnl_today
+    except Exception as e:
+        print(f"[PNL TODAY] failed to compute: {e}")
         return 0.0
 
 
