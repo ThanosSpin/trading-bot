@@ -473,6 +473,94 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
 
     return decisions
 
+
+def _get_portfolio_pnl_today() -> float:
+    """
+    TODO: Replace this stub with your actual daily PnL logic.
+    For now, it returns 0 so guard never triggers accidentally.
+    """
+    try:
+        acct = account_cache.get_account()
+        # Use equity if available, fallback to cash
+        equity_now = float(acct.get("equity") or acct.get("cash") or 0.0)
+        # You should cache today's start-of-day equity somewhere and load it here.
+        start_equity = 0.0  # <-- replace with real value later
+        return equity_now - start_equity
+    except Exception:
+        return 0.0
+
+
+def apply_portfolio_weak_guard(
+    decisions,
+    diagnostics=None,
+    loss_limit=-40.0,
+    strong_cut=0.75,
+):
+    """
+    Block weak/marginal BUYs when portfolio is down more than loss_limit today.
+    Allow only strong signals (final_prob >= strong_cut).
+    """
+    diagnostics = diagnostics or {}
+
+    pnl_today = _get_portfolio_pnl_today()
+    print(
+        f"[PORTFOLIO WEAK GUARD] pnl_today={pnl_today:.2f} "
+        f"loss_limit={loss_limit:.2f} strong_cut={strong_cut:.2f}"
+    )
+
+    # If loss is not severe, do nothing
+    if pnl_today >= loss_limit:
+        print("[PORTFOLIO WEAK GUARD] Not triggered (pnl_today above limit).")
+        return decisions
+
+    print("[PORTFOLIO WEAK GUARD] Triggered: screening BUYs by strength.")
+    for sym, d in list(decisions.items()):
+        if d.get("action") != "buy" or int(d.get("qty", 0)) <= 0:
+            continue
+
+        diag = diagnostics.get(sym, {}) or {}
+        fp = diag.get("final_prob")
+        if fp is None:
+            fp = diag.get("daily_prob")
+
+        # If no prob info, treat as weak and block
+        if fp is None:
+            prev_explain = d.get("explain", "")
+            decisions[sym] = {
+                "action": "hold",
+                "qty": 0,
+                "explain": (
+                    f"{sym} BUY blocked by portfolio weak guard "
+                    f"(no prob, pnl_today={pnl_today:.2f} <= {loss_limit:.2f}). "
+                    f"{prev_explain}"
+                ),
+                "priority_rank": d.get("priority_rank", 999),
+            }
+            continue
+
+        fp = float(fp)
+        # Only allow if very strong
+        if fp < strong_cut:
+            prev_explain = d.get("explain", "")
+            decisions[sym] = {
+                "action": "hold",
+                "qty": 0,
+                "explain": (
+                    f"{sym} BUY blocked by portfolio weak guard "
+                    f"(final_prob={fp:.3f} < {strong_cut:.3f}, "
+                    f"pnl_today={pnl_today:.2f} <= {loss_limit:.2f}). "
+                    f"{prev_explain}"
+                ),
+                "priority_rank": d.get("priority_rank", 999),
+            }
+        else:
+            print(
+                f"[PORTFOLIO WEAK GUARD] Allowing strong BUY {sym}: "
+                f"final_prob={fp:.3f} >= {strong_cut:.3f}"
+            )
+
+    return decisions
+
 # ===============================================================
 # Execute decisions (clean & safe)
 # ===============================================================
@@ -740,6 +828,13 @@ def process_all_symbols(symbols):
     # 🚨 EMERGENCY SELLS (highest priority)
     pdt_status = get_pdt_status()
     decisions = apply_close_time_derisk(decisions, diagnostics, pdt_status)
+    # ✅ NEW: portfolio-level weak guard
+    decisions = apply_portfolio_weak_guard(
+        decisions,
+        diagnostics=diagnostics,
+        loss_limit=-40.0,   # your chosen -40$
+        strong_cut=0.75,    # only very strong signals allowed on bad days
+    )
     for sym in core_symbols:
         sig_prob = predictions.get(sym)
         if sig_prob and sig_prob < PDT_EMERGENCY_PROB_THRESH:
