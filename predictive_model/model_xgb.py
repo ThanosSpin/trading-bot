@@ -1269,42 +1269,45 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
     dp = results["daily_prob"]
     ip = results["intraday_prob"]
 
-    # --- 1) Start with bar-count quality (what you already had) ---
-    # At this point, results["intraday_quality_score"] is q_bars = min(1.0, len(df_intra_resampled) / 120.0)
+    # --- 1) Start from existing bar-count quality (already set earlier) ---
+    # Earlier you set:
+    #   results["intraday_quality_score"] = min(1.0, len(df_intra_resampled) / 120.0)
+    # Here we interpret that as q_bars.
     q_bars = float(results.get("intraday_quality_score", 0.0) or 0.0)
 
-    # --- 2) Compute alignment-based factor q_align ---
+    # --- 2) Alignment factor between daily and intraday ---
+    # Measures how much the two probabilities agree.
     q_align = 1.0
     if dp is not None and ip is not None:
         try:
             dp_f = float(dp)
             ip_f = float(ip)
-            delta = ip_f - dp_f
+            delta = ip_f - dp_f  # intraday minus daily
 
-            # Max disagreement you are willing to tolerate before alignment goes to zero
-            max_delta = 0.20  # 20 percentage points; tweak if needed
+            # Max disagreement (in probability points) where alignment decays to zero
+            max_delta = 0.20  # 20 percentage points; tweak as you like
 
-            # Alignment factor: 1 when delta=0, 0 when |delta|>=max_delta (before flooring)
+            # align = 1 when delta = 0, down toward 0 as |delta| -> max_delta
             align = 1.0 - min(1.0, abs(delta) / max_delta)
 
-            # Optional floor: don't fully kill intraday unless disagreement is huge
-            # e.g., allow at least 0.3 alignment when |delta| < max_delta
+            # Optional floor so intraday isn't completely discarded for moderate disagreement
             q_align = max(0.3, align)
         except Exception:
             q_align = 1.0
 
-    # --- 3) Combine bar-count and alignment into overall quality q ---
+    # --- 3) Combined intraday "quality" ---
+    # This now encodes both bar-count (coverage) and agreement with daily.
     q = q_bars * q_align
-    results["intraday_quality_score"] = q  # now combined quality
+    results["intraday_quality_score"] = q
 
-    # --- 4) Compute base weight using combined quality ---
+    # --- 4) Base weight using combined quality ---
     weight = float(intraday_weight)
     if not results["allow_intraday"] or ip is None:
         weight = 0.0
     else:
         weight = float(intraday_weight) * q
 
-    # --- 5) Contradiction logic (unchanged, but now based on dp/ip) ---
+    # --- 5) Contradiction logic (unchanged) ---
     if dp is not None and ip is not None:
         contradiction = detect_contradiction(dp, ip, momentum=mom1h, symbol=symU, verbose=True)
         results["contradiction_detected"] = contradiction["contradiction"]
@@ -1315,9 +1318,10 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
     else:
         results["contradiction_detected"] = False
 
+    # Store the actual intraday weight used (for diagnostics)
     results["intraday_weight_used"] = weight
 
-    # --- 6) Final mixing (unchanged, just uses new weight) ---
+    # --- 6) Final probability mixing + VIX filter (unchanged) ---
     if dp is None and ip is None:
         results["final_prob"] = None
     elif dp is None:
@@ -1325,12 +1329,13 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
     elif ip is None or weight <= 0.0:
         results["final_prob"] = float(dp)
     else:
-        raw_final = float(weight * ip + (1 - weight) * dp)
+        raw_final = float(weight * ip + (1.0 - weight) * dp)
         results["final_prob_raw"] = raw_final
         results["final_prob"] = vix_market_regime_filter(raw_final, vix_level=vix_level, symbol=symU)
 
     results["final_signal"] = get_signal_details(results["final_prob"])
     return results
+
 
 # ---------------------------------------------------------
 # COMPATIBILITY WRAPPER
