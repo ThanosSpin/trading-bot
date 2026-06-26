@@ -384,7 +384,9 @@ def print_signal_diagnostics(decisions, diagnostics):
         dp = sig.get("daily_prob")
         ip = sig.get("intraday_prob")
         fp = sig.get("final_prob")
-        w = sig.get("intraday_weight")
+        w = sig.get("intraday_weight_used")  # adaptive weight from compute_signals
+        if w is None:
+            w = sig.get("intraday_weight")   # fallback to config weight if missing
         model_used = sig.get("intraday_model_used") or sig.get("model")
         vol = sig.get("intraday_vol")
         mom = sig.get("intraday_mom")

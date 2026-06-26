@@ -1697,7 +1697,7 @@ def compute_strategy_decisions(
     
     
     # ============================================================
-    # ðŸš€ MOMENTUM BREAKOUT OVERRIDE (before dip-buy)
+    # MOMENTUM BREAKOUT OVERRIDE (before dip-buy)
     # ============================================================
     for sym in core_symbols:
         force_buy, reason = check_momentum_breakout(sym, diagnostics, preds)
@@ -1740,7 +1740,7 @@ def compute_strategy_decisions(
                 print(f"âœ… {reason} - > BUY {buy_qty} shares")
     
     # ============================================================
-    # ðŸš¨ EXTREME MOMENTUM OVERRIDE (>1.5% hourly move)
+    # EXTREME MOMENTUM OVERRIDE (>1.5% hourly move)
     # ============================================================
     for sym in core_symbols:
         d = diagnostics.get(sym, {})
@@ -1768,7 +1768,7 @@ def compute_strategy_decisions(
 
 
     # ============================================================
-    # ðŸ”¥ DIP-BUY OVERRIDE
+    # IP-BUY OVERRIDE
     # ============================================================
     if DIP_BUY_ENABLED:
         for sym, decision in decisions.items():
