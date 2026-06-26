@@ -253,21 +253,53 @@ def get_predictions(symbols, debug=True):
             print("------------------------------------\n")
 
 
-        final_prob = sig.get("final_prob")
-        if final_prob is None:
-            final_prob = sig.get("daily_prob")
+        daily_prob = sig.get("daily_prob")
+        intraday_prob = sig.get("intraday_prob")
+        q = sig.get("intraday_quality_score")
+        allow_intraday = bool(sig.get("allow_intraday"))
 
-        if final_prob is None:
+        # Base weight from config
+        base_w = float(INTRADAY_WEIGHT)
+
+        # Compute adaptive weight
+        if allow_intraday and intraday_prob is not None and daily_prob is not None and q is not None:
+            # Clamp q into [0,1]
+            q = max(0.0, min(float(q), 1.0))
+
+            # Example: low quality → 0.5, high quality → base_w (e.g. 0.65)
+            # You can tweak 0.5 as your minimum intraday weight.
+            min_w = 0.325
+            w = min_w + (base_w - min_w) * q
+        else:
+            # If intraday not allowed or missing, fall back to daily-only
+            w = 0.0
+
+        if daily_prob is None and intraday_prob is None:
             print(f"[WARN] Invalid prediction for {sym}, skipping.")
             continue
 
-        final_prob = float(final_prob)
+        # Fallbacks if one side missing
+        if daily_prob is None:
+            final_prob = float(intraday_prob)
+        elif intraday_prob is None or w == 0.0:
+            final_prob = float(daily_prob)
+        else:
+            daily_prob = float(daily_prob)
+            intraday_prob = float(intraday_prob)
+            final_prob = (1 - w) * daily_prob + w * intraday_prob
+
+        print(
+            f"[COMBINE] {sym}: daily={daily_prob} intraday={intraday_prob} "
+            f"q={q} allow_intraday={allow_intraday} w={w:.3f} -> final={final_prob:.3f}"
+        )
+
         predictions[sym] = final_prob
 
         diagnostics[sym] = {
             "daily_prob": sig.get("daily_prob"),
             "intraday_prob": sig.get("intraday_prob"),
             "final_prob": final_prob,
+            "intraday_weight": w,  # store adaptive weight actually used
             "intraday_weight": sig.get("intraday_weight"),
             "intraday_model_used": sig.get("intraday_model_used"),
             "intraday_quality_score": sig.get("intraday_quality_score"),
