@@ -1266,40 +1266,71 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
         except Exception:
             pass
 
-    dp = results["daily_prob"]
-    ip = results["intraday_prob"]
-    weight = float(intraday_weight)
-    if not results["allow_intraday"] or ip is None:
-        weight = 0.0
-    else:
-        q = float(results.get("intraday_quality_score", 1.0) or 0.0)
-        weight = float(intraday_weight) * q
+        dp = results["daily_prob"]
+        ip = results["intraday_prob"]
 
-    if dp is not None and ip is not None:
-        contradiction = detect_contradiction(dp, ip, momentum=mom1h, symbol=symU, verbose=True)
-        results["contradiction_detected"] = contradiction["contradiction"]
-        results["contradiction_reason"] = contradiction["reason"]
-        results["contradiction_severity"] = contradiction["severity"]
-        if contradiction["contradiction"]:
+        # --- 1) Start with bar-count quality (what you already had) ---
+        # At this point, results["intraday_quality_score"] is q_bars = min(1.0, len(df_intra_resampled) / 120.0)
+        q_bars = float(results.get("intraday_quality_score", 0.0) or 0.0)
+
+        # --- 2) Compute alignment-based factor q_align ---
+        q_align = 1.0
+        if dp is not None and ip is not None:
+            try:
+                dp_f = float(dp)
+                ip_f = float(ip)
+                delta = ip_f - dp_f
+
+                # Max disagreement you are willing to tolerate before alignment goes to zero
+                max_delta = 0.20  # 20 percentage points; tweak if needed
+
+                # Alignment factor: 1 when delta=0, 0 when |delta|>=max_delta (before flooring)
+                align = 1.0 - min(1.0, abs(delta) / max_delta)
+
+                # Optional floor: don't fully kill intraday unless disagreement is huge
+                # e.g., allow at least 0.3 alignment when |delta| < max_delta
+                q_align = max(0.3, align)
+            except Exception:
+                q_align = 1.0
+
+        # --- 3) Combine bar-count and alignment into overall quality q ---
+        q = q_bars * q_align
+        results["intraday_quality_score"] = q  # now combined quality
+
+        # --- 4) Compute base weight using combined quality ---
+        weight = float(intraday_weight)
+        if not results["allow_intraday"] or ip is None:
             weight = 0.0
-    else:
-        results["contradiction_detected"] = False
+        else:
+            weight = float(intraday_weight) * q
 
-    results["intraday_weight_used"] = weight
+        # --- 5) Contradiction logic (unchanged, but now based on dp/ip) ---
+        if dp is not None and ip is not None:
+            contradiction = detect_contradiction(dp, ip, momentum=mom1h, symbol=symU, verbose=True)
+            results["contradiction_detected"] = contradiction["contradiction"]
+            results["contradiction_reason"] = contradiction["reason"]
+            results["contradiction_severity"] = contradiction["severity"]
+            if contradiction["contradiction"]:
+                weight = 0.0
+        else:
+            results["contradiction_detected"] = False
 
-    if dp is None and ip is None:
-        results["final_prob"] = None
-    elif dp is None:
-        results["final_prob"] = float(ip)
-    elif ip is None or weight <= 0.0:
-        results["final_prob"] = float(dp)
-    else:
-        raw_final = float(weight * ip + (1 - weight) * dp)
-        results["final_prob_raw"] = raw_final
-        results["final_prob"] = vix_market_regime_filter(raw_final, vix_level=vix_level, symbol=symU)
+        results["intraday_weight_used"] = weight
 
-    results["final_signal"] = get_signal_details(results["final_prob"])
-    return results
+        # --- 6) Final mixing (unchanged, just uses new weight) ---
+        if dp is None and ip is None:
+            results["final_prob"] = None
+        elif dp is None:
+            results["final_prob"] = float(ip)
+        elif ip is None or weight <= 0.0:
+            results["final_prob"] = float(dp)
+        else:
+            raw_final = float(weight * ip + (1 - weight) * dp)
+            results["final_prob_raw"] = raw_final
+            results["final_prob"] = vix_market_regime_filter(raw_final, vix_level=vix_level, symbol=symU)
+
+        results["final_signal"] = get_signal_details(results["final_prob"])
+        return results
 
 
 # ---------------------------------------------------------
