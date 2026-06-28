@@ -299,8 +299,13 @@ def get_predictions(symbols, debug=True):
             "daily_prob": sig.get("daily_prob"),
             "intraday_prob": sig.get("intraday_prob"),
             "final_prob": final_prob,
-            "intraday_weight": w,  # store adaptive weight actually used
-            "intraday_weight": sig.get("intraday_weight"),
+
+            # base config weight (for reference)
+            "intraday_weight_base": sig.get("intraday_weight"),
+
+            # adaptive weight actually used when mixing
+            "intraday_weight_used": w,
+
             "intraday_model_used": sig.get("intraday_model_used"),
             "intraday_quality_score": sig.get("intraday_quality_score"),
             "intraday_vol": sig.get("intraday_vol"),
@@ -386,7 +391,7 @@ def print_signal_diagnostics(decisions, diagnostics):
         fp = sig.get("final_prob")
         w = sig.get("intraday_weight_used")  # adaptive weight from compute_signals
         if w is None:
-            w = sig.get("intraday_weight")   # fallback to config weight if missing
+            w = sig.get("intraday_weight_base")   # fallback to config weight if missing
         model_used = sig.get("intraday_model_used") or sig.get("model")
         vol = sig.get("intraday_vol")
         mom = sig.get("intraday_mom")
@@ -660,7 +665,7 @@ def execute_decisions(decisions, diagnostics=None):
         dp = sig.get("daily_prob")
         ip = sig.get("intraday_prob")
         fp = sig.get("final_prob")
-        w = sig.get("intraday_weight")
+        w_used = sig.get("intraday_weight_used") or sig.get("intraday_weight_base")
         regime = sig.get("intraday_regime")
         model_used = sig.get("intraday_model_used") or sig.get("model")
 
@@ -670,7 +675,7 @@ def execute_decisions(decisions, diagnostics=None):
         print(
             f"Probabilities: D={_fmt(dp)} I={_fmt(ip)} F={_fmt(fp)} "
             f"| BUY>={buy_thr:.3f} SELL<={sell_thr:.3f} "
-            f"| regime={regime} | model={model_used} | w={_fmt(w)}"
+            f"| regime={regime} | model={model_used} | w={_fmt(w_used)}"
         )
 
     sell_syms = [
@@ -1138,10 +1143,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display
