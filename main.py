@@ -557,7 +557,7 @@ def apply_portfolio_weak_guard(
     decisions,
     diagnostics=None,
     loss_limit=-40.0,
-    strong_cut=0.80,
+    strong_cut=0.75,
 ):
     """
     Block weak/marginal BUYs when portfolio is down more than loss_limit today.
