@@ -205,28 +205,38 @@ def get_predictions(symbols, debug=True):
             resample_to="15min",
         )
 
+        if sig is None:
+            print(f"[WARN] compute_signals returned None for {sym}, skipping.")
+            continue
+
         # ✅ FIX: Log predictions for EACH model type separately
         try:
-            # Log daily prediction
             if sig.get('daily_prob') is not None:
+                details = sig.get('daily_prediction')
+                if not isinstance(details, dict):
+                    details = None
                 log_prediction(
                     symbol=sym,
                     mode='daily',
                     predicted_prob=float(sig.get('daily_prob')),
                     price=float(sig.get('price')) if sig.get('price') else None,
+                    prediction_details=details,
                 )
         except Exception as e:
             print(f"[WARN] Could not log daily prediction: {e}")
 
         try:
-            # Log intraday prediction based on model used
             if sig.get('intraday_prob') is not None and sig.get('intraday_model_used'):
-                intraday_mode = sig.get('intraday_model_used')  # 'intraday_mr' or 'intraday_mom'
+                intraday_mode = sig.get('intraday_model_used')
+                details = sig.get('intraday_prediction')
+                if not isinstance(details, dict):
+                    details = None
                 log_prediction(
                     symbol=sym,
                     mode=intraday_mode,
                     predicted_prob=float(sig.get('intraday_prob')),
                     price=float(sig.get('price')) if sig.get('price') else None,
+                    prediction_details=details,
                 )
         except Exception as e:
             print(f"[WARN] Could not log intraday prediction: {e}")
@@ -299,8 +309,13 @@ def get_predictions(symbols, debug=True):
             "daily_prob": sig.get("daily_prob"),
             "intraday_prob": sig.get("intraday_prob"),
             "final_prob": final_prob,
-            "intraday_weight": w,  # store adaptive weight actually used
-            "intraday_weight": sig.get("intraday_weight"),
+
+            # base config weight (for reference)
+            "intraday_weight_base": sig.get("intraday_weight"),
+
+            # adaptive weight actually used when mixing
+            "intraday_weight_used": w,
+
             "intraday_model_used": sig.get("intraday_model_used"),
             "intraday_quality_score": sig.get("intraday_quality_score"),
             "intraday_vol": sig.get("intraday_vol"),
@@ -384,7 +399,9 @@ def print_signal_diagnostics(decisions, diagnostics):
         dp = sig.get("daily_prob")
         ip = sig.get("intraday_prob")
         fp = sig.get("final_prob")
-        w = sig.get("intraday_weight")
+        w = sig.get("intraday_weight_used")  # adaptive weight from compute_signals
+        if w is None:
+            w = sig.get("intraday_weight_base")   # fallback to config weight if missing
         model_used = sig.get("intraday_model_used") or sig.get("model")
         vol = sig.get("intraday_vol")
         mom = sig.get("intraday_mom")
@@ -505,67 +522,53 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
 
     return decisions
 
-
-def _get_portfolio_pnl_today() -> float:
-    """
-    Use Alpaca equity vs last_equity as today's PnL.
-    """
-    try:
-        acct = account_cache.get_account()
-
-        # `equity` is available both on top-level and inside `account`
-        equity_now = None
-        if "equity" in acct:
-            equity_now = float(acct.get("equity") or 0.0)
-        else:
-            inner = acct.get("account")
-            if inner is not None:
-                equity_now = float(getattr(inner, "equity", 0.0) or 0.0)
-        if equity_now is None:
-            equity_now = 0.0
-
-        # `last_equity` lives inside the `account` object
-        last_equity = 0.0
-        inner = acct.get("account")
-        if inner is not None:
-            last_equity = float(getattr(inner, "last_equity", 0.0) or 0.0)
-
-        if last_equity != 0.0:
-            pnl_today = equity_now - last_equity
-            print(
-                f"[PNL TODAY] equity={equity_now:.2f} "
-                f"last_equity={last_equity:.2f} pnl_today={pnl_today:.2f}"
-            )
-            return pnl_today
-
-        print("[PNL TODAY] last_equity=0; treating pnl_today=0 to avoid false triggers.")
-        return 0.0
-
-    except Exception as e:
-        print(f"[PNL TODAY] failed to compute: {e}")
-        return 0.0
-
-
 def apply_portfolio_weak_guard(
     decisions,
     diagnostics=None,
-    loss_limit=-40.0,
+    loss_limit=None,         # set to None if you don't want absolute
+    loss_limit_pct=-0.025,   # use percentage by default (e.g. -2.5%)
     strong_cut=0.80,
 ):
     """
-    Block weak/marginal BUYs when portfolio is down more than loss_limit today.
+    Block weak/marginal BUYs when portfolio is down more than the loss limit today.
+    If loss_limit_pct is provided (negative), use percentage of equity; otherwise
+    fall back to absolute loss_limit in dollars.
+
     Allow only strong signals (final_prob >= strong_cut).
     """
     diagnostics = diagnostics or {}
 
-    pnl_today = _get_portfolio_pnl_today()
+    # Get account info from cache
+    acct = account_cache.get_account() or {}
+    equity = float(acct.get("equity", 0.0) or 0.0)
+    last_equity = float(acct.get("last_equity", equity) or equity)
+    pnl_today = equity - last_equity
+    pnl_today_pct = pnl_today / last_equity if last_equity > 0 else 0.0
+
     print(
-        f"[PORTFOLIO WEAK GUARD] pnl_today={pnl_today:.2f} "
-        f"loss_limit={loss_limit:.2f} strong_cut={strong_cut:.2f}"
+        f"[PNL TODAY] equity={equity:.2f} last_equity={last_equity:.2f} "
+        f"pnl_today={pnl_today:.2f} ({pnl_today_pct:.2%})"
     )
 
-    # If loss is not severe, do nothing
-    if pnl_today >= loss_limit:
+    # Decide trigger
+    if loss_limit_pct is not None:
+        print(
+            f"[PORTFOLIO WEAK GUARD] pnl_today_pct={pnl_today_pct:.2%} "
+            f"loss_limit_pct={loss_limit_pct:.2%} strong_cut={strong_cut:.2f}"
+        )
+        triggered = pnl_today_pct <= loss_limit_pct
+    elif loss_limit is not None:
+        print(
+            f"[PORTFOLIO WEAK GUARD] pnl_today={pnl_today:.2f} "
+            f"loss_limit={loss_limit:.2f} strong_cut={strong_cut:.2f}"
+        )
+        triggered = pnl_today <= loss_limit
+    else:
+        # No limits specified → guard disabled
+        print("[PORTFOLIO WEAK GUARD] Disabled (no loss limits set).")
+        return decisions
+
+    if not triggered:
         print("[PORTFOLIO WEAK GUARD] Not triggered (pnl_today above limit).")
         return decisions
 
@@ -587,7 +590,7 @@ def apply_portfolio_weak_guard(
                 "qty": 0,
                 "explain": (
                     f"{sym} BUY blocked by portfolio weak guard "
-                    f"(no prob, pnl_today={pnl_today:.2f} <= {loss_limit:.2f}). "
+                    f"(no prob, pnl_today={pnl_today:.2f} ({pnl_today_pct:.2%})). "
                     f"{prev_explain}"
                 ),
                 "priority_rank": d.get("priority_rank", 999),
@@ -604,7 +607,7 @@ def apply_portfolio_weak_guard(
                 "explain": (
                     f"{sym} BUY blocked by portfolio weak guard "
                     f"(final_prob={fp:.3f} < {strong_cut:.3f}, "
-                    f"pnl_today={pnl_today:.2f} <= {loss_limit:.2f}). "
+                    f"pnl_today={pnl_today:.2f} ({pnl_today_pct:.2%})). "
                     f"{prev_explain}"
                 ),
                 "priority_rank": d.get("priority_rank", 999),
@@ -658,7 +661,7 @@ def execute_decisions(decisions, diagnostics=None):
         dp = sig.get("daily_prob")
         ip = sig.get("intraday_prob")
         fp = sig.get("final_prob")
-        w = sig.get("intraday_weight")
+        w_used = sig.get("intraday_weight_used") or sig.get("intraday_weight_base")
         regime = sig.get("intraday_regime")
         model_used = sig.get("intraday_model_used") or sig.get("model")
 
@@ -668,7 +671,7 @@ def execute_decisions(decisions, diagnostics=None):
         print(
             f"Probabilities: D={_fmt(dp)} I={_fmt(ip)} F={_fmt(fp)} "
             f"| BUY>={buy_thr:.3f} SELL<={sell_thr:.3f} "
-            f"| regime={regime} | model={model_used} | w={_fmt(w)}"
+            f"| regime={regime} | model={model_used} | w={_fmt(w_used)}"
         )
 
     sell_syms = [
@@ -1136,10 +1139,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # PDT Display
