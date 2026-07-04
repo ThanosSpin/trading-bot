@@ -1707,17 +1707,30 @@ if os.path.exists(portfolio_path):
             c12.metric("Avg Closed Trade", "N/A" if avg_trade is None else f"${avg_trade:,.2f}")
             c13.metric("Closed Trades", f"{closed_trades}")
 
+            st.markdown(
+                """
+                <div style="font-size:0.85rem; color:var(--text-muted, rgba(255,255,255,0.70)); line-height:1.4; margin-top:0.25rem;">
+                    <strong>How to read these strategy metrics:</strong><br>
+                    <ul style="margin-top:0.25rem; padding-left:1.2rem;">
+                        <li><strong>Strategy Total Return</strong> = total trading PnL divided by the original base capital (first deposit). This shows the bot's performance relative to the initial risk capital.</li>
+                        <li><strong>Strategy Annualized Return</strong> = Strategy Total Return converted to a yearly rate, using the number of days between the first and last portfolio entries. This shows the bot's average yearly performance on that base capital.</li>
+                    </ul>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
             with st.expander("📈 Investor KPIs", expanded=False):
                 c14, c15, c16 = st.columns(3)
                 c14.metric("Investor Total Return", f"{investor_total_return*100:.2f}%")
                 c15.metric("Investor Annualized Return", f"{investor_annual_return*100:.2f}%")
                 c16.metric("Days", f"{elapsed_days}")
-
+            
             # Investor KPIs already computed above:
             # start_date, end_date, df_stats, df_dep, etc. exist here
 
-            with st.expander("📈 Investor KPIs – Yearly Breakdown", expanded=False):
-                # How many past full years to show
+        # with st.expander("📈 Investor KPIs – Yearly Breakdown", expanded=False):
+            # How many past full years to show
                 max_years_back = 3
 
                 rows = []
@@ -1791,10 +1804,10 @@ if os.path.exists(portfolio_path):
             st.markdown(
                 """
                 <div style="font-size:0.85rem; color:var(--text-muted, rgba(255,255,255,0.70)); line-height:1.4; margin-top:0.25rem;">
-                    <strong>How to read these metrics:</strong><br>
+                    <strong>How to read these investor metrics:</strong><br>
                     <ul style="margin-top:0.25rem; padding-left:1.2rem;">
-                        <li><strong>Strategy Total Return</strong> = trading PnL divided by the original base capital (first deposit). This shows the bot's performance on the initial risk capital only.</li>
-                        <li><strong>Investor Annualized Return</strong> = account value growth over time divided by total net deposits (all deposits minus withdrawals), annualized. This shows what an investor actually earned on their money.</li>
+                        <li><strong>Investor Total Return</strong> = final account equity divided by total net deposits (all deposits minus withdrawals), minus 1. This shows the overall gain on all money the investor has put into the account.</li>
+                        <li><strong>Investor Annualized Return</strong> = Investor Total Return converted to a yearly rate based on the number of days between the first and last portfolio entries. This shows the average yearly return that the investor actually earned on their deposited capital.</li>
                     </ul>
                 </div>
                 """,
