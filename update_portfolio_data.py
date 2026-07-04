@@ -338,6 +338,27 @@ if __name__ == "__main__":
     print("\n💳 Fetching cash deposit/withdrawal activities...")
     cash_flows = fetch_cash_activities()
 
+    # --- Save deposits_auto.csv from Alpaca cash_flows ---
+    deposits_rows = []
+    for e in cash_flows:
+        if e["amount"] > 0 or e["amount"] < 0:  # deposits and withdrawals
+            deposits_rows.append({
+                "date": e["timestamp"],
+                "amount": e["amount"],  # positive = deposit, negative = withdrawal
+            })
+
+    if deposits_rows:
+        df_dep_auto = pd.DataFrame(deposits_rows)
+        df_dep_auto["date"] = pd.to_datetime(df_dep_auto["date"], utc=True)
+        df_dep_auto = df_dep_auto.sort_values("date").reset_index(drop=True)
+        base = os.path.dirname(PORTFOLIO_PATH)
+        os.makedirs(base, exist_ok=True)
+        dep_path = os.path.join(base, "deposits_auto.csv")
+        df_dep_auto.to_csv(dep_path, index=False)
+        print(f"  💾 Saved deposits_auto.csv with {len(df_dep_auto)} rows → {dep_path}")
+    else:
+        print("  ℹ️ No cash-flow events, deposits_auto.csv not updated.")
+
     # ── Step 2: determine initial_cash ────────────────────────────────────────
     # KEY: when CSD events exist, start replay at 0 — the CSD events inject
     # all cash. Starting at portfolio_history\'s first equity would double-count

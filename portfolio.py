@@ -459,3 +459,23 @@ def detect_capital_change(save_path="data/deposits_auto.csv", min_change=50):
     print(f"💾 Saved deposit/withdrawal history → {save_path}")
 
     return df_out
+
+def export_deposits_from_alpaca(save_path="data/deposits_auto.csv"):
+    """
+    Export real cash deposits/withdrawals from Alpaca activities
+    to a CSV file with columns: date, amount.
+    """
+    from dashboard import _fetch_deposits_from_alpaca  # or move helper to shared module
+    df = _fetch_deposits_from_alpaca()
+    if df is None or df.empty:
+        print("[WARN] No Alpaca deposits/withdrawals found.")
+        return None
+
+    base = os.path.dirname(save_path)
+    if base and not os.path.exists(base):
+        os.makedirs(base, exist_ok=True)
+
+    df_out = df[["date", "amount"]].copy()
+    df_out.to_csv(save_path, index=False)
+    print(f"💾 Saved Alpaca deposit/withdrawal history → {save_path}")
+    return df_out
