@@ -526,7 +526,7 @@ def apply_portfolio_weak_guard(
     decisions,
     diagnostics=None,
     loss_limit=None,         # set to None if you don't want absolute
-    loss_limit_pct=-0.025,   # use percentage by default (e.g. -2.5%)
+    loss_limit_pct=-0.02,   # use percentage by default (e.g. -2.0%)
     strong_cut=0.80,
 ):
     """
