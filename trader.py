@@ -80,13 +80,21 @@ def is_buy_allowed_by_pdt(api_client, symbol, quantity):
 
     try:
         acct = api_client.get_account()
-        equity = float(acct.equity or 0)
-        dt_api = int(acct.daytrade_count or 0)
+        equity = float(getattr(acct, "equity", 0.0) or 0.0)
+
+        # Safely access deprecated/missing PDT fields
+        dt_raw = getattr(acct, "daytrade_count", None)
+        try:
+            dt_api = int(dt_raw) if dt_raw is not None else 0
+        except Exception:
+            dt_api = 0
+
         is_flagged = bool(getattr(acct, "pattern_day_trader", False))
         trading_blocked = bool(getattr(acct, "trading_blocked", False))
     except Exception as e:
         print(f"[WARN] PDT account fetch failed: {e}")
-        return False  # fail-closed for safety
+        # Fail-closed for safety: if something is wrong with PDT info, do NOT open new buys
+        return False
 
     # If Alpaca says trading is blocked, stop.
     if trading_blocked:
@@ -98,7 +106,7 @@ def is_buy_allowed_by_pdt(api_client, symbol, quantity):
         print(f"[PDT BLOCK] Account PDT-flagged and under 25k → cannot BUY {symU}.")
         return False
 
-    # ✅ TRUST Alpaca's official daytrade_count for enforcement.
+    # ✅ Use Alpaca daytrade_count if available, but handle missing field gracefully.
     if equity < 25000 and dt_api >= 4:
         print(f"[PDT BLOCK] {symU}: BUY blocked by Alpaca daytrade_count={dt_api} (equity={equity:.2f}).")
         return False
