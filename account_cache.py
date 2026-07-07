@@ -39,6 +39,8 @@ class AccountCache:
                 "positions": positions,
                 "cash": float(account.cash),
                 "equity": float(account.equity),
+                "last_equity": float(getattr(account, "last_equity", getattr(account, "equity", 0.0)) or 0.0),
+                "daily_change": float(getattr(account, "daily_gain_loss", 0.0) or 0.0),
                 "buying_power": float(account.buying_power),
                 "daytrade_count": int(daytrade_count) if daytrade_count is not None else 0,
                 "pattern_day_trader": bool(getattr(account, "pattern_day_trader", False)),
