@@ -15,22 +15,33 @@ def check_pdt_status():
 
     print("\n🔍 Alpaca PDT Status Check")
     print("-" * 40)
-    print(f"Equity: ${float(acc.equity):.2f}")
-    print(f"Buying Power: ${float(acc.buying_power):.2f}")
-    print(f"Pattern Day Trader: {acc.pattern_day_trader}")
-    print(f"API Reported Day Trades (5d): {acc.daytrade_count}")
+    equity = float(acc.equity or 0.0)
+    bp = float(acc.buying_power or 0.0)
+    print(f"Equity: ${equity:.2f}")
+    print(f"Buying Power: ${bp:.2f}")
+
+    # PDT-related fields may be deprecated or missing
+    pattern_dt = getattr(acc, "pattern_day_trader", None)
+    daytrade_count = getattr(acc, "daytrade_count", None)
+
+    print(f"Pattern Day Trader: {pattern_dt if pattern_dt is not None else 'N/A'}")
+    print(f"API Reported Day Trades (5d): {daytrade_count if daytrade_count is not None else 'N/A'}")
+
+    # Your heuristic estimator can still run
     est = estimate_daytrade_count(api)
     print(f"Estimated Day Trades (5d): {est}")
 
-    if float(acc.equity) < 25000:
-        if acc.daytrade_count >= 4 or est >= 4:
+    if equity < 25000:
+        dt_api = daytrade_count if isinstance(daytrade_count, (int, float)) else None
+
+        if (dt_api is not None and dt_api >= 4) or est >= 4:
             print("\n⚠️ PDT risk: One more round-trip trade could trigger restriction!")
         else:
             print("\n✅ Safe: You still have at least one day-trade slot available.")
     else:
         print("\n💰 Equity > $25k — PDT rules do not apply.")
     
-    print(f"API Reported Day Trades (5d): {acc.daytrade_count}  ✅ (authoritative)")
+    print(f"API Reported Day Trades (5d): {daytrade_count if daytrade_count is not None else 'N/A'}  ✅ (authoritative if available)")
     print(f"Estimated Day Trades (5d): {est}  ⚠️ (heuristic, may differ)")
 
 if __name__ == "__main__":

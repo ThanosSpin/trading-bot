@@ -117,20 +117,22 @@ def is_buy_allowed_by_pdt(api_client, symbol, quantity):
 
 def get_pdt_status():
     try:
-        acct = _api().get_account()
-        eq = float(acct.equity or 0)
-        dt_api = int(acct.daytrade_count or 0)
+        account = _api().get_account()
+        equity = float(account.equity or 0.0)
+
+        # PDT / daytrade fields may no longer exist
+        daytrade_count = getattr(account, "daytrade_count", None)
+        remaining      = getattr(account, "daytrade_remaining", None)
+        is_pdt         = getattr(account, "pattern_day_trader", None)
 
         return {
-            "daytrade_count": dt_api,
-            "remaining": (4 - dt_api) if eq < 25000 else "Unlimited",
-            "is_pdt": bool(getattr(acct, "pattern_day_trader", False)),
-            "equity": eq,
-            "trading_blocked": bool(getattr(acct, "trading_blocked", False)),
+            "equity": equity,
+            "daytrade_count": daytrade_count,
+            "remaining": remaining,
+            "is_pdt": bool(is_pdt) if is_pdt is not None else False,
         }
-
     except Exception as e:
-        print(f"[WARN] PDT status unavailable: {e}")
+        print(f"[WARN] get_pdt_status failed: {e}")
         return None
 
 

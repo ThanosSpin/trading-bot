@@ -32,6 +32,7 @@ class AccountCache:
             api = get_trading_api()
             account = api.get_account()
             positions = api.list_positions()
+            daytrade_count = getattr(account, "daytrade_count", None)
             
             self._cache = {
                 "account": account,
@@ -39,7 +40,7 @@ class AccountCache:
                 "cash": float(account.cash),
                 "equity": float(account.equity),
                 "buying_power": float(account.buying_power),
-                "daytrade_count": int(account.daytrade_count or 0),
+                "daytrade_count": int(daytrade_count) if daytrade_count is not None else 0,
                 "pattern_day_trader": bool(getattr(account, "pattern_day_trader", False)),
                 "trading_blocked": bool(getattr(account, "trading_blocked", False)),
             }

@@ -1149,13 +1149,18 @@ def main():
     try:
         pdt = get_pdt_status()
         if pdt:
+            dt = pdt.get("daytrade_count")
+            rem = pdt.get("remaining")
+            flag = pdt.get("is_pdt")
+
             print("\n📊 PDT Account Status:")
             print(f"Equity: ${pdt['equity']:.2f}")
-            print(f"Day Trades (5-day): {pdt['daytrade_count']}")
-            print(f"Remaining: {pdt['remaining']}")
-            print(f"Flagged: {pdt['is_pdt']}")
+            print(f"Day Trades (5-day): {dt if dt is not None else 'N/A'}")
+            print(f"Remaining: {rem if rem is not None else 'N/A'}")
+            print(f"Flagged: {flag if flag is not None else 'N/A'}")
             print("--------------------------------------")
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] PDT status display failed: {e}")
         pass
 
     # ✅ NEW: Add these 8 lines

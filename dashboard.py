@@ -436,11 +436,15 @@ for sym in symbols:
 st.header("📊 PDT Account Status")
 pdt = get_pdt_status()
 if pdt:
+    dt = pdt.get("daytrade_count")
+    rem = pdt.get("remaining")
+    flag = pdt.get("is_pdt")
+
     msg = (
         f"Equity: ${pdt['equity']:.2f} | "
-        f"Day Trades (5d): {pdt['daytrade_count']} | "
-        f"Remaining: {pdt['remaining']} | "
-        f"{'⚠️ PDT FLAGGED' if pdt['is_pdt'] else '✅ Not PDT'}"
+        f"Day Trades (5d): {dt if dt is not None else 'N/A'} | "
+        f"Remaining: {rem if rem is not None else 'N/A'} | "
+        f"{'⚠️ PDT FLAGGED' if flag else '✅ PDT info unavailable / Not PDT'}"
     )
     if pdt["is_pdt"]:
         st.error(msg)
