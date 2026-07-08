@@ -135,22 +135,22 @@ DIP_BUY_MIN_PROB = 0.75
 DIP_BUY_THRESHOLD = 0.015
 
 # PDT-aware stop tiers (only relevant if equity < 25k and dt_api >= 3)
-PDT_TIERING_ENABLED = True
+MARGIN_TIERING_ENABLED = True
 
 # If position opened today, do NOT stop out unless loss exceeds this
-PDT_SAMEDAY_STOP_BLOCK = 0.020   # 2.0% loss blocks normal stop sell
+MARGIN_SAMEDAY_STOP_BLOCK = 0.020   # 2.0% loss blocks normal stop sell
 
 # Emergency override: if loss exceeds this, allow selling opened-today shares
 # (consumes a day trade; set None to disable emergency exits entirely)
-PDT_EMERGENCY_STOP = None  # DISABLED
+MARGIN_EMERGENCY_STOP = None  # DISABLED
 
 # Only allow at most N emergency day-trade exits per day
-PDT_EMERGENCY_MAX_PER_DAY = 1
+MARGIN_EMERGENCY_MAX_PER_DAY = 1
 
 # ============================================================
 # EMERGENCY_SELL_THRESHOLDS
 # ============================================================
-PDT_EMERGENCY_PROB_THRESH = 0.4  # Emergency sell below this
+MARGIN_EMERGENCY_PROB_THRESH = 0.4  # Emergency sell below this
 
 # ============================================================
 # PRE-MARKET SCANNER SETTINGS

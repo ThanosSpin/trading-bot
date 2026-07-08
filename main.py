@@ -16,7 +16,7 @@ from strategy import (
     _effective_sell_threshold,
 )
 from portfolio import PortfolioManager
-from trader import execute_trade, get_pdt_status
+from trader import execute_trade, get_margin_status
 from predictive_model.model_monitor import get_monitor, evaluate_predictions, log_prediction
 from account_cache import account_cache
 from config import (
@@ -24,7 +24,7 @@ from config import (
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE,
     PAPER_TRADE_SYMBOLS, USE_LIVE_TRADING, PAPER_TRADE_NOTES,
-    PDT_EMERGENCY_PROB_THRESH,ENV_NAME
+    MARGIN_EMERGENCY_PROB_THRESH,ENV_NAME
 )
 
 from config import BASE_URL as CONFIG_BASE_URL
@@ -464,7 +464,7 @@ def print_signal_diagnostics(decisions, diagnostics):
 # ===============================================================
 NY_TZ = pytz.timezone("America/New_York")
 
-def apply_close_time_derisk(decisions, diagnostics, pdt_status):
+def apply_close_time_derisk(decisions, diagnostics, margin_status):
     now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
     close_cutoff = dtime(15, 30)
     hard_close = dtime(15, 50)
@@ -474,7 +474,7 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
 
     remaining_trades = None
     try:
-        remaining_trades = int((pdt_status or {}).get("remaining", 0) or 0)
+        remaining_trades = int((margin_status or {}).get("remaining", 0) or 0)
     except Exception:
         remaining_trades = 0
 
@@ -501,8 +501,8 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
             (daily_prob is None or daily_prob >= 0.55)
         )
 
-        pdt_safe = remaining_trades > 0
-        if not pdt_safe and now_ny.time() < hard_close:
+        margin_safe = remaining_trades > 0
+        if not margin_safe and now_ny.time() < hard_close:
             continue
 
         should_derisk = unrealized_pct >= 0.05 and not strong_signal
@@ -514,11 +514,11 @@ def apply_close_time_derisk(decisions, diagnostics, pdt_status):
             decisions[sym] = {
                 "action": "sell",
                 "qty": qty,
-                "explain": f"Close-time de-risk: up {unrealized_pct:.1%}, PDT remaining={remaining_trades}",
+                "explain": f"Close-time de-risk: up {unrealized_pct:.1%}, margin remaining={remaining_trades}",
                 "priority_rank": 0,
             }
             mark_session_flattened(sym)
-            print(f"🕒 CLOSE-TIME DE-RISK OVERRIDE: {sym} -> SELL {qty} | PDT remaining={remaining_trades}")
+            print(f"🕒 CLOSE-TIME DE-RISK OVERRIDE: {sym} -> SELL {qty} | margin remaining={remaining_trades}")
 
     return decisions
 
@@ -714,8 +714,8 @@ def execute_decisions(decisions, diagnostics=None):
         _print_probabilities_with_thresholds(sym)
 
         # 🚨 NEW: Emergency logging
-        if decision.get("pdt_emergency"):
-            print(f"🚨 PDT EMERGENCY SELL: {sym}")
+        if decision.get("margin_emergency"):
+            print(f"🚨 margin EMERGENCY SELL: {sym}")
             print(f"   Reason: {explain}")
             print(f"   prob_up: {decision.get('prob_up', 'N/A')}")
 
@@ -885,8 +885,8 @@ def process_all_symbols(symbols):
     )
 
     # 🚨 EMERGENCY SELLS (highest priority)
-    pdt_status = get_pdt_status()
-    decisions = apply_close_time_derisk(decisions, diagnostics, pdt_status)
+    margin_status = get_margin_status()
+    decisions = apply_close_time_derisk(decisions, diagnostics, margin_status)
     # ✅ NEW: portfolio-level weak guard
     decisions = apply_portfolio_weak_guard(
         decisions,
@@ -896,17 +896,17 @@ def process_all_symbols(symbols):
     )
     for sym in core_symbols:
         sig_prob = predictions.get(sym)
-        if sig_prob and sig_prob < PDT_EMERGENCY_PROB_THRESH:
+        if sig_prob and sig_prob < MARGIN_EMERGENCY_PROB_THRESH:
             pm = PortfolioManager(sym)
             pm.refresh_live()
             shares = pm.data.get('shares', 0)
             
-            if shares > 0 and pdt_status.get('remaining', 0) > 0:
+            if shares > 0 and margin_status.get('remaining', 0) > 0:
                 decisions[sym] = {
                     'action': 'sell',
                     'qty': shares,
-                    'explain': f"🚨 EMERGENCY prob_up={sig_prob:.3f} < {PDT_EMERGENCY_PROB_THRESH}",
-                    'pdt_emergency': True,
+                    'explain': f"🚨 EMERGENCY prob_up={sig_prob:.3f} < {MARGIN_EMERGENCY_PROB_THRESH}",
+                    'margin_emergency': True,
                     'priority_rank': 0  # Execute first
                 }
                 print(f"🚨 EMERGENCY SELL OVERRIDE: {sym} prob_up={sig_prob:.3f}")
@@ -1139,28 +1139,28 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
-    # PDT Display
+    # margin Display
     try:
-        pdt = get_pdt_status()
-        if pdt:
-            dt = pdt.get("daytrade_count")
-            rem = pdt.get("remaining")
-            flag = pdt.get("is_pdt")
+        margin = get_margin_status()
+        if margin:
+            dt = margin.get("daytrade_count")
+            rem = margin.get("remaining")
+            flag = margin.get("is_margin")
 
-            print("\n📊 PDT Account Status:")
-            print(f"Equity: ${pdt['equity']:.2f}")
+            print("\n📊 margin Account Status:")
+            print(f"Equity: ${margin['equity']:.2f}")
             print(f"Day Trades (5-day): {dt if dt is not None else 'N/A'}")
             print(f"Remaining: {rem if rem is not None else 'N/A'}")
             print(f"Flagged: {flag if flag is not None else 'N/A'}")
             print("--------------------------------------")
     except Exception as e:
-        print(f"[WARN] PDT status display failed: {e}")
+        print(f"[WARN] margin status display failed: {e}")
         pass
 
     # ✅ NEW: Add these 8 lines
