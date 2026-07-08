@@ -1149,18 +1149,20 @@ def main():
     try:
         margin = get_margin_status()
         if margin:
-            dt = margin.get("daytrade_count")
-            rem = margin.get("remaining")
-            flag = margin.get("is_margin")
+            equity = margin.get("equity", 0.0)
+            bp = margin.get("buying_power", 0.0)
+            multiplier = margin.get("multiplier", None)
+            blocked = bool(margin.get("trading_blocked", False))
 
-            print("\n📊 margin Account Status:")
-            print(f"Equity: ${margin['equity']:.2f}")
-            print(f"Day Trades (5-day): {dt if dt is not None else 'N/A'}")
-            print(f"Remaining: {rem if rem is not None else 'N/A'}")
-            print(f"Flagged: {flag if flag is not None else 'N/A'}")
+            print("📊 Margin / Buying Power Status:")
+            print(f"Equity:        ${equity:.2f}")
+            print(f"Buying Power:  ${bp:.2f}")
+            print(f"Multiplier:    {multiplier if multiplier is not None else 'N/A'}")
+            print(f"Trading Blocked: {blocked}")
             print("--------------------------------------")
-    except Exception as e:
-        print(f"[WARN] margin status display failed: {e}")
+        else:
+            print("📊 Margin / Buying Power Status: unable to fetch.")
+    except Exception:
         pass
 
     # ✅ NEW: Add these 8 lines
