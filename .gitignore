@@ -11,6 +11,7 @@ venv/
 
 # Generated runtime data
 data/
+data_paper/
 data_cache/
 predictive_model/data_cache/
 logs/
