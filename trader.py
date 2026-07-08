@@ -74,65 +74,82 @@ def estimate_daytrade_count(api_client, days=5):
     return est
 
 
-def is_buy_allowed_by_pdt(api_client, symbol, quantity):
-    """Block BUY only when Alpaca indicates PDT restriction is active."""
+def is_buy_allowed_by_margin(api_client, symbol, quantity, min_equity_for_margin=2000.0):
+    """
+    Margin-aware BUY guard under Alpaca's intraday margin framework.
+    - Uses equity and buying_power instead of PDT/daytrade_count.
+    - Respects trading_blocked flag.
+    - Optionally enforces a minimum equity threshold for leveraged trading.
+    """
     symU = str(symbol).upper().strip()
 
     try:
         acct = api_client.get_account()
-        equity = float(acct.equity or 0)
-        dt_api = int(acct.daytrade_count or 0)
-        is_flagged = bool(getattr(acct, "pattern_day_trader", False))
+        equity = float(getattr(acct, "equity", 0.0) or 0.0)
+        buying_power = float(getattr(acct, "buying_power", 0.0) or 0.0)
         trading_blocked = bool(getattr(acct, "trading_blocked", False))
     except Exception as e:
-        print(f"[WARN] PDT account fetch failed: {e}")
-        return False  # fail-closed for safety
+        print(f"[WARN] Margin account fetch failed: {e}")
+        # Fail-closed for safety: if we don't know margin state, do not open new buys.
+        return False
 
-    # If Alpaca says trading is blocked, stop.
+    # Broker-side block
     if trading_blocked:
-        print(f"[PDT BLOCK] Account trading_blocked=true → cannot BUY {symU}.")
+        print(f"[MARGIN BLOCK] Account trading_blocked=true → cannot BUY {symU}.")
         return False
 
-    # If PDT-flagged and under 25k, buys are typically blocked/restricted.
-    if is_flagged and equity < 25000:
-        print(f"[PDT BLOCK] Account PDT-flagged and under 25k → cannot BUY {symU}.")
+    # Optional: require some minimum equity before allowing margin-driven buys
+    if equity < min_equity_for_margin:
+        print(f"[MARGIN CAUTION] Equity={equity:.2f} below bot threshold {min_equity_for_margin:.2f} → suppressing margin BUY for {symU}.")
+        # You can choose to allow small cash-only buys here instead of outright blocking.
+        # For now, keep it conservative:
         return False
 
-    # ✅ TRUST Alpaca's official daytrade_count for enforcement.
-    if equity < 25000 and dt_api >= 4:
-        print(f"[PDT BLOCK] {symU}: BUY blocked by Alpaca daytrade_count={dt_api} (equity={equity:.2f}).")
-        return False
-
-    # Optional: estimator as WARNING only (do NOT block on it)
+    # Check if this order would clearly exceed buying power (rough sanity check)
     try:
-        dt_est = estimate_daytrade_count(api_client)
-        remaining = max(0, 4 - dt_api) if equity < 25000 else None
-        if dt_est is not None and dt_est != dt_api and equity < 25000:
-            print(f"[PDT WARN] API daytrade_count={dt_api} (remaining {remaining}) | estimator={dt_est}")
+        qty_f = float(quantity or 0.0)
     except Exception:
-        pass
+        qty_f = 0.0
+
+    if qty_f <= 0:
+        print(f"[MARGIN WARN] Non-positive quantity for {symU}, skipping BUY.")
+        return False
+
+    # Use live price approximation to estimate required notional
+    price = _get_live_price(symU)
+    if not price or price <= 0:
+        print(f"[MARGIN WARN] No live price for {symU} — cannot validate margin, skipping BUY.")
+        return False
+
+    required_notional = qty_f * price
+    if required_notional > buying_power:
+        print(f"[MARGIN BLOCK] {symU}: required {required_notional:.2f} > buying_power {buying_power:.2f} → cannot BUY.")
+        return False
 
     return True
 
 
-def get_pdt_status():
+def get_margin_status(api=None):
+    """
+    Lightweight snapshot of account margin state under intraday margin framework.
+    Replaces deprecated PDT-based status.
+    """
     try:
         account = _api().get_account()
-        equity = float(account.equity or 0.0)
 
-        # PDT / daytrade fields may no longer exist
-        daytrade_count = getattr(account, "daytrade_count", None)
-        remaining      = getattr(account, "daytrade_remaining", None)
-        is_pdt         = getattr(account, "pattern_day_trader", None)
+        equity = float(getattr(account, "equity", 0.0) or 0.0)
+        buying_power = float(getattr(account, "buying_power", 0.0) or 0.0)
+        multiplier = getattr(account, "multiplier", None)  # e.g., "1", "2"
+        trading_blocked = bool(getattr(account, "trading_blocked", False))
 
         return {
             "equity": equity,
-            "daytrade_count": daytrade_count,
-            "remaining": remaining,
-            "is_pdt": bool(is_pdt) if is_pdt is not None else False,
+            "buying_power": buying_power,
+            "multiplier": multiplier,
+            "trading_blocked": trading_blocked,
         }
     except Exception as e:
-        print(f"[WARN] get_pdt_status failed: {e}")
+        print(f"[WARN] Margin account fetch failed: {e}")
         return None
 
 
@@ -273,16 +290,16 @@ def execute_trade(action, quantity, symbol, decision=None):
     try:
         client = _api()
         acct = client.get_account()
-        pdt_status = get_pdt_status()
+        margin = get_margin_status()
 
-        if pdt_status and pdt_status.get("trading_blocked"):
+        if margin and margin.get("trading_blocked"):
             print("[WARN] Account trading_blocked=true — skipping order.")
             return 0.0, None
 
         allowed_qty = quantity
 
         if action == "buy":
-            if not is_buy_allowed_by_pdt(client, symU, quantity):
+            if not is_buy_allowed_by_margin(client, symU, quantity):
                 return 0.0, None
 
             price = _get_live_price(symU)
@@ -297,10 +314,12 @@ def execute_trade(action, quantity, symbol, decision=None):
 
         elif action == "sell":
             emergency = bool((decision or {}).get("pdt_emergency", False))
+            margin_status = get_margin_status()
+
             try:
-                allowed_qty = max_sell_allowed(client, symU, quantity, pdt_status, emergency=emergency)
+                allowed_qty = max_sell_allowed(client, symU, quantity, margin_status, emergency=emergency)
             except TypeError:
-                allowed_qty = max_sell_allowed(client, symU, quantity, pdt_status)
+                allowed_qty = max_sell_allowed(client, symU, quantity, margin_status)
 
             if allowed_qty <= 0:
                 print(f"[INFO] SELL suppressed by PDT guardrail → {symU}")

@@ -6,7 +6,7 @@ from config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
-    PDT_TIERING_ENABLED, PDT_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
+    MARGIN_TIERING_ENABLED, MARGIN_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
     MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB,
     PYRAMID_THRESHOLD, MAX_LOSS_PER_TRADE, AAPL_BUY_THRESHOLD,
     REBUY_THRESHOLD, REBUY_COOLDOWN_MINUTES, ALLOW_SAME_DAY_REBUY,
@@ -16,7 +16,7 @@ from config import (
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
-from trader import get_pdt_status
+from trader import get_margin_status
 from pdt.pdt_tracker import get_opened_today_qty
 from account_cache import account_cache
 
@@ -370,9 +370,9 @@ def check_stop_tp(
             )
 
     # ---------------------------------------------------------
-    # PDT context (only used to limit selling opened-today shares)
+    # margin context (only used to limit selling opened-today shares)
     # ---------------------------------------------------------
-    pdt = None
+    margin = None
     eq = 0.0
     dt = 0
 
@@ -381,31 +381,36 @@ def check_stop_tp(
     sellable_overnight = shares  # default = all shares sellable
 
 
-    if PDT_TIERING_ENABLED:
+    if MARGIN_TIERING_ENABLED:
         try:
-            pdt = get_pdt_status()  # your zero-arg version
+            margin = get_margin_status()  # zero-arg version from trader.py
         except Exception:
-            pdt = None
+            margin = None
 
-
-        if pdt:
+        if margin:
             try:
-                eq = float(pdt.get("equity", 0) or 0)
-                dt = int(pdt.get("daytrade_count", 0) or 0)
+                eq = float(margin.get("equity", 0.0) or 0.0)
+                bp = float(margin.get("buying_power", 0.0) or 0.0)
             except Exception:
-                eq, dt = 0.0, 0
+                eq, bp = 0.0, 0.0
 
-
-            # Only tier when PDT matters and you're near limit
-            if eq < 25000 and dt >= 3:
+            # Only tier when margin is relevant and buying_power is relatively tight
+            # (example: buying_power less than equity, meaning you're somewhat leveraged)
+            if eq > 0 and bp < eq:
                 try:
                     opened_today = float(get_opened_today_qty(symbol) or 0.0)
                 except Exception:
                     opened_today = 0.0
 
-
+                # Clamp to current shares
                 opened_today = max(0.0, min(opened_today, shares))
+
+                # Shares that are "overnight-safe" (not opened today)
                 sellable_overnight = max(0.0, shares - opened_today)
+
+                # Here you can use sellable_overnight in your tiering logic,
+                # e.g., prefer trimming overnight shares before intraday ones.
+                # (Rest of your strategy code would go below.)
 
 
     # Maintain max_price while holding
@@ -425,18 +430,18 @@ def check_stop_tp(
         return max(0.0, 1.0 - (float(price) / float(entry_price)))
 
 
-    def _pdt_tiered_sell(reason: str):
+    def _margin_tiered_sell(reason: str):
         """
-        PDT-aware selling:
-        - If near PDT limit: sell ONLY overnight shares (shares - opened_today)
+        margin-aware selling:
+        - If near margin limit: sell ONLY overnight shares (shares - opened_today)
         - If everything was opened today: block unless emergency stop triggers
         - If opened_today == 0: selling is safe (won't create a day-trade) -> sell all
         """
-        near_pdt = bool(PDT_TIERING_ENABLED and pdt and eq < 25000 and dt >= 3)
+        near_margin = bool(MARGIN_TIERING_ENABLED and margin and eq < 25000 and dt >= 3)
 
 
-        # Not near PDT limit => sell everything normally
-        if not near_pdt:
+        # Not near margin limit => sell everything normally
+        if not near_margin:
             return make_decision("sell", int(shares), reason)
 
 
@@ -446,7 +451,7 @@ def check_stop_tp(
             return make_decision(
                 "sell",
                 int(sellable_overnight),
-                reason + f" | PDT-tier: sold overnight={sellable_overnight:g}, blocked opened_today={opened_today:g}"
+                reason + f" | margin-tier: sold overnight={sellable_overnight:g}, blocked opened_today={opened_today:g}"
             )
 
 
@@ -455,13 +460,13 @@ def check_stop_tp(
 
 
         # Emergency override => allow same-day exit (day-trade risk accepted)
-        if PDT_EMERGENCY_STOP is not None and loss >= float(PDT_EMERGENCY_STOP):
+        if MARGIN_EMERGENCY_STOP is not None and loss >= float(MARGIN_EMERGENCY_STOP):
             d = make_decision(
                 "sell",
                 int(shares),
-                reason + f" | ðŸš¨ PDT EMERGENCY stop (loss={loss:.2%}) allowing same-day exit"
+                reason + f" | ðŸš¨ margin EMERGENCY stop (loss={loss:.2%}) allowing same-day exit"
             )
-            d["pdt_emergency"] = True
+            d["margin_emergency"] = True
             return d
 
 
@@ -469,21 +474,21 @@ def check_stop_tp(
         return make_decision(
             "hold",
             0,
-            f"{symbol}: STOP blocked by PDT tiering (opened_today={opened_today:g}, loss={loss:.2%})."
+            f"{symbol}: STOP blocked by margin tiering (opened_today={opened_today:g}, loss={loss:.2%})."
         )
 
     # -- Fix Dollar stop cap --------------------------------------------
     if MAX_LOSS_PER_TRADE is not None:
         unrealized_loss = (entry_price - price) * shares
         if unrealized_loss >= MAX_LOSS_PER_TRADE:
-            return _pdt_tiered_sell(
+            return _margin_tiered_sell(
                 f"{symbol}: DOLLAR-STOP hit - loss ${unrealized_loss:.2f} >= cap ${MAX_LOSS_PER_TRADE:.2f}"
             )
     # ---------------------------------------------------------------------
 
     # 1) HARD STOP-LOSS
     if price <= entry_price * STOP_LOSS:
-        return _pdt_tiered_sell(
+        return _margin_tiered_sell(
             f"{symbol}: STOP-LOSS hit {price:.2f} <= {STOP_LOSS*100:.1f}% of entry {entry_price:.2f}"
         )
 
@@ -492,7 +497,7 @@ def check_stop_tp(
     if price >= entry_price * TRAIL_ACTIVATE:
         trail_level = mp * TRAIL_STOP
         if price <= trail_level:
-            return _pdt_tiered_sell(
+            return _margin_tiered_sell(
                 (
                     f"{symbol}: TRAIL-STOP hit {price:.2f} <= {TRAIL_STOP*100:.1f}% of max {mp:.2f} "
                     f"(activated after +{(TRAIL_ACTIVATE-1)*100:.1f}% profit)"
@@ -507,7 +512,7 @@ def check_stop_tp(
         _is_near_close = 0 <= _mins_to_close <= 30   # last 30min: 3:30-4:00 PM ET
 
         if _is_near_close and price < entry_price * 0.99:
-            return _pdt_tiered_sell(
+            return _margin_tiered_sell(
                 f"{symbol}: EOD exit - down {((price/entry_price)-1):.1%} at close "
                 f"(avoiding overnight risk, entry=${entry_price:.2f})"
             )
@@ -1324,14 +1329,14 @@ def compute_strategy_decisions(
                 if sh <= 0 or px <= 0:
                     continue
 
-                # âœ… PDT CHECK: Don't sell if opened today
+                # âœ… margin CHECK: Don't sell if opened today
                 try:
                     opened_today_qty = float(get_opened_today_qty(sym) or 0.0)
                     if opened_today_qty >= sh:  # Entire position opened today
-                        print(f"[PDT BLOCK] Cannot sell {sym} to fund NVDA - entire position opened today ({sh} shares)")
+                        print(f"[margin BLOCK] Cannot sell {sym} to fund NVDA - entire position opened today ({sh} shares)")
                         continue  # Skip this symbol, don't create SELL decision
                 except Exception as e:
-                    print(f"[WARN] PDT check failed for {sym}: {e}")
+                    print(f"[WARN] margin check failed for {sym}: {e}")
                     # Fail safe - don't sell if we can't verify
 
                 sim_cash += sh * px
@@ -1423,15 +1428,15 @@ def compute_strategy_decisions(
 
 
                 if aapl_sh > 0 and aapl_action in ("hold", "sell"):
-                    # âœ… PDT CHECK
+                    # âœ… margin CHECK
                     try:
                         opened_today_qty = float(get_opened_today_qty("AAPL") or 0.0)
                         if opened_today_qty >= aapl_sh:
-                            print(f"[PDT BLOCK] Cannot sell AAPL to fund ABBV - opened today")
+                            print(f"[margin BLOCK] Cannot sell AAPL to fund ABBV - opened today")
                         else:
                             decisions["AAPL"] = make_decision("sell", int(aapl_sh), "AAPL: Sold to fund ABBV BUY (rotation).")
                     except Exception as e:
-                        print(f"[WARN] PDT check failed for AAPL: {e}")
+                        print(f"[WARN] margin check failed for AAPL: {e}")
 
     # ---------------------------------------------------------
     # Cross-sectional low-volume guardrail for MR BUYs
@@ -1524,11 +1529,11 @@ def compute_strategy_decisions(
         if nvda_wants_buy and aapl_is_not_buy:
             aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
             if aapl_sh > 0:
-                # âœ… PDT CHECK
+                # âœ… margin CHECK
                 try:
                     opened_today_qty = float(get_opened_today_qty("AAPL") or 0.0)
                     if opened_today_qty >= aapl_sh:
-                        print(f"[PDT BLOCK] Cannot rotate AAPL to fund NVDA - opened today")
+                        print(f"[margin BLOCK] Cannot rotate AAPL to fund NVDA - opened today")
                     else:
                         decisions["AAPL"] = make_decision(
                             "sell",
@@ -1536,7 +1541,7 @@ def compute_strategy_decisions(
                             "AAPL: Sold to fund NVDA rotation buy."
                         )
                 except Exception as e:
-                    print(f"[WARN] PDT check failed for AAPL rotation: {e}")
+                    print(f"[WARN] margin check failed for AAPL rotation: {e}")
 
 
 

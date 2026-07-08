@@ -22,7 +22,7 @@ from portfolio import (
     get_daily_portfolio_file,
     get_live_portfolio
 )
-from trader import get_pdt_status
+from trader import get_margin_status
 from predictive_model.model_xgb import compute_signals
 from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
 from plotly.subplots import make_subplots
@@ -431,29 +431,35 @@ for sym in symbols:
 
 
 # -------------------------------------------------
-# PDT STATUS
+# MARGIN STATUS
 # -------------------------------------------------
-st.header("📊 PDT Account Status")
-pdt = get_pdt_status()
-if pdt:
-    dt = pdt.get("daytrade_count")
-    rem = pdt.get("remaining")
-    flag = pdt.get("is_pdt")
+st.header("📊 Margin / Buying Power Status")
+margin = get_margin_status()
+if margin:
+    equity = margin.get("equity", 0.0)
+    bp = margin.get("buying_power", 0.0)
+    multiplier = margin.get("multiplier", None)
+    blocked = bool(margin.get("trading_blocked", False))
 
+    # Build a human-readable status line
+    mult_str = f"{multiplier}x" if multiplier is not None else "N/A"
     msg = (
-        f"Equity: ${pdt['equity']:.2f} | "
-        f"Day Trades (5d): {dt if dt is not None else 'N/A'} | "
-        f"Remaining: {rem if rem is not None else 'N/A'} | "
-        f"{'⚠️ PDT FLAGGED' if flag else '✅ PDT info unavailable / Not PDT'}"
+        f"Equity: ${equity:.2f} | "
+        f"Buying Power: ${bp:.2f} | "
+        f"Margin Multiplier: {mult_str} | "
+        f"{'🚫 Trading BLOCKED' if blocked else '✅ Trading allowed'}"
     )
-    if pdt["is_pdt"]:
+
+    if blocked:
         st.error(msg)
-    elif isinstance(pdt["remaining"], int) and pdt["remaining"] <= 1:
-        st.warning(msg)
     else:
-        st.success(msg)
+        # Optional: warn if buying power is very low relative to equity
+        if equity > 0 and bp < 0.5 * equity:
+            st.warning(msg)
+        else:
+            st.success(msg)
 else:
-    st.info("Unable to fetch PDT status.")
+    st.info("Unable to fetch margin status.")
 
 
 # -------------------------------------------------
