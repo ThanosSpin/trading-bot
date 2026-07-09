@@ -478,8 +478,16 @@ def apply_close_time_derisk(
     close_cutoff = dtime(15, 30)
     hard_close = dtime(15, 50)
 
+    print(
+        f"[CLOSE-TIME DERISK] now={now_ny.time()} "
+        f"gain_trim_early={gain_trim_early:.2%} "
+        f"gain_trim_late={gain_trim_late:.2%} "
+        f"loss_limit_pct_close={loss_limit_pct_close:.2%}"
+    )
+
     # Only run this guard after close_cutoff
     if now_ny.time() < close_cutoff:
+        print("[CLOSE-TIME DERISK] Not applied (before close_cutoff).")
         return decisions
 
     # Margin_status no longer needs 'remaining' PDT field; keep only trading_blocked if you want
@@ -489,6 +497,8 @@ def apply_close_time_derisk(
         # Broker will reject new orders; you might still adjust local decisions
         print("[MARGIN] trading_blocked=true — skipping close-time de-risk trades.")
         return decisions
+
+    any_triggered = False
 
     for sym, d in list(decisions.items()):
         # Only consider positions we might hold or buy
@@ -506,6 +516,7 @@ def apply_close_time_derisk(
         last_price = float(fetch_latest_price(sym) or 0.0)
 
         if shares <= 0 or avg_price <= 0 or last_price <= 0:
+            print(f"[CLOSE-TIME DERISK] {sym}: skipped (no valid shares/price).")
             continue
 
         unrealized_pct = (last_price - avg_price) / avg_price
@@ -534,6 +545,10 @@ def apply_close_time_derisk(
 
         # Decide whether to SELL
         if not hit_daily_loss and not should_trim_gain:
+            print(
+                f"[CLOSE-TIME DERISK] Not triggered for {sym}: "
+                f"unrealized={unrealized_pct:.2%}, strong_signal={strong_signal}."
+            )
             continue
 
         # If daily loss hit: we want to flatten; if gain trimming: partial de-risk
@@ -551,7 +566,11 @@ def apply_close_time_derisk(
             "priority_rank": 0,
         }
         mark_session_flattened(sym)
+        any_triggered = True
         print(f"🕒 CLOSE-TIME DERISK OVERRIDE: {sym} -> SELL {qty} | {reason}")
+
+    if not any_triggered:
+        print("[CLOSE-TIME DERISK] No symbols met loss/gain criteria this cycle.")
 
     return decisions
 

@@ -292,21 +292,26 @@ def _force_spy_exit_if_core_buy(decisions: Dict[str, dict], spy_sym: str, explai
 # ---------------------------------------------------------
 def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02):
     """
-    Sell positions immediately when today's unrealized loss crosses loss_limit_pct.
-    Runs every cycle, not just near close.
+    Sell positions immediately when unrealized loss crosses loss_limit_pct.
+    Runs every cycle.
     """
+    print(f"[DAILY LOSS GUARD] loss_limit_pct={loss_limit_pct:.2%}")
+
     if loss_limit_pct is None:
+        print("[DAILY LOSS GUARD] Disabled (loss_limit_pct is None).")
         return decisions
 
+    any_triggered = False
+
     for sym, d in list(decisions.items()):
-        # Only consider symbols where we might hold or sell
         if d.get("action") not in ("hold", "sell", "buy"):
             continue
 
         pm = PortfolioManager(sym)
         try:
             pm.refresh_live()
-        except Exception:
+        except Exception as e:
+            print(f"[DAILY LOSS GUARD] {sym}: skipped (refresh_live failed: {e})")
             continue
 
         shares = float(pm.data.get("shares", 0.0) or 0.0)
@@ -314,13 +319,13 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02):
         last_price = float(fetch_latest_price(sym) or 0.0)
 
         if shares <= 0 or avg_price <= 0 or last_price <= 0:
+            print(f"[DAILY LOSS GUARD] {sym}: skipped (no valid shares/price).")
             continue
 
         unrealized_pct = (last_price - avg_price) / avg_price
 
-        # Daily loss limit: if loss <= -2%, trigger full SELL
         if unrealized_pct <= loss_limit_pct:
-            qty = int(shares)  # flatten full position
+            qty = int(shares)
             decisions[sym] = {
                 "action": "sell",
                 "qty": qty,
@@ -330,7 +335,19 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02):
                 ),
                 "priority_rank": 0,
             }
-            print(f"[DAILY LOSS GUARD] {sym}: SELL {qty} at {last_price:.2f} (unrealized={unrealized_pct:.2%})")
+            any_triggered = True
+            print(
+                f"[DAILY LOSS GUARD] TRIGGERED for {sym}: "
+                f"unrealized={unrealized_pct:.2%} <= {loss_limit_pct:.2%} → SELL {qty}"
+            )
+        else:
+            print(
+                f"[DAILY LOSS GUARD] Not triggered for {sym}: "
+                f"unrealized={unrealized_pct:.2%} above limit {loss_limit_pct:.2%}."
+            )
+
+    if not any_triggered:
+        print("[DAILY LOSS GUARD] No symbols hit the loss limit this cycle.")
 
     return decisions
 # ---------------------------------------------------------
