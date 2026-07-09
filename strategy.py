@@ -288,6 +288,52 @@ def _force_spy_exit_if_core_buy(decisions: Dict[str, dict], spy_sym: str, explai
 
 
 # ---------------------------------------------------------
+# Helper for daily-loss guard
+# ---------------------------------------------------------
+def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02):
+    """
+    Sell positions immediately when today's unrealized loss crosses loss_limit_pct.
+    Runs every cycle, not just near close.
+    """
+    if loss_limit_pct is None:
+        return decisions
+
+    for sym, d in list(decisions.items()):
+        # Only consider symbols where we might hold or sell
+        if d.get("action") not in ("hold", "sell", "buy"):
+            continue
+
+        pm = PortfolioManager(sym)
+        try:
+            pm.refresh_live()
+        except Exception:
+            continue
+
+        shares = float(pm.data.get("shares", 0.0) or 0.0)
+        avg_price = float(pm.data.get("avg_price", 0.0) or 0.0)
+        last_price = float(fetch_latest_price(sym) or 0.0)
+
+        if shares <= 0 or avg_price <= 0 or last_price <= 0:
+            continue
+
+        unrealized_pct = (last_price - avg_price) / avg_price
+
+        # Daily loss limit: if loss <= -2%, trigger full SELL
+        if unrealized_pct <= loss_limit_pct:
+            qty = int(shares)  # flatten full position
+            decisions[sym] = {
+                "action": "sell",
+                "qty": qty,
+                "explain": (
+                    f"Daily loss guard SELL: unrealized={unrealized_pct:.2%} "
+                    f"<= {loss_limit_pct:.2%}."
+                ),
+                "priority_rank": 0,
+            }
+            print(f"[DAILY LOSS GUARD] {sym}: SELL {qty} at {last_price:.2f} (unrealized={unrealized_pct:.2%})")
+
+    return decisions
+# ---------------------------------------------------------
 # Helper for weak market
 # ---------------------------------------------------------
 def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:

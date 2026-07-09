@@ -14,6 +14,7 @@ from strategy import (
     apply_position_limits,
     _effective_buy_threshold,
     _effective_sell_threshold,
+    apply_daily_loss_guard,
 )
 from portfolio import PortfolioManager
 from trader import execute_trade, get_margin_status
@@ -464,21 +465,33 @@ def print_signal_diagnostics(decisions, diagnostics):
 # ===============================================================
 NY_TZ = pytz.timezone("America/New_York")
 
-def apply_close_time_derisk(decisions, diagnostics, margin_status):
+
+def apply_close_time_derisk(
+    decisions,
+    diagnostics,
+    margin_status,
+    gain_trim_early=0.05,      # +5% before hard_close
+    gain_trim_late=0.03,       # +3% after hard_close
+    loss_limit_pct_close=-0.02 # -2% daily loss limit
+):
     now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
     close_cutoff = dtime(15, 30)
     hard_close = dtime(15, 50)
 
+    # Only run this guard after close_cutoff
     if now_ny.time() < close_cutoff:
         return decisions
 
-    remaining_trades = None
-    try:
-        remaining_trades = int((margin_status or {}).get("remaining", 0) or 0)
-    except Exception:
-        remaining_trades = 0
+    # Margin_status no longer needs 'remaining' PDT field; keep only trading_blocked if you want
+    # margin_safe = not bool((margin_status or {}).get("trading_blocked", False))
+    blocked = bool((margin_status or {}).get("trading_blocked", False))
+    if blocked:
+        # Broker will reject new orders; you might still adjust local decisions
+        print("[MARGIN] trading_blocked=true — skipping close-time de-risk trades.")
+        return decisions
 
     for sym, d in list(decisions.items()):
+        # Only consider positions we might hold or buy
         if d.get("action") not in ("buy", "hold"):
             continue
 
@@ -496,29 +509,49 @@ def apply_close_time_derisk(decisions, diagnostics, margin_status):
             continue
 
         unrealized_pct = (last_price - avg_price) / avg_price
+
         strong_signal = (
             final_prob is not None and final_prob >= 0.60 and
             (daily_prob is None or daily_prob >= 0.55)
         )
 
-        margin_safe = remaining_trades > 0
-        if not margin_safe and now_ny.time() < hard_close:
+        # ------------------------
+        # 1) Daily loss limit
+        # ------------------------
+        hit_daily_loss = (
+            loss_limit_pct_close is not None
+            and unrealized_pct <= loss_limit_pct_close
+        )
+
+        # ------------------------
+        # 2) Gain trimming (existing logic)
+        # ------------------------
+        should_trim_gain = False
+        if unrealized_pct >= gain_trim_early and not strong_signal:
+            should_trim_gain = True
+        if now_ny.time() >= hard_close and unrealized_pct >= gain_trim_late and not strong_signal:
+            should_trim_gain = True
+
+        # Decide whether to SELL
+        if not hit_daily_loss and not should_trim_gain:
             continue
 
-        should_derisk = unrealized_pct >= 0.05 and not strong_signal
-        if now_ny.time() >= hard_close:
-            should_derisk = should_derisk or unrealized_pct >= 0.03
+        # If daily loss hit: we want to flatten; if gain trimming: partial de-risk
+        if hit_daily_loss:
+            qty = int(shares)  # full position exit for daily loss
+            reason = f"Close-time daily loss SELL: {unrealized_pct:.2%} <= {loss_limit_pct_close:.2%}"
+        else:
+            qty = max(1, int(shares * 0.5))  # keep your half-trim behavior
+            reason = f"Close-time gain trim: up {unrealized_pct:.2%}"
 
-        if should_derisk:
-            qty = max(1, int(shares * 0.5))
-            decisions[sym] = {
-                "action": "sell",
-                "qty": qty,
-                "explain": f"Close-time de-risk: up {unrealized_pct:.1%}, margin remaining={remaining_trades}",
-                "priority_rank": 0,
-            }
-            mark_session_flattened(sym)
-            print(f"🕒 CLOSE-TIME DE-RISK OVERRIDE: {sym} -> SELL {qty} | margin remaining={remaining_trades}")
+        decisions[sym] = {
+            "action": "sell",
+            "qty": qty,
+            "explain": reason,
+            "priority_rank": 0,
+        }
+        mark_session_flattened(sym)
+        print(f"🕒 CLOSE-TIME DERISK OVERRIDE: {sym} -> SELL {qty} | {reason}")
 
     return decisions
 
@@ -886,7 +919,7 @@ def process_all_symbols(symbols):
 
     # 🚨 EMERGENCY SELLS (highest priority)
     margin_status = get_margin_status()
-    decisions = apply_close_time_derisk(decisions, diagnostics, margin_status)
+
     # ✅ NEW: portfolio-level weak guard
     decisions = apply_portfolio_weak_guard(
         decisions,
@@ -894,6 +927,12 @@ def process_all_symbols(symbols):
         loss_limit=-40.0,   # your chosen -40$
         strong_cut=0.75,    # only very strong signals allowed on bad days
     )
+    # Daily loss guard for existing positions (fires intraday)
+    decisions = apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02)
+    
+    # Close-time de-risk (for gain - loss trimming)
+    decisions = apply_close_time_derisk(decisions, diagnostics, margin_status)
+    
     for sym in core_symbols:
         sig_prob = predictions.get(sym)
         if sig_prob and sig_prob < MARGIN_EMERGENCY_PROB_THRESH:
