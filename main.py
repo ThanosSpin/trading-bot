@@ -15,6 +15,7 @@ from strategy import (
     _effective_buy_threshold,
     _effective_sell_threshold,
     apply_daily_loss_guard,
+    apply_daily_profit_guard,
 )
 from portfolio import PortfolioManager
 from trader import execute_trade, get_margin_status
@@ -948,6 +949,9 @@ def process_all_symbols(symbols):
     )
     # Daily loss guard for existing positions (fires intraday)
     decisions = apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02)
+
+    # Daily profit guard (intraday; trims 50% at +2%)
+    decisions = apply_daily_profit_guard(decisions, diagnostics)
     
     # Close-time de-risk (for gain - loss trimming)
     decisions = apply_close_time_derisk(decisions, diagnostics, margin_status)

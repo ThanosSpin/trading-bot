@@ -12,7 +12,8 @@ from config import (
     REBUY_THRESHOLD, REBUY_COOLDOWN_MINUTES, ALLOW_SAME_DAY_REBUY,
     USE_ARTIFACT_THRESHOLDS, ARTIFACT_THRESHOLD_FALLBACK,
     MODEL_ENTRY_BUFFER, MODEL_EXIT_BUFFER, MODEL_REBUY_BUFFER, MODEL_PYRAMID_BUFFER,
-    SPY_USE_ARTIFACT_THRESHOLDS, SPY_MODEL_ENTRY_BUFFER, SPY_MODEL_EXIT_BUFFER
+    SPY_USE_ARTIFACT_THRESHOLDS, SPY_MODEL_ENTRY_BUFFER, SPY_MODEL_EXIT_BUFFER,
+    PROFIT_TRIGGER_PCT
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
@@ -350,6 +351,72 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02):
         print("[DAILY LOSS GUARD] No symbols hit the loss limit this cycle.")
 
     return decisions
+
+# ---------------------------------------------------------
+# Helper for daily profit
+# ---------------------------------------------------------
+def apply_daily_profit_guard(decisions, diagnostics=None):
+    """
+    Partial take-profit: when unrealized gain crosses PROFIT_TRIGGER_PCT,
+    sell 50% of the position.
+    """
+    diagnostics = diagnostics or {}
+    print(f"[DAILY PROFIT GUARD] PROFIT_TRIGGER_PCT={PROFIT_TRIGGER_PCT:.2%}")
+
+    any_triggered = False
+
+    for sym, d in list(decisions.items()):
+        # Only consider symbols we might hold or sell
+        if d.get("action") not in ("hold", "sell", "buy"):
+            continue
+
+        pm = PortfolioManager(sym)
+        try:
+            pm.refresh_live()
+        except Exception as e:
+            print(f"[DAILY PROFIT GUARD] {sym}: skipped (refresh_live failed: {e})")
+            continue
+
+        shares = float(pm.data.get("shares", 0.0) or 0.0)
+        avg_price = float(pm.data.get("avg_price", 0.0) or 0.0)
+        last_price = float(fetch_latest_price(sym) or 0.0)
+
+        if shares <= 0 or avg_price <= 0 or last_price <= 0:
+            print(f"[DAILY PROFIT GUARD] {sym}: skipped (no valid shares/price).")
+            continue
+
+        unrealized_pct = (last_price - avg_price) / avg_price
+
+        if unrealized_pct >= PROFIT_TRIGGER_PCT:
+            qty = max(1, int(shares * 0.5))  # sell 50%
+
+            decisions[sym] = {
+                "action": "sell",
+                "qty": qty,
+                "explain": (
+                    f"Daily profit guard: partial SELL at {unrealized_pct:.2%} "
+                    f"(trigger {PROFIT_TRIGGER_PCT:.2%}), 50% position trimmed."
+                ),
+                "priority_rank": 0,
+            }
+            any_triggered = True
+
+            print(
+                f"[DAILY PROFIT GUARD] TRIGGERED for {sym}: "
+                f"unrealized={unrealized_pct:.2%} >= {PROFIT_TRIGGER_PCT:.2%} "
+                f"→ SELL {qty} of {int(shares)}."
+            )
+        else:
+            print(
+                f"[DAILY PROFIT GUARD] Not triggered for {sym}: "
+                f"unrealized={unrealized_pct:.2%} below trigger {PROFIT_TRIGGER_PCT:.2%}."
+            )
+
+    if not any_triggered:
+        print("[DAILY PROFIT GUARD] No symbols hit the profit trigger this cycle.")
+
+    return decisions
+
 # ---------------------------------------------------------
 # Helper for weak market
 # ---------------------------------------------------------
