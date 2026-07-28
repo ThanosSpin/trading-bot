@@ -472,7 +472,7 @@ def apply_close_time_derisk(
     diagnostics,
     margin_status,
     gain_trim_early=0.05,      # +5% before hard_close
-    gain_trim_late=0.02,       # +2.0% after hard_close
+    gain_trim_late=0.025,       # +2.5% after hard_close
     loss_limit_pct_close=-0.02 # -2.0% daily loss limit
 ):
     now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
