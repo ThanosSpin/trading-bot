@@ -471,7 +471,7 @@ def apply_close_time_derisk(
     decisions,
     diagnostics,
     margin_status,
-    gain_trim_early=0.05,      # +5% before hard_close
+    gain_trim_early=0.03,      # +3% before hard_close
     gain_trim_late=0.015,       # +1.5% after hard_close
     loss_limit_pct_close=-0.015 # -1.5% daily loss limit
 ):
