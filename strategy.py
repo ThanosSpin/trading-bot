@@ -22,6 +22,7 @@ from pdt.pdt_tracker import get_opened_today_qty
 from account_cache import account_cache
 
 
+NY_TZ = pytz.timezone("America/New_York")
 # ---------------------------------------------------------
 # Session state - tracks per-symbol activity within one trading day.
 # main.py calls reset_session_state() at bot startup each day.
@@ -209,13 +210,38 @@ def _artifact_threshold_from_diag(sym: str, diagnostics: Dict[str, dict] = None)
 
     return float(ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
 
+
 def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
+
+    # 1) Existing base threshold logic
     if USE_ARTIFACT_THRESHOLDS:
         base = _artifact_threshold_from_diag(sym, diagnostics)
     else:
         base = float(AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD)
-    return min(0.95, base + float(MODEL_ENTRY_BUFFER))
+
+    thr = min(0.95, base + float(MODEL_ENTRY_BUFFER))
+
+    # 2) Time-of-day adjustment: stricter in last hour before close
+    now_ny = _dt.now(NY_TZ)
+    minutes_since_open = (now_ny.hour * 60 + now_ny.minute) - (9 * 60 + 30)
+    minutes_to_close = (16 * 60) - (now_ny.hour * 60 + now_ny.minute)
+
+    # Last 60 minutes (15:00–16:00 NY)
+    if 0 <= minutes_to_close <= 60:
+        # Example: add +0.02 buffer in last hour
+        last_hour_buffer = 0.05
+        adjusted = min(0.95, thr + last_hour_buffer)
+
+        print(
+            f"[TIME-AWARE BUY THR] {sym}: last hour before close "
+            f"(minutes_to_close={minutes_to_close}), "
+            f"base={thr:.3f} + buffer={last_hour_buffer:.3f} -> {adjusted:.3f}"
+        )
+        return adjusted
+
+    # Outside last hour: use normal threshold
+    return thr
 
 def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
