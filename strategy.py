@@ -230,7 +230,7 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
     # Last 60 minutes (15:00–16:00 NY)
     if 0 <= minutes_to_close <= 60:
         # Example: add +0.02 buffer in last hour
-        last_hour_buffer = 0.05
+        last_hour_buffer = 0.1
         adjusted = min(0.95, thr + last_hour_buffer)
 
         print(
