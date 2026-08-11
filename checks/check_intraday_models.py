@@ -511,27 +511,49 @@ def run_full_diagnostics(symbols, lookback_days=30):
     print(f"\n\n{'='*70}")
     print(f"📋 SUMMARY REPORT")
     print(f"{'='*70}")
-    
+
     for symbol, data in results.items():
         print(f"\n{symbol}:")
-        
+
+        # 1) Regime balance
+        rb = data.get('regime_balance')
+        if rb:
+            mom_count = rb.get('intraday_mom', 0)
+            mr_count = rb.get('intraday_mr', 0)
+            total = mom_count + mr_count
+            if total > 0:
+                ratio = mom_count / mr_count if mr_count > 0 else float('inf')
+                print(f"  Regimes: mom={mom_count} ({100*mom_count/total:.1f}%), "
+                    f"mr={mr_count} ({100*mr_count/total:.1f}%), ratio={ratio:.2f}")
+
+        # 2) Per-model summary
         for model_type in ['intraday_mom', 'intraday_mr']:
-            if model_type in data and data[model_type]['calibration']:
-                metrics = data[model_type]['calibration']
-                acc = metrics['accuracy']
-                cal_err = metrics['calibration_error']
-                brier = metrics['brier_score']
-                
+            mdata = data.get(model_type, {})
+            calib = mdata.get('calibration')
+            recent = mdata.get('recent')
+
+            line = f"  {model_type:15s}"
+
+            if calib:
+                acc = calib['accuracy']
+                cal_err = calib['calibration_error']
+                brier = calib['brier_score']
                 status = "✅" if cal_err < 0.10 else "⚠️" if cal_err < 0.15 else "❌"
-                
-                print(f"  {model_type:15s} {status} Acc: {acc:.1%}  CalErr: {cal_err:.1%}  Brier: {brier:.3f}")
-    
+                line += f" {status} Acc={acc:.1%}, CalErr={cal_err:.1%}, Brier={brier:.3f}"
+            else:
+                line += " (no calibration data)"
+
+            # Add recent mean prob if available
+            if isinstance(recent, pd.DataFrame) and 'predicted_prob' in recent.columns:
+                mean_prob = recent['predicted_prob'].mean()
+                line += f", recent_mean_prob={mean_prob:.3f}"
+
+            print(line)
+
     print(f"\n{'='*70}")
     print(f"✅ Diagnostics complete!")
-    print(f"📁 Calibration plots saved to: {OUTPUT_DIR}/")
+    print(f"📁 Calibration plots / reports saved to: {OUTPUT_DIR}/")
     print(f"{'='*70}\n")
-    
-    return results
 
 
 # ============================================================
