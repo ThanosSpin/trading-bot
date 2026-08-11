@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional
 import pandas as pd
+import numpy as np
 import pytz
 from datetime import datetime as _dt, timezone
 from config import (
@@ -446,31 +447,69 @@ def apply_daily_profit_guard(decisions, diagnostics=None):
 # ---------------------------------------------------------
 # Helper for weak market
 # ---------------------------------------------------------
+PRICE_WEAK_THRESHOLD = -0.01  # -1% daily move
+
 def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
     """
     Return True if enough of the non-SPY symbols are weak.
-    A symbol is "weak" if its prob_up <= WEAK_PROB_THRESHOLD.
+    Weakness is defined by:
+      - prob_up <= WEAK_PROB_THRESHOLD (existing), OR
+      - today's price return <= PRICE_WEAK_THRESHOLD (e.g. -1%)
     """
     universe = [s for s in symbols if s != SPY_SYMBOL]
     if not universe:
         print("WEAK-MARKET: universe empty, treating as NOT weak.")
         return False
 
-    weak = [s for s in universe if preds.get(s, 1.0) <= WEAK_PROB_THRESHOLD]
-    ratio = len(weak) / max(len(universe), 1)
+    # 1) Probability-based weakness (existing behavior)
+    weak_prob = [s for s in universe if preds.get(s, 1.0) <= WEAK_PROB_THRESHOLD]
+    prob_ratio = len(weak_prob) / max(len(universe), 1)
 
-    # Debug logs so you can see what the filter sees
+    # 2) Price-based weakness (new behavior)
+    weak_price = []
+
+    for sym in universe:
+        try:
+            # Get last daily close (previous trading day)
+            df = fetch_historical_data(sym, period="2d", interval="1d")
+            if df is None or len(df) < 1:
+                print(f"[WEAK-MARKET PRICE] {sym}: no historical data, skipping.")
+                continue
+
+            close = df["Close"]
+            # handle DataFrame/Series issues
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
+            prev_close = float(close.iloc[-1])
+
+            last_price = float(fetch_latest_price(sym) or 0.0)
+
+            if prev_close <= 0 or last_price <= 0:
+                print(f"[WEAK-MARKET PRICE] {sym}: invalid prices (prev_close={prev_close}, last={last_price}), skipping.")
+                continue
+
+            ret = (last_price - prev_close) / prev_close
+            print(f"[WEAK-MARKET PRICE] {sym}: prev_close={prev_close:.2f}, last={last_price:.2f}, ret={ret:.2%}")
+
+            if ret <= PRICE_WEAK_THRESHOLD:
+                weak_price.append(sym)
+        except Exception as e:
+            print(f"[WEAK-MARKET PRICE] {sym}: error {e}, skipping.")
+            continue
+
+    price_ratio = len(weak_price) / max(len(universe), 1)
+
+    is_weak = (prob_ratio >= WEAK_RATIO_THRESHOLD) or (price_ratio >= WEAK_RATIO_THRESHOLD)
+
     print(
-        f"WEAK-MARKET DEBUG: universe={universe} "
-        f"weak={weak} (prob <= {WEAK_PROB_THRESHOLD:.2f}) "
-        f"ratio={ratio:.2f} "
-        f"ratio_threshold={WEAK_RATIO_THRESHOLD:.2f}"
+        f"[WEAK-MARKET DEBUG] universe={universe} "
+        f"weak_prob={weak_prob} (prob_ratio={prob_ratio:.2f}) "
+        f"weak_price={weak_price} (price_ratio={price_ratio:.2f}) "
+        f"ratio_threshold={WEAK_RATIO_THRESHOLD:.2f} "
+        f"is_weak={is_weak}"
     )
 
-    is_weak = ratio >= WEAK_RATIO_THRESHOLD
-    print(f"WEAK-MARKET RESULT: is_weak={is_weak}")
     return is_weak
-
 
 def _any_stock_trade(decisions: Dict[str, dict], symbols: List[str]) -> bool:
     """True if any non-SPY symbol has buy/sell decision."""
