@@ -40,7 +40,8 @@ import pytz
 os.environ["TZ"] = "America/New_York"
 time.tzset()
 
-
+# Track previous shares per symbol to detect external position changes
+_prev_shares = {}
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(BOT_DIR, "logs")
@@ -900,6 +901,10 @@ def process_all_symbols(symbols):
     # Core universe = configured symbols WITHOUT SPY
     core_symbols = [s for s in symbols if s != spy_sym]
 
+    # ----------------------------
+    # Step 0: Detect manual / external sells -> update session_state
+    # ----------------------------
+    detect_external_sells(core_symbols)
 
     # ----------------------------
     # Step 1: Predictions for core stocks
@@ -996,6 +1001,24 @@ def process_all_symbols(symbols):
     # ----------------------------
     print_signal_diagnostics(decisions, diagnostics)
 
+
+def detect_external_sells(symbols):
+    """Detect positions closed outside bot decisions (e.g. manual dashboard sells)."""
+    global _prev_shares
+
+    for sym in symbols:
+        pm = PortfolioManager(sym)
+        pm.refresh_live()
+        shares = float(pm.data.get("shares", 0.0) or 0.0)
+
+        prev = _prev_shares.get(sym, 0.0)
+
+        # If previous > 0 and now 0, treat as an external sell
+        if prev > 0 and shares == 0:
+            print(f"[SESSION] Detected external SELL for {sym} (prev={prev}, now={shares})")
+            mark_session_sell(sym)
+
+        _prev_shares[sym] = shares
 
 # ================================================================================
 # PORTFOLIO RECONCILIATION
