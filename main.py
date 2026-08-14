@@ -1057,13 +1057,24 @@ def reconcile_portfolio_state(symbol: str, verbose: bool = False):
         pm = PortfolioManager(symbol)
         pm.refresh_live()  # Syncs Alpaca → local (but might be stale)
 
-        local_shares = float(pm.data.get("shares", 0.0))
-        local_avg_price = float(pm.data.get("avg_price", 0.0))
+        # 1. Read the saved local snapshot BEFORE any live refresh.
+        local_shares = float(pm.data.get("shares", 0.0) or 0.0)
+        local_avg_price = float(pm.data.get("avg_price", 0.0) or 0.0)
 
         # Get Alpaca truth
+        account_cache.invalidate()
         pos = account_cache.get_position(symbol)
+
         alpaca_shares = float(getattr(pos, "qty", 0) if pos else 0)
-        alpaca_avg_price = float(getattr(pos, "avg_entry_price", 0) if pos else 0)
+        alpaca_avg_price = float(
+            getattr(pos, "avg_entry_price", 0.0) if pos else 0.0
+        )
+
+        print(
+            f"[RECON DEBUG] {symbol}: "
+            f"local_shares={local_shares:g}, "
+            f"alpaca_shares={alpaca_shares:g}"
+        )
 
         result['local_shares'] = local_shares
         result['alpaca_shares'] = alpaca_shares
