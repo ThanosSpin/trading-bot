@@ -22,7 +22,8 @@ diagnostics/
 # Logs
 *.log
 pdt_state.json
-session_state.json
+session_state_paper.json
+session_state_live.json
 
 # Optional generated plots
 shap_*.png

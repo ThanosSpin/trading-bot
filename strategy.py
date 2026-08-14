@@ -5,6 +5,7 @@ import pytz
 import json, os
 from datetime import datetime as _dt, timezone
 from config import (
+    ENV_NAME,
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
@@ -38,7 +39,15 @@ _session_state: dict = {
     "soft_stops": {},    # NEW: sym -> ISO timestamp of last soft stop today
 }
 
-SESSION_STATE_PATH = os.path.join(os.path.dirname(__file__), "session_state.json")
+SESSION_ENV = str(ENV_NAME).strip().lower()
+
+if SESSION_ENV not in {"live", "paper"}:
+    raise RuntimeError(f"Invalid ENV_NAME for session state: {ENV_NAME!r}")
+
+SESSION_STATE_PATH = os.path.join(
+    os.path.dirname(__file__),
+    f"session_state_{SESSION_ENV}.json",
+)
 
 def reset_session_state():
     """Call once at bot startup each trading day."""
@@ -70,7 +79,7 @@ def load_session_state():
             }
 
             _session_state["soft_stops"] = data.get("soft_stops", {})
-            print("[SESSION] Loaded session_state from disk.")
+            print(f"[SESSION] Loaded state from {SESSION_STATE_PATH}")
     except Exception as e:
         print(f"[WARN] Failed to load session_state: {e}")
 
@@ -86,7 +95,7 @@ def save_session_state():
         }
         with open(SESSION_STATE_PATH, "w") as f:
             json.dump(data, f)
-        print("[SESSION] Saved session_state to disk.")
+        print(f"[SESSION] Saved state to {SESSION_STATE_PATH}")
     except Exception as e:
         print(f"[WARN] Failed to save session_state: {e}")
 
