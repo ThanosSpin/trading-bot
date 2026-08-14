@@ -18,9 +18,10 @@ from strategy import (
     apply_daily_profit_guard,
     load_session_state,
     save_session_state,
+    record_broker_sell_fills,
 )
 from portfolio import PortfolioManager
-from trader import execute_trade, get_margin_status
+from trader import execute_trade, get_margin_status, get_recent_filled_sells
 from predictive_model.model_monitor import get_monitor, evaluate_predictions, log_prediction
 from account_cache import account_cache
 from config import (
@@ -1228,6 +1229,10 @@ def main():
     # 1) Load previous session state (buys/sells/sell_times) from disk
     load_session_state()
 
+    recent_sells = get_recent_filled_sells(symbols)
+
+    record_broker_sell_fills(recent_sells)
+
     # Wait for confirmation if live trading
     if USE_LIVE_TRADING and ENV_NAME == "live":
         print("⚠️  Starting LIVE trading in 5 seconds...")
@@ -1272,15 +1277,18 @@ def main():
     except Exception:
         pass
 
-    # ✅ NEW: Add these 8 lines
+
     print("\n🔄 Reconciling portfolios with Alpaca...")
     try:
         reconcile_all_symbols(symbols, verbose=False)
-        process_all_symbols(symbols)
     except Exception as e:
-        print(f"⚠️ Reconciliation failed (continuing anyway): {e}")
+        print(f"⚠️ Reconciliation failed — skipping trading cycle: {e}")
+        save_session_state()
+        return
+
+    try:
+        process_all_symbols(symbols)
     finally:
-        # 2) Save updated session state to disk at end of run
         save_session_state()
 
 if __name__ == "__main__":

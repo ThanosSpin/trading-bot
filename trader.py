@@ -153,6 +153,64 @@ def get_margin_status(api=None):
         return None
 
 
+def get_recent_filled_sells(symbols, since=None):
+    """
+    Return newly completed SELL orders for the watched symbols.
+
+    `since` is an ISO UTC timestamp or None.
+    """
+    watched = {str(s).upper().strip() for s in symbols}
+    api = _api()
+
+    try:
+        kwargs = {
+            "status": "closed",
+            "limit": 500,
+            "direction": "asc",
+            "nested": False,
+        }
+
+        if since:
+            kwargs["after"] = since
+
+        orders = api.list_orders(**kwargs)
+
+    except Exception as e:
+        print(f"[WARN] Could not fetch closed orders: {e}")
+        return []
+
+    filled_sells = []
+
+    for order in orders:
+        symbol = str(getattr(order, "symbol", "") or "").upper()
+        side = str(getattr(order, "side", "") or "").lower()
+        status = str(getattr(order, "status", "") or "").lower()
+
+        try:
+            filled_qty = float(getattr(order, "filled_qty", 0) or 0)
+        except (TypeError, ValueError):
+            filled_qty = 0.0
+
+        filled_at = getattr(order, "filled_at", None)
+        order_id = str(getattr(order, "id", "") or "")
+
+        if (
+            symbol in watched
+            and side == "sell"
+            and status == "filled"
+            and filled_qty > 0
+            and filled_at is not None
+        ):
+            filled_sells.append({
+                "id": order_id,
+                "symbol": symbol,
+                "filled_qty": filled_qty,
+                "filled_at": filled_at.isoformat(),
+            })
+
+    return filled_sells
+
+
 # =====================================================================
 # Safe fetch latest trade price
 # =====================================================================

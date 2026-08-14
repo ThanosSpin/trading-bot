@@ -37,6 +37,7 @@ _session_state: dict = {
     "buy_times": {},     # sym -> datetime of last buy (UTC)
     "sell_times": {},
     "soft_stops": {},    # NEW: sym -> ISO timestamp of last soft stop today
+    "processed_sell_order_ids": set(),
 }
 
 SESSION_ENV = str(ENV_NAME).strip().lower()
@@ -57,6 +58,7 @@ def reset_session_state():
     _session_state["buy_times"].clear()
     _session_state["sell_times"].clear()
     _session_state["soft_stops"].clear()
+    _session_state["processed_sell_order_ids"].clear()
     print("[SESSION] Session state reset for new trading day.")
 
 
@@ -79,6 +81,9 @@ def load_session_state():
             }
 
             _session_state["soft_stops"] = data.get("soft_stops", {})
+            _session_state["processed_sell_order_ids"] = set(
+                data.get("processed_sell_order_ids", [])
+            )
             print(f"[SESSION] Loaded state from {SESSION_STATE_PATH}")
     except Exception as e:
         print(f"[WARN] Failed to load session_state: {e}")
@@ -92,12 +97,31 @@ def save_session_state():
             "buy_times": {k: v.isoformat() for k, v in _session_state["buy_times"].items()},
             "sell_times": {k: v.isoformat() for k, v in _session_state["sell_times"].items()},
             "soft_stops": _session_state["soft_stops"],
+            "processed_sell_order_ids": list(
+                _session_state["processed_sell_order_ids"]
+            ),
         }
         with open(SESSION_STATE_PATH, "w") as f:
             json.dump(data, f)
         print(f"[SESSION] Saved state to {SESSION_STATE_PATH}")
     except Exception as e:
         print(f"[WARN] Failed to save session_state: {e}")
+
+def record_broker_sell_fills(fills):
+    for fill in fills:
+        order_id = str(fill["id"])
+        symbol = str(fill["symbol"]).upper()
+
+        if order_id in _session_state["processed_sell_order_ids"]:
+            continue
+
+        mark_session_sell(symbol)
+        _session_state["processed_sell_order_ids"].add(order_id)
+
+        print(
+            f"[SESSION] Broker SELL recorded: "
+            f"{symbol}, qty={fill['filled_qty']}, order={order_id}"
+        )
 
 def mark_session_buy(sym: str):
     sym = sym.upper()
