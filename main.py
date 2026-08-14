@@ -16,6 +16,8 @@ from strategy import (
     _effective_sell_threshold,
     apply_daily_loss_guard,
     apply_daily_profit_guard,
+    load_session_state,
+    save_session_state,
 )
 from portfolio import PortfolioManager
 from trader import execute_trade, get_margin_status
@@ -1206,7 +1208,10 @@ def main():
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
     verify_trading_config()
 
-    reset_session_state()
+    # reset_session_state()
+
+    # 1) Load previous session state (buys/sells/sell_times) from disk
+    load_session_state()
 
     # Wait for confirmation if live trading
     if USE_LIVE_TRADING and ENV_NAME == "live":
@@ -1261,7 +1266,8 @@ def main():
 
     process_all_symbols(symbols)
 
-
+    # 2) Save updated session state to disk at end of run
+    save_session_state()
 
 if __name__ == "__main__":
     main()

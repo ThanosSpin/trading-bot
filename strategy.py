@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
 import pytz
+import json, os
 from datetime import datetime as _dt, timezone
 from config import (
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
@@ -37,6 +38,8 @@ _session_state: dict = {
     "soft_stops": {},    # NEW: sym -> ISO timestamp of last soft stop today
 }
 
+SESSION_STATE_PATH = os.path.join(os.path.dirname(__file__), "session_state.json")
+
 def reset_session_state():
     """Call once at bot startup each trading day."""
     _session_state["buys"].clear()
@@ -46,6 +49,46 @@ def reset_session_state():
     _session_state["sell_times"].clear()
     _session_state["soft_stops"].clear()
     print("[SESSION] Session state reset for new trading day.")
+
+
+def load_session_state():
+    global _session_state
+    try:
+        if os.path.exists(SESSION_STATE_PATH):
+            with open(SESSION_STATE_PATH, "r") as f:
+                data = json.load(f)
+
+            _session_state["buys"] = set(data.get("buys", []))
+            _session_state["sells"] = set(data.get("sells", []))
+            _session_state["flattened"] = set(data.get("flattened", []))
+
+            _session_state["buy_times"] = {
+                k: _dt.fromisoformat(v) for k, v in data.get("buy_times", {}).items()
+            }
+            _session_state["sell_times"] = {
+                k: _dt.fromisoformat(v) for k, v in data.get("sell_times", {}).items()
+            }
+
+            _session_state["soft_stops"] = data.get("soft_stops", {})
+            print("[SESSION] Loaded session_state from disk.")
+    except Exception as e:
+        print(f"[WARN] Failed to load session_state: {e}")
+
+def save_session_state():
+    try:
+        data = {
+            "buys": list(_session_state["buys"]),
+            "sells": list(_session_state["sells"]),
+            "flattened": list(_session_state["flattened"]),
+            "buy_times": {k: v.isoformat() for k, v in _session_state["buy_times"].items()},
+            "sell_times": {k: v.isoformat() for k, v in _session_state["sell_times"].items()},
+            "soft_stops": _session_state["soft_stops"],
+        }
+        with open(SESSION_STATE_PATH, "w") as f:
+            json.dump(data, f)
+        print("[SESSION] Saved session_state to disk.")
+    except Exception as e:
+        print(f"[WARN] Failed to save session_state: {e}")
 
 def mark_session_buy(sym: str):
     sym = sym.upper()
