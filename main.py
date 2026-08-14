@@ -1005,6 +1005,7 @@ def process_all_symbols(symbols):
 def detect_external_sells(symbols):
     """Detect positions closed outside bot decisions (e.g. manual dashboard sells)."""
     global _prev_shares
+    print(f"[DEBUG] detect_external_sells called for: {symbols}")
 
     for sym in symbols:
         pm = PortfolioManager(sym)
@@ -1012,6 +1013,7 @@ def detect_external_sells(symbols):
         shares = float(pm.data.get("shares", 0.0) or 0.0)
 
         prev = _prev_shares.get(sym, 0.0)
+        print(f"[DEBUG] {sym}: prev_shares={prev}, current_shares={shares}")
 
         # If previous > 0 and now 0, treat as an external sell
         if prev > 0 and shares == 0:
