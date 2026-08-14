@@ -7,7 +7,7 @@ from market import is_market_open, debug_market, is_trading_day
 from predictive_model.model_xgb import compute_signals
 from strategy import (
     compute_strategy_decisions,
-    reset_session_state,
+    # reset_session_state,
     mark_session_buy,
     mark_session_sell,
     mark_session_flattened,
@@ -906,7 +906,7 @@ def process_all_symbols(symbols):
     # ----------------------------
     # Step 0: Detect manual / external sells -> update session_state
     # ----------------------------
-    detect_external_sells(core_symbols)
+    # detect_external_sells(core_symbols)
 
     # ----------------------------
     # Step 1: Predictions for core stocks
@@ -1004,25 +1004,25 @@ def process_all_symbols(symbols):
     print_signal_diagnostics(decisions, diagnostics)
 
 
-def detect_external_sells(symbols):
-    """Detect positions closed outside bot decisions (e.g. manual dashboard sells)."""
-    global _prev_shares
-    print(f"[DEBUG] detect_external_sells called for: {symbols}")
+# def detect_external_sells(symbols):
+#     """Detect positions closed outside bot decisions (e.g. manual dashboard sells)."""
+#     global _prev_shares
+#     print(f"[DEBUG] detect_external_sells called for: {symbols}")
 
-    for sym in symbols:
-        pm = PortfolioManager(sym)
-        pm.refresh_live()
-        shares = float(pm.data.get("shares", 0.0) or 0.0)
+#     for sym in symbols:
+#         pm = PortfolioManager(sym)
+#         pm.refresh_live()
+#         shares = float(pm.data.get("shares", 0.0) or 0.0)
 
-        prev = _prev_shares.get(sym, 0.0)
-        print(f"[DEBUG] {sym}: prev_shares={prev}, current_shares={shares}")
+#         prev = _prev_shares.get(sym, 0.0)
+#         print(f"[DEBUG] {sym}: prev_shares={prev}, current_shares={shares}")
 
-        # If previous > 0 and now 0, treat as an external sell
-        if prev > 0 and shares == 0:
-            print(f"[SESSION] Detected external SELL for {sym} (prev={prev}, now={shares})")
-            mark_session_sell(sym)
+#         # If previous > 0 and now 0, treat as an external sell
+#         if prev > 0 and shares == 0:
+#             print(f"[SESSION] Detected external SELL for {sym} (prev={prev}, now={shares})")
+#             mark_session_sell(sym)
 
-        _prev_shares[sym] = shares
+#         _prev_shares[sym] = shares
 
 # ================================================================================
 # PORTFOLIO RECONCILIATION
@@ -1124,6 +1124,10 @@ def reconcile_portfolio_state(symbol: str, verbose: bool = False):
                 qty=-local_shares,
                 notes="Position closed externally (not by bot)"
             )
+            
+            # Mark this as a sell in session_state for cooldown/rebuy logic
+            mark_session_sell(symbol)
+            print(f"[SESSION] External sell recorded: {symbol}")
 
         elif verbose:
             print(f"✅ [{symbol}] No position (local and Alpaca agree)")
@@ -1261,13 +1265,12 @@ def main():
     print("\n🔄 Reconciling portfolios with Alpaca...")
     try:
         reconcile_all_symbols(symbols, verbose=False)
+        process_all_symbols(symbols)
     except Exception as e:
         print(f"⚠️ Reconciliation failed (continuing anyway): {e}")
-
-    process_all_symbols(symbols)
-
-    # 2) Save updated session state to disk at end of run
-    save_session_state()
+    finally:
+        # 2) Save updated session state to disk at end of run
+        save_session_state()
 
 if __name__ == "__main__":
     main()

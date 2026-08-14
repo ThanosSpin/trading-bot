@@ -117,8 +117,20 @@ def _rebuy_allowed(sym: str, prob_up: float, diagnostics: Dict[str, dict] = None
     if sym in _session_state["flattened"]:
         return False, f"{sym}: rebuy blocked - was force-flattened at close today."
 
+    last_sell_time = _session_state["sell_times"].get(sym)
+    if last_sell_time is not None:
+        elapsed_min = (_dt.now(timezone.utc) - last_sell_time).total_seconds() / 60
+
+        if elapsed_min < REBUY_COOLDOWN_MINUTES:
+            remaining = REBUY_COOLDOWN_MINUTES - elapsed_min
+            return False, (
+                f"{sym}: buy blocked - sell cooldown active "
+                f"({elapsed_min:.0f}min elapsed; "
+                f"{remaining:.0f}min remaining)."
+            )
+
     if sym not in _session_state["buys"]:
-        return True, ""  # Never bought today - normal first entry
+        return True, ""
     
     required_prob = _effective_rebuy_threshold(sym, diagnostics)
 

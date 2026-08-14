@@ -22,6 +22,7 @@ diagnostics/
 # Logs
 *.log
 pdt_state.json
+session_state.json
 
 # Optional generated plots
 shap_*.png
