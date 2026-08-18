@@ -963,6 +963,21 @@ def should_trade(
         # Apply position limits
         qty = apply_position_limits(affordable, price, cash, symbol)
 
+        # A sell cooldown blocks every new BUY, including pyramid adds.
+        allowed, cooldown_reason = _rebuy_allowed(
+            symbol,
+            prob_up,
+            diagnostics,
+        )
+
+        if not allowed:
+            return make_decision(
+                "hold",
+                0,
+                explain + " " + cooldown_reason,
+            )
+
+
         if qty > 0:
             return make_decision(
                 "buy",

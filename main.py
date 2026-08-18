@@ -1031,125 +1031,90 @@ def process_all_symbols(symbols):
 
 def reconcile_portfolio_state(symbol: str, verbose: bool = False):
     """
-    Compare local portfolio state vs Alpaca truth.
-    Auto-correct to Alpaca if drift detected.
-
-    Args:
-        symbol: Stock symbol to reconcile
-        verbose: If True, log even when no drift
-
-    Returns:
-        dict: {
-            'drift_detected': bool,
-            'local_shares': float,
-            'alpaca_shares': float,
-            'corrected': bool
-        }
+    Treat Alpaca as the source of truth. Refresh local portfolio state,
+    record a broker-confirmed external full close, and ensure the local
+    snapshot matches the broker before strategy decisions run.
     """
     result = {
-        'drift_detected': False,
-        'local_shares': 0.0,
-        'alpaca_shares': 0.0,
-        'corrected': False
+        "drift_detected": False,
+        "local_shares": 0.0,
+        "alpaca_shares": 0.0,
+        "corrected": False,
     }
 
     try:
-        # Get local portfolio state
+        symbol = symbol.upper()
         pm = PortfolioManager(symbol)
-        pm.refresh_live()  # Syncs Alpaca → local (but might be stale)
 
-        # 1. Read the saved local snapshot BEFORE any live refresh.
+        # Read saved state FIRST: this lets us recognize a full external close.
         local_shares = float(pm.data.get("shares", 0.0) or 0.0)
         local_avg_price = float(pm.data.get("avg_price", 0.0) or 0.0)
 
-        # Get Alpaca truth
+        # Query Alpaca directly after invalidating cached data.
         account_cache.invalidate()
         pos = account_cache.get_position(symbol)
 
-        alpaca_shares = float(getattr(pos, "qty", 0) if pos else 0)
+        alpaca_shares = float(getattr(pos, "qty", 0.0) or 0.0)
         alpaca_avg_price = float(
-            getattr(pos, "avg_entry_price", 0.0) if pos else 0.0
+            getattr(pos, "avg_entry_price", 0.0) or 0.0
         )
+
+        result["local_shares"] = local_shares
+        result["alpaca_shares"] = alpaca_shares
 
         print(
             f"[RECON DEBUG] {symbol}: "
-            f"local_shares={local_shares:g}, "
-            f"alpaca_shares={alpaca_shares:g}"
+            f"saved_local={local_shares:g}, "
+            f"alpaca={alpaca_shares:g}"
         )
 
-        result['local_shares'] = local_shares
-        result['alpaca_shares'] = alpaca_shares
+        # A previously held local position is now completely gone at Alpaca.
+        if local_shares > 0 and alpaca_shares == 0:
+            result["drift_detected"] = True
 
-        # Check for drift in shares
-        if alpaca_shares > 0:
-            share_diff = abs(local_shares - alpaca_shares)
-            share_drift_pct = share_diff / alpaca_shares
-
-            if share_drift_pct > 0.05:  # >5% drift
-                result['drift_detected'] = True
-
-                print(f"⚠️ [{symbol}] SHARE DRIFT DETECTED")
-                print(f"   Local:  {local_shares:g} shares @ ${local_avg_price:.2f}")
-                print(f"   Alpaca: {alpaca_shares:g} shares @ ${alpaca_avg_price:.2f}")
-                print(f"   Drift:  {share_drift_pct:.1%} ({share_diff:g} shares)")
-
-                # Auto-correct to Alpaca truth
-                pm.data["shares"] = alpaca_shares
-                pm.data["avg_price"] = alpaca_avg_price
-                pm.save()
-
-                result['corrected'] = True
-
-                print(f"   ✅ Auto-corrected to Alpaca: {alpaca_shares:g} shares @ ${alpaca_avg_price:.2f}")
-
-                # Log to trade log for audit trail
-                pm.log_trade(
-                    action="RECONCILE",
-                    price=alpaca_avg_price,
-                    qty=alpaca_shares - local_shares,
-                    notes=f"Auto-correction: drift {share_drift_pct:.1%}"
-                )
-
-            elif verbose:
-                print(f"✅ [{symbol}] Portfolio in sync: {alpaca_shares:g} shares")
-
-        elif local_shares > 0:
-            # Alpaca shows 0, but local shows shares (position was closed)
-            result['drift_detected'] = True
-
-            print(f"⚠️ [{symbol}] POSITION CLOSED EXTERNALLY")
-            print(f"   Local:  {local_shares:g} shares")
-            print(f"   Alpaca: 0 shares (position closed)")
-
-            # Reset local to 0
-            pm.data["shares"] = 0
-            pm.data["cash"] = pm.data.get("cash", 0)  (local_shares * local_avg_price)
+            pm.data["shares"] = 0.0
+            pm.data["avg_price"] = 0.0
             pm.save()
 
-            result['corrected'] = True
-
-            print(f"   ✅ Local portfolio reset to 0")
-
-            pm.log_trade(
-                action="RECONCILE",
-                price=local_avg_price,
-                qty=-local_shares,
-                notes="Position closed externally (not by bot)"
-            )
-            
-            # Mark this as a sell in session_state for cooldown/rebuy logic
             mark_session_sell(symbol)
-            print(f"[SESSION] External sell recorded: {symbol}")
+            result["corrected"] = True
 
+            print(
+                f"[SESSION] External full SELL recorded: {symbol} "
+                f"(local={local_shares:g}, Alpaca=0)"
+            )
+            return result
+
+        # Any other quantity / average-price mismatch: Alpaca wins.
+        if (
+            abs(local_shares - alpaca_shares) > 1e-9
+            or (
+                alpaca_shares > 0
+                and abs(local_avg_price - alpaca_avg_price) > 1e-9
+            )
+        ):
+            result["drift_detected"] = True
+
+            pm.data["shares"] = alpaca_shares
+            pm.data["avg_price"] = alpaca_avg_price if alpaca_shares > 0 else 0.0
+            pm.save()
+
+            result["corrected"] = True
+
+            print(
+                f"[RECON] {symbol}: local position synchronized "
+                f"to Alpaca ({alpaca_shares:g} shares)."
+            )
         elif verbose:
-            print(f"✅ [{symbol}] No position (local and Alpaca agree)")
+            print(f"[RECON] {symbol}: already synchronized.")
+
+        # Refresh after saving so in-memory data agrees with the saved snapshot.
+        pm.refresh_live()
 
         return result
 
     except Exception as e:
-        print(f"❌ [{symbol}] Reconciliation failed: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[RECON ERROR] {symbol}: {e}")
         return result
 
 
