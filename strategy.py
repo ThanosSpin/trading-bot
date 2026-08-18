@@ -115,7 +115,9 @@ def record_broker_sell_fills(fills):
         if order_id in _session_state["processed_sell_order_ids"]:
             continue
 
-        mark_session_sell(symbol)
+        sold_at = fill.get("filled_at")
+
+        mark_session_sell(symbol, sold_at=sold_at)
         _session_state["processed_sell_order_ids"].add(order_id)
 
         print(
@@ -128,11 +130,20 @@ def mark_session_buy(sym: str):
     _session_state["buys"].add(sym)
     _session_state["buy_times"][sym] = _dt.now(timezone.utc)
 
-def mark_session_sell(sym: str):
+def mark_session_sell(sym: str, sold_at=None):
     sym = sym.upper()
     _session_state["sells"].add(sym)
 
-    _session_state["sell_times"][sym] = _dt.now(timezone.utc)
+    if sold_at is None:
+        sold_at = _dt.now(timezone.utc)
+
+    if isinstance(sold_at, str):
+        sold_at = _dt.fromisoformat(sold_at.replace("Z", "+00:00"))
+
+    if sold_at.tzinfo is None:
+        sold_at = sold_at.replace(tzinfo=timezone.utc)
+
+    _session_state["sell_times"][sym] = sold_at.astimezone(timezone.utc)
 
 def mark_session_flattened(sym: str):
     _session_state["flattened"].add(sym.upper())
