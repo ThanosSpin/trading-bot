@@ -143,7 +143,12 @@ def mark_session_sell(sym: str, sold_at=None):
     if sold_at.tzinfo is None:
         sold_at = sold_at.replace(tzinfo=timezone.utc)
 
-    _session_state["sell_times"][sym] = sold_at.astimezone(timezone.utc)
+    sold_at = sold_at.astimezone(timezone.utc)
+
+    # Always keep the most recent sell time for this symbol.
+    existing = _session_state["sell_times"].get(sym)
+    if existing is None or sold_at > existing:
+        _session_state["sell_times"][sym] = sold_at
 
 def mark_session_flattened(sym: str):
     _session_state["flattened"].add(sym.upper())

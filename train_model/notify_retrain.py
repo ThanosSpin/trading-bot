@@ -27,3 +27,4 @@ def send_retrain_email(success=True, errors=None):
         print("[INFO] Retrain notification sent.")
     except Exception as e:
         print(f"[Email Error] {e}")
+        
