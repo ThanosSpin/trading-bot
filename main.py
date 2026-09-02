@@ -7,7 +7,7 @@ from market import is_market_open, debug_market, is_trading_day
 from predictive_model.model_xgb import compute_signals
 from strategy import (
     compute_strategy_decisions,
-    # reset_session_state,
+    reset_session_state,
     mark_session_buy,
     mark_session_sell,
     mark_session_flattened,
@@ -1189,7 +1189,8 @@ def main():
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
     verify_trading_config()
 
-    # reset_session_state()
+    reset_session_state()
+    save_session_state
 
     # 1) Load previous session state (buys/sells/sell_times) from disk
     load_session_state()

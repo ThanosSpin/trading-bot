@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import pytz
 import json, os
-from datetime import datetime as _dt, timezone
+from datetime import datetime as _dt, timezone, timedelta
 from config import (
     ENV_NAME,
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
@@ -138,17 +138,34 @@ def mark_session_sell(sym: str, sold_at=None):
         sold_at = _dt.now(timezone.utc)
 
     if isinstance(sold_at, str):
-        sold_at = _dt.fromisoformat(sold_at.replace("Z", "+00:00"))
+        try:
+            sold_at = _dt.fromisoformat(sold_at.replace("Z", "+00:00"))
+        except Exception:
+            sold_at = _dt.now(timezone.utc)
 
     if sold_at.tzinfo is None:
         sold_at = sold_at.replace(tzinfo=timezone.utc)
 
     sold_at = sold_at.astimezone(timezone.utc)
 
-    # Always keep the most recent sell time for this symbol.
+    # Ignore fills older than 24 hours
+    min_allowed = _dt.now(timezone.utc) - timedelta(hours=24)
+    if sold_at < min_allowed:
+        print(
+            f"[MARK_SELL] {sym}: ignoring stale sold_at={sold_at} "
+            f"(older than 24h, min_allowed={min_allowed})"
+        )
+        return
+
     existing = _session_state["sell_times"].get(sym)
     if existing is None or sold_at > existing:
         _session_state["sell_times"][sym] = sold_at
+        print(f"[MARK_SELL] {sym}: updated sell_times to {sold_at}")
+    else:
+        print(
+            f"[MARK_SELL] {sym}: keeping existing sell_times={existing} "
+            f"(new={sold_at} is not newer)"
+        )
 
 def mark_session_flattened(sym: str):
     _session_state["flattened"].add(sym.upper())

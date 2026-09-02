@@ -2,7 +2,7 @@
 import time
 import pytz
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 from broker import get_trading_api
@@ -153,62 +153,57 @@ def get_margin_status(api=None):
         return None
 
 
-def get_recent_filled_sells(symbols, since=None):
-    """
-    Return newly completed SELL orders for the watched symbols.
+def get_recent_filled_sells(symbols, lookback_hours=24):
+    since_dt = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
-    `since` is an ISO UTC timestamp or None.
-    """
-    watched = {str(s).upper().strip() for s in symbols}
-    api = _api()
+    orders = _api().list_orders(
+        status="closed",
+        limit=1000,
+        direction="desc",
+        nested=False,
+        # Only fetch orders updated within the lookback window
+        # (Alpaca's 'until' and 'after' filter by order submission time,
+        # so we also filter by filled_at manually below.)
+    )
 
-    try:
-        kwargs = {
-            "status": "closed",
-            "limit": 500,
-            "direction": "asc",
-            "nested": False,
-        }
+    fills = []
+    for o in orders:
+        if o.symbol not in [s.upper() for s in symbols]:
+            continue
+        if o.side != "sell":
+            continue
 
-        if since:
-            kwargs["after"] = since
-
-        orders = api.list_orders(**kwargs)
-
-    except Exception as e:
-        print(f"[WARN] Could not fetch closed orders: {e}")
-        return []
-
-    filled_sells = []
-
-    for order in orders:
-        symbol = str(getattr(order, "symbol", "") or "").upper()
-        side = str(getattr(order, "side", "") or "").lower()
-        status = str(getattr(order, "status", "") or "").lower()
-
+        # Safely convert filled_qty to float
         try:
-            filled_qty = float(getattr(order, "filled_qty", 0) or 0)
+            filled_qty = float(o.filled_qty)
         except (TypeError, ValueError):
-            filled_qty = 0.0
+            continue
 
-        filled_at = getattr(order, "filled_at", None)
-        order_id = str(getattr(order, "id", "") or "")
+        if filled_qty <= 0:
+            continue
 
-        if (
-            symbol in watched
-            and side == "sell"
-            and status == "filled"
-            and filled_qty > 0
-            and filled_at is not None
-        ):
-            filled_sells.append({
-                "id": order_id,
-                "symbol": symbol,
-                "filled_qty": filled_qty,
-                "filled_at": filled_at.isoformat(),
-            })
+        # Use filled_at if available, otherwise skip
+        filled_at = getattr(o, "filled_at", None)
+        if filled_at is None:
+            continue
 
-    return filled_sells
+        # Ensure filled_at is timezone-aware
+        if filled_at.tzinfo is None:
+            filled_at = filled_at.replace(tzinfo=timezone.utc)
+
+        # Only include fills within the lookback window
+        if filled_at < since_dt:
+            continue
+
+        fills.append({
+            "id": str(o.id),
+            "symbol": o.symbol,
+            "side": o.side,
+            "filled_qty": filled_qty,
+            "filled_at": filled_at.isoformat(),
+        })
+
+    return fills
 
 
 # =====================================================================
