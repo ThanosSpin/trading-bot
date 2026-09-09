@@ -7,7 +7,7 @@ from datetime import datetime as _dt, timezone, timedelta
 from config import (
     ENV_NAME,
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
-    SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
+    SPY_SYMBOL, PRICE_WEAK_THRESHOLD, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
     MARGIN_TIERING_ENABLED, MARGIN_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
     MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB,
@@ -568,8 +568,6 @@ def apply_daily_profit_guard(decisions, diagnostics=None):
 # ---------------------------------------------------------
 # Helper for weak market
 # ---------------------------------------------------------
-PRICE_WEAK_THRESHOLD = -0.01  # -1% daily move
-
 def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
     """
     Return True if enough of the non-SPY symbols are weak.

@@ -71,6 +71,8 @@ WEAK_PROB_THRESHOLD = 0.48
 # Market is weak if this fraction of your stock symbols are weak:
 WEAK_RATIO_THRESHOLD = 0.5
 
+PRICE_WEAK_THRESHOLD = -0.01  # -1% daily move
+
 # Only trade SPY if SPY confirms strength:
 SPY_ENTRY_THRESHOLD = 0.70
 SPY_EXIT_THRESHOLD = 0.50

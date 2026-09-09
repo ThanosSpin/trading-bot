@@ -90,7 +90,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--capital",
         type=float,
-        default=100_000.0,
+        default=10_000.0,
         help="Starting capital in dollars (default: 100000)",
     )
     parser.add_argument(
