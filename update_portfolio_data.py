@@ -4,9 +4,16 @@ import pandas as pd
 import pytz
 from alpaca_trade_api.rest import REST
 
-from config import SYMBOL, TIMEZONE, PORTFOLIO_PATH, SPY_SYMBOL, API_KEY, API_SECRET, BASE_URL
+from config import (
+    SYMBOL,
+    TIMEZONE,
+    PORTFOLIO_PATH,
+    SPY_SYMBOL,
+)
 
-api_market = REST(API_KEY, API_SECRET, BASE_URL)
+from broker import get_trading_api
+
+api_market = get_trading_api()
 
 
 # -----------------------------

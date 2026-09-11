@@ -5,7 +5,7 @@ import pytz
 import json, os
 from datetime import datetime as _dt, timezone, timedelta
 from config import (
-    ENV_NAME,
+    ENV_NAME, BOT_ENV,
     BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
     SPY_SYMBOL, PRICE_WEAK_THRESHOLD, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
@@ -40,10 +40,12 @@ _session_state: dict = {
     "processed_sell_order_ids": set(),
 }
 
-SESSION_ENV = str(ENV_NAME).strip().lower()
+SESSION_ENV = str(BOT_ENV).strip().lower()
 
-if SESSION_ENV not in {"live", "paper"}:
-    raise RuntimeError(f"Invalid ENV_NAME for session state: {ENV_NAME!r}")
+if SESSION_ENV not in {"live", "live2", "paper"}:
+    raise RuntimeError(
+        f"Invalid BOT_ENV for session state: {BOT_ENV!r}"
+    )
 
 SESSION_STATE_PATH = os.path.join(
     os.path.dirname(__file__),

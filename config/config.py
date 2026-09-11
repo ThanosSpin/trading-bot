@@ -2,15 +2,56 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-
 # Load environment variables from .env file
 load_dotenv()
 
-# Base data folder
-DATA_DIR = "data"
-LOGS_DIR = 'logs'
 
+# ============================================================
+# BOT ENVIRONMENT
+# ============================================================
+
+BOT_ENV = os.getenv("BOT_ENV", "live").strip().lower()
+
+VALID_BOT_ENVS = ("paper", "live", "live2")
+
+if BOT_ENV not in VALID_BOT_ENVS:
+    raise ValueError(
+        f"Invalid BOT_ENV='{BOT_ENV}'. "
+        f"Expected one of: {', '.join(VALID_BOT_ENVS)}"
+    )
+
+
+# ============================================================
+# PROJECT PATHS
+# ============================================================
+
+SCRIPT_DIR = Path(__file__).resolve().parent   # config/
+BASE_DIR = SCRIPT_DIR.parent                  # project root
+
+
+# ============================================================
+# DATA DIRECTORIES
+# ============================================================
+
+if BOT_ENV == "paper":
+    DATA_DIR = BASE_DIR / "data_paper"
+
+elif BOT_ENV == "live":
+    DATA_DIR = BASE_DIR / "data"
+
+elif BOT_ENV == "live2":
+    DATA_DIR = BASE_DIR / "data" / "live2"
+
+
+LOGS_DIR = BASE_DIR / "logs" / BOT_ENV
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================
 # API keys
+# ============================================================
 API_KEY = os.getenv("ALPACA_API_KEY")
 API_SECRET = os.getenv("ALPACA_SECRET_KEY")
 API_MARKET_KEY = os.getenv("ALPACA_MARKET_API_KEY")
@@ -18,12 +59,21 @@ API_MARKET_SECRET = os.getenv("ALPACA_MARKET_SECRET_KEY")
 BASE_URL = os.getenv("ALPACA_BASE_URL")
 MARKET_BASE_URL = os.getenv("ALPACA_MARKET_BASE_URL")  # For live trading
 
+# Live account #2
+API_LIVE2_KEY = os.getenv("ALPACA_LIVE2_MARKET_API_KEY")
+API_LIVE2_SECRET = os.getenv("ALPACA_LIVE2_MARKET_SECRET_KEY")
+LIVE2_BASE_URL = os.getenv("ALPACA_LIVE2_MARKET_BASE_URL")
+
+# ============================================================
 # Email notifications
+# ============================================================
 EMAIL_SENDER = os.getenv("EMAIL")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # Use App Password
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
+# ============================================================
 # Trading config
+# ============================================================
 SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]  # symbol
 PAPER_TRADE_SYMBOLS = []  # paper trade symbol
 INITIAL_CAPITAL = 0
@@ -49,9 +99,9 @@ REBUY_THRESHOLD = BUY_THRESHOLD + 0.06
 REBUY_COOLDOWN_MINUTES = 45
 ALLOW_SAME_DAY_REBUY = True
 
-# --------------------
+# ============================================================
 # Model blending weights
-# --------------------
+# ============================================================
 INTRADAY_WEIGHT = 0.65   # default intraday dominance
 MIN_INTRADAY_BARS_FOR_FEATURES = 25
 RS_MARGIN = 0.05
@@ -59,19 +109,11 @@ RS_MARGIN = 0.05
 # Model training configuration
 USE_MULTICLASS_MODELS = False  # Train 5-class models instead of binary
 
-# =========================
+# ============================================================
 # SPY fallback configuration
-# =========================
+# ============================================================
 
 SPY_SYMBOL = "SPY"
-
-# Weakness definition for individual stocks:
-WEAK_PROB_THRESHOLD = 0.48
-
-# Market is weak if this fraction of your stock symbols are weak:
-WEAK_RATIO_THRESHOLD = 0.5
-
-PRICE_WEAK_THRESHOLD = -0.01  # -1% daily move
 
 # Only trade SPY if SPY confirms strength:
 SPY_ENTRY_THRESHOLD = 0.70
@@ -80,6 +122,16 @@ SPY_RISK_FRACTION = 1.0   # 100% of available cash for SPY trades
 
 # If True: only trade SPY when you took NO stock trades this cycle.
 SPY_MUTUAL_EXCLUSIVE = True
+
+# ============================================================
+# Weakness definition
+# ============================================================
+WEAK_PROB_THRESHOLD = 0.48
+
+# Market is weak if this fraction of your stock symbols are weak:
+WEAK_RATIO_THRESHOLD = 0.5
+
+PRICE_WEAK_THRESHOLD = -0.01  # -1% daily move
 
 # =========================
 # Intraday regime detection (15m bars)
@@ -172,19 +224,26 @@ PRE_MARKET_SCAN_HOUR = 9            # Run at 9:00 AM (1.5h before market open)
 
 LIMIT_BUFFER_PCT = 0.01
 
+# ============================================================
 # Model path management
-SCRIPT_DIR = Path(__file__).resolve().parent  # config/
-BASE_DIR = SCRIPT_DIR.parent  # Go up to project root
+# ============================================================
 MODEL_DIR = BASE_DIR / "models"
+
+
 def get_model_path(symbol):
     """Return the model path for a given symbol."""
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    return os.path.join(MODEL_DIR, f"model_{symbol}.pkl")
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    return str(MODEL_DIR / f"model_{symbol}.pkl")
 
+# ============================================================
 # Other paths
-PORTFOLIO_PATH = "data/portfolio.json"
-LOG_FILE = "logs/trading_bot.log"
+# ============================================================
+PORTFOLIO_PATH = str(DATA_DIR / "portfolio.json")
+LOG_FILE = str(LOGS_DIR / "trading_bot.log")
 
+
+# ============================================================
 # Other configs
-USE_LIVE_TRADING = True  # Switch to True to go live
+# ============================================================
+USE_LIVE_TRADING = True
 TIMEZONE = "US/Eastern"

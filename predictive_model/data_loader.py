@@ -7,8 +7,7 @@ import pytz
 from datetime import datetime, timedelta
 from typing import Optional
 import yfinance as yf
-from broker import api_market
-from alpaca_client import api as alpaca_api
+from broker import get_trading_api
 
 # ============================================================
 # LOGGING CONFIGURATION
@@ -139,7 +138,8 @@ def fetch_latest_price(symbol: str, prefer_yfinance=False) -> Optional[float]:
     if not prefer_yfinance:
         try:
             logger.debug(f"Attempting Alpaca API for {sym}")
-            bar = alpaca_api.get_latest_bar(sym)
+            api = get_trading_api()
+            bar = api.get_latest_bar(sym)
             
             if bar:
                 bar_time = getattr(bar, 't', None)
@@ -244,7 +244,9 @@ def fetch_intraday_history_alpaca(
             f"timeframe={timeframe}, lookback={lookback_minutes}min, limit={limit}"
         )
 
-        bars = api_market.get_bars(
+        api = get_trading_api()
+
+        bars = api.get_bars(
             symbol,
             timeframe=timeframe,
             start=start_utc.isoformat(),

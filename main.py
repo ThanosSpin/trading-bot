@@ -25,11 +25,27 @@ from trader import execute_trade, get_margin_status, get_recent_filled_sells
 from predictive_model.model_monitor import get_monitor, evaluate_predictions, log_prediction
 from account_cache import account_cache
 from config import (
-    SYMBOL, BUY_THRESHOLD, SELL_THRESHOLD, INTRADAY_WEIGHT,
-    SPY_SYMBOL, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD,
-    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE,
-    PAPER_TRADE_SYMBOLS, USE_LIVE_TRADING, PAPER_TRADE_NOTES,
-    MARGIN_EMERGENCY_PROB_THRESH,ENV_NAME
+    SYMBOL,
+    BUY_THRESHOLD,
+    SELL_THRESHOLD,
+    INTRADAY_WEIGHT,
+    SPY_SYMBOL,
+    WEAK_PROB_THRESHOLD,
+    WEAK_RATIO_THRESHOLD,
+    SPY_ENTRY_THRESHOLD,
+    SPY_EXIT_THRESHOLD,
+    SPY_MUTUAL_EXCLUSIVE,
+    PAPER_TRADE_SYMBOLS,
+    USE_LIVE_TRADING,
+    PAPER_TRADE_NOTES,
+    MARGIN_EMERGENCY_PROB_THRESH,
+    LOGS_DIR,
+)
+
+from broker import (
+    get_trading_api,
+    get_active_env,
+    verify_active_account,
 )
 
 from config import BASE_URL as CONFIG_BASE_URL
@@ -44,11 +60,7 @@ os.environ["TZ"] = "America/New_York"
 time.tzset()
 
 # Track previous shares per symbol to detect external position changes
-_prev_shares = {}
-
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGS_DIR = os.path.join(BOT_DIR, "logs")
-os.makedirs(LOGS_DIR, exist_ok=True)
+# _prev_shares = {}
 
 # ===============================================================
 # ✅ Helper Function
@@ -98,34 +110,45 @@ def print_banner(title: str = "", width: int = 60, char: str = "=") -> None:
         print(line)
 
 def verify_runtime_environment():
-    bot_env = os.getenv("BOT_ENV", "live").lower()
-    base_url = globals().get("CONFIG_BASE_URL", None)
+    bot_env = get_active_env()
 
     print_banner("RUNTIME ENVIRONMENT CHECK")
-    print(f"BOT_ENV={bot_env}")
-    try:
-        from config import ENV_NAME
-    except ImportError:
-        ENV_NAME = "unknown"
 
-    print(f"ENV_NAME={ENV_NAME}")
+    print(f"BOT_ENV={bot_env}")
     print(f"USE_LIVE_TRADING={USE_LIVE_TRADING}")
-    print(f"BASE_URL={base_url}")
+
+    if bot_env not in ("paper", "live", "live2"):
+        raise RuntimeError(
+            f"Unsupported BOT_ENV={bot_env}"
+        )
+
+    # Verify that the credentials actually connect
+    # to the expected Alpaca account.
+    account = verify_active_account()
+
+    print(f"ALPACA ACCOUNT={account.id}")
+    print(f"ACCOUNT STATUS={account.status}")
+    print(f"EQUITY=${float(account.equity):,.2f}")
+    print(f"CASH=${float(account.cash):,.2f}")
+
     print_banner()
 
-    if bot_env == "paper":
-        if ENV_NAME != "paper":
-            raise RuntimeError(f"BOT_ENV=paper but ENV_NAME={ENV_NAME}")
-        if not base_url or "paper-api.alpaca.markets" not in base_url:
-            raise RuntimeError(f"BOT_ENV=paper but BASE_URL is not paper: {base_url}")
+    return account
 
-    if bot_env == "live":
-        if ENV_NAME != "live":
-            raise RuntimeError(f"BOT_ENV=live but ENV_NAME={ENV_NAME}")
-        if not USE_LIVE_TRADING:
-            raise RuntimeError("BOT_ENV=live but USE_LIVE_TRADING=False")
-        if not base_url or "api.alpaca.markets" not in base_url:
-            raise RuntimeError(f"BOT_ENV=live but BASE_URL is not live: {base_url}")
+    # ---------------------------------------------------------
+    # Verify actual Alpaca account
+    # ---------------------------------------------------------
+
+    account = verify_active_account()
+
+    print(f"ALPACA ACCOUNT={account.id}")
+    print(f"ACCOUNT STATUS={account.status}")
+    print(f"EQUITY=${float(account.equity):,.2f}")
+    print(f"CASH=${float(account.cash):,.2f}")
+
+    print_banner()
+
+    return account
 
 
 # ===============================================================
@@ -1199,11 +1222,16 @@ def main():
     record_broker_sell_fills(recent_sells)
 
     # Wait for confirmation if live trading
-    if USE_LIVE_TRADING and ENV_NAME == "live":
-        print("⚠️  Starting LIVE trading in 5 seconds...")
-        print("   Press CtrlC to abort")
+    bot_env = get_active_env()
+
+    if bot_env in ("live", "live2"):
+        print(
+            f"⚠️  Starting {bot_env.upper()} trading in 5 seconds..."
+        )
+        print("   Press Ctrl+C to abort")
         time.sleep(5)
-    elif USE_LIVE_TRADING and ENV_NAME == "paper":
+
+    elif bot_env == "paper":
         print("🧪 Starting PAPER order execution in 3 seconds...")
         print("   Orders will be sent to Alpaca paper account")
         time.sleep(3)
@@ -1216,10 +1244,10 @@ def main():
     debug_market()
 
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
+    # # Optional market-hours guard
+    # if not is_market_open():
+    #     print("⏳ Market is closed. Exiting.")
+    #     return
 
 
     # margin Display
