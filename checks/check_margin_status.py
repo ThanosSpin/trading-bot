@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import alpaca_trade_api as tradeapi
-from config.config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
+from config import API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL
 
 def check_margin_status():
     api = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version='v2')

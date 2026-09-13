@@ -23,9 +23,9 @@ try:
     from predictive_model.data_loader import fetch_historical_data
     from predictive_model.features import _clean_columns
     from predictive_model.model_xgb import train_model
-    from config.config import SYMBOL
+    from config import SYMBOL
     try:
-        from config.config import LOGS_DIR, MODEL_DIR
+        from config import LOGS_DIR, MODEL_DIR
     except ImportError:
         LOGS_DIR = "logs"
         MODEL_DIR = "models"

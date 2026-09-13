@@ -16,7 +16,7 @@ This script retrains all models and saves them with enhanced features.
 import os
 import sys
 from datetime import datetime
-from config.config import (
+from config import (
     TRAIN_SYMBOLS,
     MODEL_DIR,
     SPY_SYMBOL,
