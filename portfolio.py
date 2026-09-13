@@ -6,52 +6,62 @@ import pandas as pd
 from datetime import datetime
 import pytz
 
-from config.config import PORTFOLIO_PATH, TIMEZONE
+from config import BOT_ENV, DATA_DIR, TIMEZONE
 from broker import get_trading_api
 from account_cache import account_cache
 from json.decoder import JSONDecodeError
-
 
 # ============================================================
 # File helpers
 # ============================================================
 
-def get_portfolio_file(symbol):
-    """Returns path to portfolio_<symbol>.json inside the same folder as PORTFOLIO_PATH."""
-    base = os.path.dirname(PORTFOLIO_PATH)
+
+def _data_dir():
+    """Return the data directory for the active BOT_ENV."""
+    base = str(DATA_DIR)
     os.makedirs(base, exist_ok=True)
-    return os.path.join(base, f"portfolio_{symbol}.json")
+    return base
+
+
+def get_portfolio_file(symbol):
+    """Environment-specific portfolio_<symbol>.json."""
+    symbol = symbol.upper()
+    return os.path.join(
+        _data_dir(),
+        f"portfolio_{symbol}.json",
+    )
 
 
 def get_trade_log_file(symbol):
-    """Returns path to trades_<symbol>.csv inside the same folder as PORTFOLIO_PATH."""
-    base = os.path.dirname(PORTFOLIO_PATH)
-    os.makedirs(base, exist_ok=True)
-    return os.path.join(base, f"trades_{symbol}.csv")
+    """Environment-specific trades_<symbol>.csv."""
+    symbol = symbol.upper()
+    return os.path.join(
+        _data_dir(),
+        f"trades_{symbol}.csv",
+    )
 
 
 def get_daily_portfolio_file():
-    """Returns path to daily_portfolio.csv inside the same folder as PORTFOLIO_PATH."""
-    base = os.path.dirname(PORTFOLIO_PATH)
-    os.makedirs(base, exist_ok=True)
-    return os.path.join(base, "daily_portfolio.csv")
+    """Environment-specific daily_portfolio.csv."""
+    return os.path.join(str(DATA_DIR), "daily_portfolio.csv")
 
 
 # ============================================================
 # Live Portfolio
 # ============================================================
 
+
 def get_live_portfolio(symbol):
     """Fetch live Alpaca portfolio for a symbol (using cache)."""
     symbol = symbol.upper()
-    
+
     try:
         cache = account_cache.get_account()
         cash = cache.get("cash", 0.0)
-        
+
         # Find position from cached list
         position = account_cache.get_position(symbol)
-        
+
         if position:
             shares = float(getattr(position, "qty", 0.0) or 0.0)
             last_price = float(getattr(position, "current_price", 0.0) or 0.0)
@@ -60,14 +70,14 @@ def get_live_portfolio(symbol):
             shares = 0.0
             last_price = 0.0
             avg_price = 0.0
-        
+
         return {
             "cash": cash,
             "shares": shares,
             "last_price": last_price,
-            "avg_price": avg_price
+            "avg_price": avg_price,
         }
-        
+
     except Exception as e:
         print(f"[WARN] get_live_portfolio({symbol}) failed: {e}")
         return {"cash": 0.0, "shares": 0.0, "last_price": 0.0, "avg_price": 0.0}
@@ -76,6 +86,7 @@ def get_live_portfolio(symbol):
 # ============================================================
 # PortfolioManager Class
 # ============================================================
+
 
 class PortfolioManager:
     def __init__(self, symbol):
@@ -94,7 +105,9 @@ class PortfolioManager:
                 with open(self.file, "r") as f:
                     data = json.load(f)
             except (JSONDecodeError, OSError) as e:
-                print(f"[WARN] Corrupted portfolio file for {self.symbol}: {e}. Resetting.")
+                print(
+                    f"[WARN] Corrupted portfolio file for {self.symbol}: {e}. Resetting."
+                )
                 # Optional: backup corrupted file
                 try:
                     os.rename(self.file, self.file + ".corrupted")
@@ -141,9 +154,9 @@ class PortfolioManager:
             live = get_live_portfolio(self.symbol)
 
             cash = float(live.get("cash", 0.0) or 0.0)
-            sh   = float(live.get("shares", 0.0) or 0.0)
-            lp   = float(live.get("last_price", 0.0) or 0.0)
-            ap   = float(live.get("avg_price", 0.0) or 0.0)
+            sh = float(live.get("shares", 0.0) or 0.0)
+            lp = float(live.get("last_price", 0.0) or 0.0)
+            ap = float(live.get("avg_price", 0.0) or 0.0)
 
             self.data["cash"] = cash
             self.data["shares"] = sh
@@ -173,13 +186,13 @@ class PortfolioManager:
                 self.data["shares"] = 0.0
                 self.data["avg_price"] = 0.0
                 self.data["max_price"] = 0.0
-            
+
             # print(f"[LIVE] {self.symbol} shares={sh} last={lp} avg={self.data['avg_price']} max={self.data['max_price']}")
 
             self.save()
         except Exception:
             pass
-        
+
     # ------------------------
     # Logging
     # ------------------------
@@ -195,31 +208,35 @@ class PortfolioManager:
         with open(log_path, "a", newline="") as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow([
-                    "timestamp",
-                    "symbol",
-                    "action",
-                    "qty",
-                    "price",
-                    "cash",
-                    "shares",
-                    "value",
-                    "shares_before",
-                    "shares_after",
-                ])
+                writer.writerow(
+                    [
+                        "timestamp",
+                        "symbol",
+                        "action",
+                        "qty",
+                        "price",
+                        "cash",
+                        "shares",
+                        "value",
+                        "shares_before",
+                        "shares_after",
+                    ]
+                )
 
-            writer.writerow([
-                timestamp,
-                self.symbol,
-                action,
-                f"{float(qty):g}",
-                f"{float(price):.2f}",
-                f"{self.data['cash']:.2f}",
-                f"{self.data['shares']:.8g}",
-                f"{value:.2f}",
-                f"{shares_before:.8g}",
-                f"{shares_after:.8g}",
-            ])
+            writer.writerow(
+                [
+                    timestamp,
+                    self.symbol,
+                    action,
+                    f"{float(qty):g}",
+                    f"{float(price):.2f}",
+                    f"{self.data['cash']:.2f}",
+                    f"{self.data['shares']:.8g}",
+                    f"{value:.2f}",
+                    f"{shares_before:.8g}",
+                    f"{shares_after:.8g}",
+                ]
+            )
 
     # ------------------------
     # Trading updates
@@ -254,14 +271,16 @@ class PortfolioManager:
             shares_after = shares_before + exec_qty
             # weighted avg entry
             if shares_after > 0:
-                self.data["avg_price"] = (shares_before * avg_before + exec_qty * price) / shares_after
+                self.data["avg_price"] = (
+                    shares_before * avg_before + exec_qty * price
+                ) / shares_after
             self.data["shares"] = shares_after
 
             self.data["max_price"] = max(max_before, price)
             # ── Guard 3 prerequisite: record first entry time ──
             if shares_before <= 0:
                 self.data["entry_time"] = datetime.utcnow().isoformat()
-            
+
         # -----------------------
         # SELL
         # -----------------------
@@ -274,7 +293,6 @@ class PortfolioManager:
                 shares_after = 0.0
 
             self.data["shares"] = shares_after
-
 
             # reset when flat
             if self.data["shares"] <= 0:
@@ -324,10 +342,10 @@ class PortfolioManager:
     # ------------------------
 
     def value(self):
-        return float(self.data.get("cash", 0)) + \
-               float(self.data.get("shares", 0)) * \
-               float(self.data.get("last_price", 0))
-    
+        return float(self.data.get("cash", 0)) + float(
+            self.data.get("shares", 0)
+        ) * float(self.data.get("last_price", 0))
+
     def save(self):
         """Persist portfolio JSON to disk."""
         os.makedirs(os.path.dirname(self.file), exist_ok=True)
@@ -338,6 +356,7 @@ class PortfolioManager:
 # ============================================================
 # Daily portfolio aggregation
 # ============================================================
+
 
 def save_daily_portfolio_csv(trades_list, initial_cash=1000.0):
     """
@@ -373,10 +392,12 @@ def save_daily_portfolio_csv(trades_list, initial_cash=1000.0):
         )
         daily_values[timestamp.date()] = total_value
 
-    df_daily = pd.DataFrame([
-        {"date": pd.Timestamp(d).tz_localize(tz), "value": v}
-        for d, v in daily_values.items()
-    ])
+    df_daily = pd.DataFrame(
+        [
+            {"date": pd.Timestamp(d).tz_localize(tz), "value": v}
+            for d, v in daily_values.items()
+        ]
+    )
 
     df_daily.sort_values("date", inplace=True)
     df_daily.to_csv(get_daily_portfolio_file(), index=False)
@@ -389,7 +410,8 @@ def save_daily_portfolio_csv(trades_list, initial_cash=1000.0):
 # Detect Deposits / Withdrawals from Alpaca Equity Curve
 # ============================================================
 
-def detect_capital_change(save_path="data/deposits_auto.csv", min_change=50):
+
+def detect_capital_change(save_path=None, min_change=50):
     """
     Detects deposits or withdrawals by comparing Alpaca equity history.
     Saves results to deposits_auto.csv for dashboard markers.
@@ -400,14 +422,18 @@ def detect_capital_change(save_path="data/deposits_auto.csv", min_change=50):
     Output CSV columns:
     date, change, type, equity
     """
-
+    if save_path is None:
+        save_path = os.path.join(
+            _data_dir(),
+            "deposits_auto.csv",
+        )
     # ------------------------------
     # 1. Fetch Alpaca equity history
     # ------------------------------
     try:
         api = get_trading_api()
         hist = api.get_portfolio_history(period="1A", timeframe="1D")
-        equity = pd.Series(hist.equity, index=pd.to_datetime(hist.timestamp, unit='s'))
+        equity = pd.Series(hist.equity, index=pd.to_datetime(hist.timestamp, unit="s"))
         equity = equity.sort_index()
     except Exception as e:
         print(f"[ERROR] detect_capital_change: {e}")
@@ -420,10 +446,7 @@ def detect_capital_change(save_path="data/deposits_auto.csv", min_change=50):
     # ------------------------------
     # 2. Compute daily changes
     # ------------------------------
-    df = pd.DataFrame({
-        "equity": equity,
-        "change": equity.diff()
-    })
+    df = pd.DataFrame({"equity": equity, "change": equity.diff()})
 
     # Ignore very small fluctuations
     df["change_clean"] = df["change"].where(df["change"].abs() >= min_change)
@@ -460,22 +483,104 @@ def detect_capital_change(save_path="data/deposits_auto.csv", min_change=50):
 
     return df_out
 
-def export_deposits_from_alpaca(save_path="data/deposits_auto.csv"):
-    """
-    Export real cash deposits/withdrawals from Alpaca activities
-    to a CSV file with columns: date, amount.
-    """
-    from dashboard import _fetch_deposits_from_alpaca  # or move helper to shared module
-    df = _fetch_deposits_from_alpaca()
+
+def fetch_deposits_from_alpaca():
+    try:
+        api = get_trading_api()
+        rows = []
+
+        for requested_type in ("CSD", "CSW"):
+            try:
+                activities = api.get_activities(activity_types=requested_type)
+
+                for activity in activities:
+                    actual_type = str(getattr(activity, "activity_type", "")).upper()
+
+                    if actual_type != requested_type:
+                        continue
+
+                    # IMPORTANT:
+                    # Preserve Alpaca's signed amount exactly.
+                    # CSD can be negative when Alpaca reverses a credit.
+                    amount = float(getattr(activity, "net_amount", 0) or 0)
+
+                    date_raw = getattr(activity, "date", None) or getattr(
+                        activity, "transaction_time", None
+                    )
+
+                    if date_raw and amount != 0:
+                        rows.append(
+                            {
+                                "date": pd.to_datetime(
+                                    str(date_raw),
+                                    utc=True,
+                                ),
+                                "amount": amount,
+                                "source": actual_type,
+                                "activity_id": str(getattr(activity, "id", "")),
+                            }
+                        )
+
+            except Exception as e:
+                print(f"[WARN] Failed fetching " f"{requested_type} activities: {e}")
+
+        if not rows:
+            return pd.DataFrame(
+                columns=[
+                    "date",
+                    "amount",
+                    "source",
+                    "activity_id",
+                ]
+            )
+
+        df = pd.DataFrame(rows)
+
+        # Alpaca activity ID is the best duplicate key.
+        df = df.drop_duplicates(
+            subset=["activity_id"],
+            keep="last",
+        )
+
+        return df.sort_values("date").reset_index(drop=True)
+
+    except Exception as e:
+        print(f"[WARN] Alpaca deposit fetch failed: {e}")
+
+    return pd.DataFrame(
+        columns=[
+            "date",
+            "amount",
+            "source",
+            "activity_id",
+        ]
+    )
+
+
+def export_deposits_from_alpaca(save_path=None):
+    if save_path is None:
+        save_path = os.path.join(
+            _data_dir(),
+            "deposits_auto.csv",
+        )
+
+    df = fetch_deposits_from_alpaca()
+
     if df is None or df.empty:
-        print("[WARN] No Alpaca deposits/withdrawals found.")
+        print(f"[WARN] No Alpaca deposits/withdrawals " f"found for BOT_ENV={BOT_ENV}.")
         return None
 
-    base = os.path.dirname(save_path)
-    if base and not os.path.exists(base):
-        os.makedirs(base, exist_ok=True)
+    os.makedirs(
+        os.path.dirname(save_path),
+        exist_ok=True,
+    )
 
     df_out = df[["date", "amount"]].copy()
     df_out.to_csv(save_path, index=False)
-    print(f"💾 Saved Alpaca deposit/withdrawal history → {save_path}")
+
+    print(
+        f"💾 Saved Alpaca deposit/withdrawal history "
+        f"for {BOT_ENV.upper()} → {save_path}"
+    )
+
     return df_out

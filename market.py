@@ -2,18 +2,9 @@
 import pytz
 from datetime import datetime, time
 import pandas_market_calendars as mcal
-import alpaca_trade_api as tradeapi
-from alpaca_trade_api import REST
-    
-from config.config import (
-    TIMEZONE,
-    API_MARKET_KEY,
-    API_MARKET_SECRET,
-    MARKET_BASE_URL,
-)
 
-# Optional Alpaca clock (used only when valid)
-alpaca = tradeapi.REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version="v2")
+from config import TIMEZONE
+from broker import get_trading_api
 
 # Timezones
 LOCAL_TZ = pytz.timezone(TIMEZONE)
@@ -67,7 +58,8 @@ def is_market_open():
 
     # Step 4 — (Optional) Cross-check Alpaca clock (only if valid)
     try:
-        clock = alpaca.get_clock()
+        api = get_trading_api()
+        clock = api.get_clock()
 
         if isinstance(clock.is_open, bool):
             alpaca_open = bool(clock.is_open)
@@ -86,6 +78,7 @@ def is_market_open():
     # Final fallback: schedule only
     return within_hours
 
+
 def debug_market(return_dict=False):
     """
     Returns either:
@@ -103,15 +96,15 @@ def debug_market(return_dict=False):
     ny_now = local_now.astimezone(ny_tz)
 
     # Trading day check
-    is_trading_day_flag = ny_now.weekday() < 5
+    is_trading_day_flag = is_trading_day(ny_now.date())
 
     # Within NYSE hours
-    within_hours = (market_open_t <= ny_now.time() <= market_close_t)
+    within_hours = market_open_t <= ny_now.time() <= market_close_t
 
     # Alpaca clock check
     alpaca_is_open = None
     try:
-        api = REST(API_MARKET_KEY, API_MARKET_SECRET, MARKET_BASE_URL, api_version="v2")
+        api = get_trading_api()
         clock = api.get_clock()
         alpaca_is_open = clock.is_open
     except Exception:

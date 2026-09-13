@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, Optional
-from config.config import INTRADAY_REGIME_OVERRIDES
+from config import INTRADAY_REGIME_OVERRIDES
 from predictive_model.data_loader import fetch_historical_data
 
 # Cache thresholds to avoid repeated API calls
@@ -53,7 +53,7 @@ def get_adaptive_regime_thresholds(
 
     # ✅ NEW: Check for config override BEFORE doing anything else
     try:
-        from config.config import INTRADAY_REGIME_OVERRIDES
+        from config import INTRADAY_REGIME_OVERRIDES
         ovr = INTRADAY_REGIME_OVERRIDES.get(sym, {})
         
         if ovr.get("disable_adaptive", False):

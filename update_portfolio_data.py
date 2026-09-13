@@ -2,7 +2,6 @@ import os
 import csv
 import pandas as pd
 import pytz
-from alpaca_trade_api.rest import REST
 
 from config import (
     SYMBOL,
@@ -67,7 +66,8 @@ def fetch_filled_trades(symbol):
             break  # last page
 
     filtered = [
-        o for o in all_orders
+        o
+        for o in all_orders
         if getattr(o, "symbol", None) == symbol
         and getattr(o, "filled_at", None) is not None
     ]
@@ -104,14 +104,16 @@ def gather_all_trades(symbols):
             )
             qty = float(getattr(t, "filled_qty", 0) or 0)
 
-            all_trades.append({
-                "kind": "trade",
-                "symbol": s,
-                "timestamp": ts,
-                "action": t.side.lower(),
-                "qty": qty,
-                "price": float(price),
-            })
+            all_trades.append(
+                {
+                    "kind": "trade",
+                    "symbol": s,
+                    "timestamp": ts,
+                    "action": t.side.lower(),
+                    "qty": qty,
+                    "price": float(price),
+                }
+            )
 
     all_trades.sort(key=lambda x: x["timestamp"])
     return all_trades
@@ -122,44 +124,95 @@ def gather_all_trades(symbols):
 # -----------------------------
 def fetch_cash_activities():
     """
-    Return external cash-flow events from Alpaca account activities.
-    CSD = cash deposit, CSW = cash withdrawal.
+    Return signed external cash-flow events from Alpaca account activities.
+
+    IMPORTANT:
+    - Preserve Alpaca's net_amount sign exactly.
+    - CSD is NOT always positive. Alpaca may use negative CSD for reversals.
+    - Date-only Alpaca activity dates are treated as account-local dates
+      (TIMEZONE), not UTC midnight.
     """
     events = []
+    local_tz = pytz.timezone(TIMEZONE)
 
-    for activity_type in ["CSD", "CSW"]:
+    for requested_type in ("CSD", "CSW"):
         try:
-            activities = api_market.get_activities(activity_types=activity_type)
-            print(f"  {activity_type}: {len(activities)} activities")
+            activities = api_market.get_activities(activity_types=requested_type)
+            print(f"  {requested_type}: " f"{len(activities)} activities")
         except Exception as e:
-            print(f"[WARN] Cannot fetch {activity_type} activities: {e}")
+            print(f"[WARN] Cannot fetch " f"{requested_type} activities: {e}")
             continue
 
         for a in activities:
-            raw_ts = getattr(a, "date", None) or getattr(a, "transaction_time", None)
-            if raw_ts is None:
+            actual_type = str(getattr(a, "activity_type", requested_type)).upper()
+
+            # Prefer an exact transaction timestamp if Alpaca provides one.
+            transaction_time = getattr(
+                a,
+                "transaction_time",
+                None,
+            )
+            activity_date = getattr(a, "date", None)
+
+            if transaction_time is not None:
+                ts = pd.to_datetime(
+                    str(transaction_time),
+                    utc=True,
+                ).to_pydatetime()
+
+            elif activity_date is not None:
+                # Alpaca 'date' is a calendar/account date.
+                # Do NOT interpret YYYY-MM-DD as midnight UTC,
+                # because that shifts it to the previous US/Eastern day.
+                dt_naive = pd.to_datetime(str(activity_date)).to_pydatetime()
+
+                if dt_naive.tzinfo is None:
+                    ts = local_tz.localize(dt_naive)
+                else:
+                    ts = dt_naive.astimezone(local_tz)
+
+            else:
                 continue
 
-            ts = pd.to_datetime(str(raw_ts), utc=True).to_pydatetime()
+            # CRITICAL:
+            # Preserve Alpaca's sign exactly.
+            #
+            # Example:
+            # CSD +1000 = credit
+            # CSD -1000 = reversal
+            # CSW -965  = withdrawal
             amount = float(getattr(a, "net_amount", 0) or 0)
-
-            if activity_type == "CSW":
-                amount = -abs(amount)
-            else:
-                amount = abs(amount)
 
             if amount == 0:
                 continue
 
-            events.append({
-                "kind": "cash_flow",
-                "timestamp": ts,
-                "amount": amount,
-                "activity_type": activity_type,
-            })
+            events.append(
+                {
+                    "kind": "cash_flow",
+                    "timestamp": ts,
+                    "amount": amount,
+                    "activity_type": actual_type,
+                    "activity_id": str(getattr(a, "id", "")),
+                }
+            )
 
-    events.sort(key=lambda x: x["timestamp"])
-    return events
+    # Defensive de-duplication by Alpaca activity ID
+    unique_events = []
+    seen_ids = set()
+
+    for e in events:
+        activity_id = e.get("activity_id", "")
+
+        if activity_id:
+            if activity_id in seen_ids:
+                continue
+            seen_ids.add(activity_id)
+
+        unique_events.append(e)
+
+    unique_events.sort(key=lambda x: x["timestamp"])
+
+    return unique_events
 
 
 # -----------------------------
@@ -184,12 +237,14 @@ def fetch_portfolio_history_equity(tz) -> pd.DataFrame:
         for ts_epoch, eq in zip(hist.timestamp, hist.equity):
             if eq is None or float(eq) == 0:
                 continue
-            rows.append({
-                "date": pd.Timestamp(ts_epoch, unit="s", tz="UTC")
-                           .tz_convert(tz)
-                           .normalize(),
-                "value": round(float(eq), 6),
-            })
+            rows.append(
+                {
+                    "date": pd.Timestamp(ts_epoch, unit="s", tz="UTC")
+                    .tz_convert(tz)
+                    .normalize(),
+                    "value": round(float(eq), 6),
+                }
+            )
 
         df = pd.DataFrame(rows)
         if df.empty:
@@ -198,15 +253,19 @@ def fetch_portfolio_history_equity(tz) -> pd.DataFrame:
         # Keep last equity reading per day (market close)
         df = (
             df.groupby("date", as_index=False)
-              .agg({"value": "last"})
-              .sort_values("date")
-              .reset_index(drop=True)
+            .agg({"value": "last"})
+            .sort_values("date")
+            .reset_index(drop=True)
         )
-        print(f"  ✅ Fetched {len(df)} days of real equity from Alpaca portfolio history.")
+        print(
+            f"  ✅ Fetched {len(df)} days of real equity from Alpaca portfolio history."
+        )
         return df
 
     except Exception as e:
-        print(f"  [WARN] fetch_portfolio_history_equity failed: {e} — using replayed values.")
+        print(
+            f"  [WARN] fetch_portfolio_history_equity failed: {e} — using replayed values."
+        )
         return pd.DataFrame()
 
 
@@ -266,45 +325,70 @@ def replay_and_emit(events, initial_cash: float = 0.0):
                 s["shares"] * s["last_price"] for s in symbols_state.values()
             )
 
-            per_symbol_rows[sym].append({
-                "timestamp":      ts.isoformat(),
-                "symbol":         sym,
-                "action":         action,
-                "qty":            qty,
-                "price":          round(price, 6),
-                "cash":           round(cash, 6),
-                "shares":         round(symbols_state[sym]["shares"], 8),
-                "value":          round(replayed_value, 6),
-                "timestamplocal": tsl.isoformat(),
-                "timestampstr":   tsl.strftime("%Y-%m-%d %H%M%S"),
-            })
+            per_symbol_rows[sym].append(
+                {
+                    "timestamp": ts.isoformat(),
+                    "symbol": sym,
+                    "action": action,
+                    "qty": qty,
+                    "price": round(price, 6),
+                    "cash": round(cash, 6),
+                    "shares": round(symbols_state[sym]["shares"], 8),
+                    "value": round(replayed_value, 6),
+                    "timestamplocal": tsl.isoformat(),
+                    "timestampstr": tsl.strftime("%Y-%m-%d %H%M%S"),
+                }
+            )
 
         replayed_value = cash + sum(
             s["shares"] * s["last_price"] for s in symbols_state.values()
         )
 
-        daily_rows.append({
-            "date":          pd.Timestamp(ts).tz_convert(tz).normalize(),
-            "value":         round(replayed_value, 6),   # may be overwritten below
-            "cash":          round(cash, 6),
-            "external_flow": float(e["amount"]) if e["kind"] == "cash_flow" else 0.0,
-        })
+        daily_rows.append(
+            {
+                "date": pd.Timestamp(ts).tz_convert(tz).normalize(),
+                "value": round(replayed_value, 6),  # may be overwritten below
+                "cash": round(cash, 6),
+                "external_flow": (
+                    float(e["amount"]) if e["kind"] == "cash_flow" else 0.0
+                ),
+            }
+        )
 
     # ── Write per-symbol trade CSVs ────────────────────────────────────────────
     for sym, rows in per_symbol_rows.items():
         path = trade_log_path(sym)
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow([
-                "timestamp", "symbol", "action", "qty", "price",
-                "cash", "shares", "value", "timestamplocal", "timestampstr",
-            ])
+            w.writerow(
+                [
+                    "timestamp",
+                    "symbol",
+                    "action",
+                    "qty",
+                    "price",
+                    "cash",
+                    "shares",
+                    "value",
+                    "timestamplocal",
+                    "timestampstr",
+                ]
+            )
             for r in rows:
-                w.writerow([
-                    r["timestamp"], r["symbol"], r["action"], r["qty"], r["price"],
-                    r["cash"], r["shares"], r["value"],
-                    r["timestamplocal"], r["timestampstr"],
-                ])
+                w.writerow(
+                    [
+                        r["timestamp"],
+                        r["symbol"],
+                        r["action"],
+                        r["qty"],
+                        r["price"],
+                        r["cash"],
+                        r["shares"],
+                        r["value"],
+                        r["timestamplocal"],
+                        r["timestampstr"],
+                    ]
+                )
         print(f"  ✅ Wrote trade log: {path} ({len(rows)} rows)")
 
     # ── Build daily_portfolio DataFrame ───────────────────────────────────────
@@ -317,8 +401,42 @@ def replay_and_emit(events, initial_cash: float = 0.0):
             .reset_index(drop=True)
         )
     else:
-        df_daily = pd.DataFrame(
-            columns=["date", "value", "cash", "external_flow"]
+        df_daily = pd.DataFrame(columns=["date", "value", "cash", "external_flow"])
+
+    # ── Replace replayed equity with real Alpaca equity ─────────────
+    df_real_equity = fetch_portfolio_history_equity(tz)
+
+    if df_real_equity is not None and not df_real_equity.empty and not df_daily.empty:
+        df_daily = df_daily.merge(
+            df_real_equity.rename(columns={"value": "broker_value"}),
+            on="date",
+            how="left",
+        )
+
+        has_broker_value = pd.to_numeric(
+            df_daily["broker_value"],
+            errors="coerce",
+        ).notna()
+
+        df_daily.loc[
+            has_broker_value,
+            "value",
+        ] = df_daily.loc[
+            has_broker_value,
+            "broker_value",
+        ]
+
+        matched = int(has_broker_value.sum())
+
+        df_daily = df_daily.drop(columns=["broker_value"])
+
+        print(
+            f"  ✅ Replaced replayed equity with "
+            f"real Alpaca equity on {matched} days."
+        )
+    else:
+        print(
+            "  ⚠️ Real Alpaca equity unavailable — " "keeping replayed equity values."
         )
 
     # ── ✅ Write initial_cash so dashboard PnL math is correct ────────────────
@@ -346,13 +464,34 @@ if __name__ == "__main__":
     cash_flows = fetch_cash_activities()
 
     # --- Save deposits_auto.csv from Alpaca cash_flows ---
+    INVESTOR_FLOW_IGNORED_IDS = {
+        # Alpaca erroneous $1,000 credit
+        "20260910000000000::0393a204-4c64-4d25-8d3b-ffd5f4755eba",
+        # Alpaca reversal of erroneous $1,000 credit
+        "20260911000000000::451967b2-ccd5-4cdd-ba6f-f1037ad55851",
+    }
+
     deposits_rows = []
+
     for e in cash_flows:
-        if e["amount"] > 0 or e["amount"] < 0:  # deposits and withdrawals
-            deposits_rows.append({
+        activity_id = e.get("activity_id", "")
+
+        # Exclude broker correction/reversal from actual
+        # investor contributed-capital history.
+        if activity_id in INVESTOR_FLOW_IGNORED_IDS:
+            print(
+                f"  ↪ Excluding broker correction from "
+                f"investor flows: {activity_id} "
+                f"amount={e['amount']:+.2f}"
+            )
+            continue
+
+        deposits_rows.append(
+            {
                 "date": e["timestamp"],
-                "amount": e["amount"],  # positive = deposit, negative = withdrawal
-            })
+                "amount": e["amount"],
+            }
+        )
 
     if deposits_rows:
         df_dep_auto = pd.DataFrame(deposits_rows)
@@ -372,12 +511,16 @@ if __name__ == "__main__":
     # the first deposit (portfolio_history[0] == CSD #1 amount).
     if cash_flows:
         initial_cash = 0.0
-        total_deposited = sum(e["amount"] for e in cash_flows if e["amount"] > 0)
-        total_withdrawn = sum(abs(e["amount"]) for e in cash_flows if e["amount"] < 0)
-        print(f"  ✅ Starting cash = $0.00 (all deposits tracked as CSD events)")
-        print(f"  💰 Total deposited via CSD : ${total_deposited:,.2f}")
-        if total_withdrawn:
-            print(f"  💸 Total withdrawn via CSW: ${total_withdrawn:,.2f}")
+        total_positive = sum(e["amount"] for e in cash_flows if e["amount"] > 0)
+        total_negative = sum(abs(e["amount"]) for e in cash_flows if e["amount"] < 0)
+        net_external_flow = sum(e["amount"] for e in cash_flows)
+        print(
+            "  ✅ Starting cash = $0.00 "
+            "(cash activities reconstruct account funding)"
+        )
+        print(f"  💰 Positive cash activities : " f"${total_positive:,.2f}")
+        print(f"  💸 Negative cash activities : " f"${total_negative:,.2f}")
+        print(f"  💵 Net external cash flow    : " f"${net_external_flow:,.2f}")
     else:
         # Fallback: no CSD activities found — seed from portfolio history
         try:
@@ -391,7 +534,9 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  [WARN] Could not fetch initial cash: {e}")
             initial_cash = 0.0
-        print(f"  ⚠️  No CSD events — using portfolio history seed: ${initial_cash:,.2f}")
+        print(
+            f"  ⚠️  No CSD events — using portfolio history seed: ${initial_cash:,.2f}"
+        )
 
     # ── Step 3: fetch trades ───────────────────────────────────────────────────
     print("\n📈 Fetching filled trades...")

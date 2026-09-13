@@ -36,7 +36,7 @@ from predictive_model.trading_metrics import (
     print_trading_report,
 )
 
-from config.config import (
+from config import (
     INTRADAY_MOM_TRIG,
     INTRADAY_REGIME_OVERRIDES,
     INTRADAY_VOL_TRIG,

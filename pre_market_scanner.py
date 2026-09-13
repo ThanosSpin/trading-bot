@@ -24,7 +24,7 @@ from broker import get_trading_api
 from pdt.pdt_tracker import get_opened_today_qty
 from order_utils import get_order_params, print_market_status, get_market_session
 
-from config.config import (
+from config import (
     PRE_MARKET_ENABLED,
     PRE_MARKET_MIN_PROB,
     PRE_MARKET_MAX_ALLOCATION,

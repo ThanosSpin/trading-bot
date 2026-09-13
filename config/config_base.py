@@ -4,12 +4,39 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATA_DIR = "data"
-LOGS_DIR = "logs"
+
+# ============================================================
+# API / environment credentials
+# ============================================================
+
+# Paper account
+API_KEY = os.getenv("ALPACA_API_KEY")
+API_SECRET = os.getenv("ALPACA_SECRET_KEY")
+BASE_URL = os.getenv("ALPACA_BASE_URL")
+
+# Primary live account
+API_MARKET_KEY = os.getenv("ALPACA_MARKET_API_KEY")
+API_MARKET_SECRET = os.getenv("ALPACA_MARKET_SECRET_KEY")
+MARKET_BASE_URL = os.getenv("ALPACA_MARKET_BASE_URL")
+
+# Secondary live account
+API_LIVE2_KEY = os.getenv("ALPACA_LIVE2_MARKET_API_KEY")
+API_LIVE2_SECRET = os.getenv("ALPACA_LIVE2_MARKET_SECRET_KEY")
+LIVE2_BASE_URL = os.getenv("ALPACA_LIVE2_MARKET_BASE_URL")
+
+
+# ============================================================
+# Email
+# ============================================================
 
 EMAIL_SENDER = os.getenv("EMAIL")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+
+
+# ============================================================
+# Trading Strategy
+# ============================================================
 
 SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]
 PAPER_TRADE_SYMBOLS = []
@@ -99,7 +126,22 @@ PRE_MARKET_SHORT_ALLOCATION = 0.10
 PRE_MARKET_SCAN_HOUR = 9
 LIMIT_BUFFER_PCT = 0.01
 
+# ============================================================
+# Performance Fee
+# ============================================================
+
+# Performance fee used in the annual Investor / Performance Fee table.
+# Example: 0.2 = 25% - 5% (hurdle_pct) = 20%
+RESOURCE_FEE_PCT = 2.0
+HURDLE_PCT = 5.0
+PERFORMANCE_FEE_PCT = 25.0
+
 TIMEZONE = "US/Eastern"
+USE_LIVE_TRADING = True
+
+# ============================================================
+# Data Directory
+# ============================================================
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BASE_DIR = SCRIPT_DIR.parent

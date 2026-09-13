@@ -23,7 +23,7 @@ import joblib
 
 from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
 from predictive_model.model_xgb import train_model, MODEL_DIR
-from config.config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
+from config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
 
 MAX_BACKUPS = 6
 USE_MULTICLASS = USE_MULTICLASS_MODELS

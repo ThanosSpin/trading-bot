@@ -2,7 +2,7 @@
 import smtplib
 from email.message import EmailMessage
 from datetime import datetime
-from config.config import EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
+from config import EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
 
 def send_retrain_email(success=True, errors=None):
     msg = EmailMessage()
