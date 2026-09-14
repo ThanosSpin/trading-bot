@@ -6,24 +6,32 @@ load_dotenv()
 
 
 # ============================================================
-# API / environment credentials
+# Raw Alpaca credentials
 # ============================================================
 
 # Paper account
-API_KEY = os.getenv("ALPACA_API_KEY")
-API_SECRET = os.getenv("ALPACA_SECRET_KEY")
-BASE_URL = os.getenv("ALPACA_BASE_URL")
+PAPER_API_KEY = os.getenv("ALPACA_API_KEY")
+PAPER_API_SECRET = os.getenv("ALPACA_SECRET_KEY")
+PAPER_BASE_URL = os.getenv(
+    "ALPACA_BASE_URL",
+    "https://paper-api.alpaca.markets",
+)
 
 # Primary live account
-API_MARKET_KEY = os.getenv("ALPACA_MARKET_API_KEY")
-API_MARKET_SECRET = os.getenv("ALPACA_MARKET_SECRET_KEY")
-MARKET_BASE_URL = os.getenv("ALPACA_MARKET_BASE_URL")
+LIVE_API_KEY = os.getenv("ALPACA_MARKET_API_KEY")
+LIVE_API_SECRET = os.getenv("ALPACA_MARKET_SECRET_KEY")
+LIVE_BASE_URL = os.getenv(
+    "ALPACA_MARKET_BASE_URL",
+    "https://api.alpaca.markets",
+)
 
 # Secondary live account
-API_LIVE2_KEY = os.getenv("ALPACA_LIVE2_MARKET_API_KEY")
-API_LIVE2_SECRET = os.getenv("ALPACA_LIVE2_MARKET_SECRET_KEY")
-LIVE2_BASE_URL = os.getenv("ALPACA_LIVE2_MARKET_BASE_URL")
-
+LIVE2_API_KEY = os.getenv("ALPACA_LIVE2_MARKET_API_KEY")
+LIVE2_API_SECRET = os.getenv("ALPACA_LIVE2_MARKET_SECRET_KEY")
+LIVE2_BASE_URL = os.getenv(
+    "ALPACA_LIVE2_MARKET_BASE_URL",
+    "https://api.alpaca.markets",
+)
 
 # ============================================================
 # Email

@@ -11,14 +11,21 @@ from config import (
     EMAIL_SENDER,
     EMAIL_PASSWORD,
     EMAIL_RECEIVER,
+    BOT_ENV,
+    ENV_NAME,
+    DATA_DIR,
 )
 
 
-BOT_ENV = (os.getenv("BOT_ENV") or os.getenv("BOTENV") or "live").strip().lower()
-if BOT_ENV not in {"live", "paper"}:
-    BOT_ENV = "live"
+BOT_ENV = str(BOT_ENV).strip().lower()
 
-BALANCE_FILE = os.path.join("data", f"last_balance_{BOT_ENV}.json")
+if BOT_ENV not in {"live", "live2", "paper"}:
+    raise RuntimeError(
+        f"Invalid BOT_ENV={BOT_ENV!r}. "
+        "Expected live, live2, or paper."
+    )
+
+BALANCE_FILE = os.path.join(DATA_DIR, "last_balance.json")
 
 print(f"[DEBUG] Using balance file for env '{BOT_ENV}': {BALANCE_FILE}")
 
@@ -78,8 +85,8 @@ def check_balance():
         # -------------------------------------------------
         # Runtime environment debug
         # -------------------------------------------------
-        print(f"[DEBUG] BOT_ENV={os.getenv('BOT_ENV')}")
-        print(f"[DEBUG] ENV_NAME={os.getenv('ENV_NAME')}")
+        print(f"[DEBUG] BOT_ENV={BOT_ENV}")
+        print(f"[DEBUG] ENV_NAME={ENV_NAME}")
         print(f"[DEBUG] BASE_URL={BASE_URL}")
         print(f"[DEBUG] API_KEY={_mask_secret(API_KEY)}")
         print(f"[DEBUG] API_SECRET={_mask_secret(API_SECRET)}")
@@ -103,7 +110,6 @@ def check_balance():
         print(f"[DEBUG] account.cash={getattr(account, 'cash', None)}")
         print(f"[DEBUG] account.portfolio_value={getattr(account, 'portfolio_value', None)}")
         print(f"[DEBUG] account.equity={getattr(account, 'equity', None)}")
-        print(f"[DEBUG] account.pattern_day_trader={getattr(account, 'pattern_day_trader', None)}")
         print(f"[DEBUG] account.trading_blocked={getattr(account, 'trading_blocked', None)}")
         print(f"[DEBUG] account.transfers_blocked={getattr(account, 'transfers_blocked', None)}")
         print(f"[DEBUG] account.account_blocked={getattr(account, 'account_blocked', None)}")
@@ -130,8 +136,8 @@ def check_balance():
                     f"Initial balance:\n"
                     f"Cash: ${cash:.2f}\n"
                     f"Portfolio: ${portfolio_value:.2f}\n\n"
-                    f"BOT_ENV: {os.getenv('BOT_ENV')}\n"
-                    f"ENV_NAME: {os.getenv('ENV_NAME')}\n"
+                    f"BOT_ENV: {BOT_ENV}\n"
+                    f"ENV_NAME: {ENV_NAME}\n"
                     f"Base URL: {BASE_URL}\n"
                     f"Account ID: {getattr(account, 'id', None)}\n"
                     f"Account Number: {getattr(account, 'account_number', None)}"
@@ -147,8 +153,8 @@ def check_balance():
                     f"Balance changed:\n"
                     f"Cash: ${last['cash']:.2f} → ${cash:.2f}\n"
                     f"Portfolio: ${last['portfolio_value']:.2f} → ${portfolio_value:.2f}\n\n"
-                    f"BOTENV: {os.getenv('BOTENV')}\n"
-                    f"ENVNAME: {os.getenv('ENVNAME')}\n"
+                    f"BOT_ENV: {BOT_ENV}\n"
+                    f"ENV_NAME: {ENV_NAME}\n"
                     f"Base URL: {BASE_URL}\n"
                     f"Account ID: {getattr(account, 'id', None)}\n"
                     f"Account Number: {getattr(account, 'account_number', None)}"

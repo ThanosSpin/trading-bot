@@ -1,16 +1,44 @@
 from .config_base import *
 import os
+from pathlib import Path
 
-API_KEY = os.getenv("ALPACA_API_KEY")
-API_SECRET = os.getenv("ALPACA_SECRET_KEY")
-BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+BOT_ENV = "paper"
+ENV_NAME = "paper"
+
+
+# ============================================================
+# Active Alpaca account
+# ============================================================
+
+API_KEY = PAPER_API_KEY
+API_SECRET = PAPER_API_SECRET
+BASE_URL = PAPER_BASE_URL
+
+
+if not API_KEY:
+    raise RuntimeError("Missing paper Alpaca API key.")
+
+if not API_SECRET:
+    raise RuntimeError("Missing paper Alpaca API secret.")
+
+
+# ============================================================
+# Paper directories
+# ============================================================
+
+DATA_DIR = BASE_DIR / "data_paper"
+LOGS_DIR = BASE_DIR / "logs_paper"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+PORTFOLIO_PATH = str(DATA_DIR / "portfolio.json")
+LOG_FILE = str(LOGS_DIR / "trading_bot.log")
+
 
 INITIAL_CAPITAL = 100000
-PORTFOLIO_PATH = "data_paper/portfolio.json"
-LOG_FILE = "logs_paper/trading_bot.log"
-
-DATA_DIR = "data_paper"
-LOGS_DIR = "logs_paper"
 
 USE_LIVE_TRADING = True
 ENV_NAME = "paper"
