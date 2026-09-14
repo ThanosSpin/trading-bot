@@ -5,25 +5,50 @@ import pytz
 import json, os
 from datetime import datetime as _dt, timezone, timedelta
 from config import (
-    ENV_NAME, BOT_ENV,
-    BUY_THRESHOLD, SELL_THRESHOLD, STOP_LOSS, RISK_FRACTION,
-    SPY_SYMBOL, PRICE_WEAK_THRESHOLD, WEAK_PROB_THRESHOLD, WEAK_RATIO_THRESHOLD, TRAIL_ACTIVATE,
-    SPY_ENTRY_THRESHOLD, SPY_EXIT_THRESHOLD, SPY_MUTUAL_EXCLUSIVE, SPY_RISK_FRACTION, TRAIL_STOP,
-    MARGIN_TIERING_ENABLED, MARGIN_EMERGENCY_STOP, RS_MARGIN, MAX_POSITION_SIZE_PCT,
-    MAX_POSITION_SIZE_DOLLARS, DIP_BUY_ENABLED, DIP_BUY_THRESHOLD, DIP_BUY_MIN_PROB,
-    PYRAMID_THRESHOLD, MAX_LOSS_PER_TRADE, AAPL_BUY_THRESHOLD,
-    REBUY_THRESHOLD, REBUY_COOLDOWN_MINUTES, ALLOW_SAME_DAY_REBUY,
-    USE_ARTIFACT_THRESHOLDS, ARTIFACT_THRESHOLD_FALLBACK,
-    MODEL_ENTRY_BUFFER, MODEL_EXIT_BUFFER, MODEL_REBUY_BUFFER, MODEL_PYRAMID_BUFFER,
-    SPY_USE_ARTIFACT_THRESHOLDS, SPY_MODEL_ENTRY_BUFFER, SPY_MODEL_EXIT_BUFFER,
-    PROFIT_TRIGGER_PCT
+    ENV_NAME,
+    BOT_ENV,
+    BUY_THRESHOLD,
+    SELL_THRESHOLD,
+    STOP_LOSS,
+    RISK_FRACTION,
+    SPY_SYMBOL,
+    PRICE_WEAK_THRESHOLD,
+    WEAK_PROB_THRESHOLD,
+    WEAK_RATIO_THRESHOLD,
+    TRAIL_ACTIVATE,
+    SPY_ENTRY_THRESHOLD,
+    SPY_EXIT_THRESHOLD,
+    SPY_MUTUAL_EXCLUSIVE,
+    SPY_RISK_FRACTION,
+    TRAIL_STOP,
+    MARGIN_TIERING_ENABLED,
+    MARGIN_EMERGENCY_STOP,
+    RS_MARGIN,
+    MAX_POSITION_SIZE_PCT,
+    MAX_POSITION_SIZE_DOLLARS,
+    DIP_BUY_ENABLED,
+    DIP_BUY_THRESHOLD,
+    DIP_BUY_MIN_PROB,
+    PYRAMID_THRESHOLD,
+    MAX_LOSS_PER_TRADE,
+    AAPL_BUY_THRESHOLD,
+    REBUY_THRESHOLD,
+    REBUY_COOLDOWN_MINUTES,
+    ALLOW_SAME_DAY_REBUY,
+    USE_ARTIFACT_THRESHOLDS,
+    ARTIFACT_THRESHOLD_FALLBACK,
+    MODEL_ENTRY_BUFFER,
+    MODEL_EXIT_BUFFER,
+    MODEL_REBUY_BUFFER,
+    MODEL_PYRAMID_BUFFER,
+    SPY_USE_ARTIFACT_THRESHOLDS,
+    SPY_MODEL_ENTRY_BUFFER,
+    SPY_MODEL_EXIT_BUFFER,
+    PROFIT_TRIGGER_PCT,
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
-from trader import get_margin_status
-from pdt.pdt_tracker import get_opened_today_qty
 from account_cache import account_cache
-
 
 NY_TZ = pytz.timezone("America/New_York")
 # ---------------------------------------------------------
@@ -31,26 +56,25 @@ NY_TZ = pytz.timezone("America/New_York")
 # main.py calls reset_session_state() at bot startup each day.
 # ---------------------------------------------------------
 _session_state: dict = {
-    "buys": set(),       # symbols bought at least once today
-    "sells": set(),      # symbols sold at least once today
+    "buys": set(),  # symbols bought at least once today
+    "sells": set(),  # symbols sold at least once today
     "flattened": set(),  # symbols force-flattened near close today
-    "buy_times": {},     # sym -> datetime of last buy (UTC)
+    "buy_times": {},  # sym -> datetime of last buy (UTC)
     "sell_times": {},
-    "soft_stops": {},    # NEW: sym -> ISO timestamp of last soft stop today
+    "soft_stops": {},  # NEW: sym -> ISO timestamp of last soft stop today
     "processed_sell_order_ids": set(),
 }
 
 SESSION_ENV = str(BOT_ENV).strip().lower()
 
 if SESSION_ENV not in {"live", "live2", "paper"}:
-    raise RuntimeError(
-        f"Invalid BOT_ENV for session state: {BOT_ENV!r}"
-    )
+    raise RuntimeError(f"Invalid BOT_ENV for session state: {BOT_ENV!r}")
 
 SESSION_STATE_PATH = os.path.join(
     os.path.dirname(__file__),
     f"session_state_{SESSION_ENV}.json",
 )
+
 
 def reset_session_state():
     """Call once at bot startup each trading day."""
@@ -90,14 +114,19 @@ def load_session_state():
     except Exception as e:
         print(f"[WARN] Failed to load session_state: {e}")
 
+
 def save_session_state():
     try:
         data = {
             "buys": list(_session_state["buys"]),
             "sells": list(_session_state["sells"]),
             "flattened": list(_session_state["flattened"]),
-            "buy_times": {k: v.isoformat() for k, v in _session_state["buy_times"].items()},
-            "sell_times": {k: v.isoformat() for k, v in _session_state["sell_times"].items()},
+            "buy_times": {
+                k: v.isoformat() for k, v in _session_state["buy_times"].items()
+            },
+            "sell_times": {
+                k: v.isoformat() for k, v in _session_state["sell_times"].items()
+            },
             "soft_stops": _session_state["soft_stops"],
             "processed_sell_order_ids": list(
                 _session_state["processed_sell_order_ids"]
@@ -108,6 +137,7 @@ def save_session_state():
         print(f"[SESSION] Saved state to {SESSION_STATE_PATH}")
     except Exception as e:
         print(f"[WARN] Failed to save session_state: {e}")
+
 
 def record_broker_sell_fills(fills):
     for fill in fills:
@@ -127,10 +157,12 @@ def record_broker_sell_fills(fills):
             f"{symbol}, qty={fill['filled_qty']}, order={order_id}"
         )
 
+
 def mark_session_buy(sym: str):
     sym = sym.upper()
     _session_state["buys"].add(sym)
     _session_state["buy_times"][sym] = _dt.now(timezone.utc)
+
 
 def mark_session_sell(sym: str, sold_at=None):
     sym = sym.upper()
@@ -169,10 +201,14 @@ def mark_session_sell(sym: str, sold_at=None):
             f"(new={sold_at} is not newer)"
         )
 
+
 def mark_session_flattened(sym: str):
     _session_state["flattened"].add(sym.upper())
 
-def _rebuy_allowed(sym: str, prob_up: float, diagnostics: Dict[str, dict] = None) -> tuple:
+
+def _rebuy_allowed(
+    sym: str, prob_up: float, diagnostics: Dict[str, dict] = None
+) -> tuple:
     """
     Returns (allowed: bool, reason: str).
     Called when shares=0 but symbol was already bought today.
@@ -199,11 +235,13 @@ def _rebuy_allowed(sym: str, prob_up: float, diagnostics: Dict[str, dict] = None
 
     if sym not in _session_state["buys"]:
         return True, ""
-    
+
     required_prob = _effective_rebuy_threshold(sym, diagnostics)
 
     if sym == "PLTR":
-        required_prob = max(required_prob, _effective_buy_threshold(sym, diagnostics) + 0.04)
+        required_prob = max(
+            required_prob, _effective_buy_threshold(sym, diagnostics) + 0.04
+        )
     else:
         required_prob = _effective_rebuy_threshold(sym, diagnostics)
 
@@ -212,14 +250,15 @@ def _rebuy_allowed(sym: str, prob_up: float, diagnostics: Dict[str, dict] = None
     if soft_ts is not None:
         # use MODEL_REBUY_BUFFER as penalty, or define a new constant if you prefer
         penalty = float(MODEL_REBUY_BUFFER)
-        required_prob = max(required_prob, _effective_buy_threshold(sym, diagnostics) + penalty)
+        required_prob = max(
+            required_prob, _effective_buy_threshold(sym, diagnostics) + penalty
+        )
 
     if prob_up < required_prob:
         return False, (
             f"{sym}: same-day rebuy blocked - prob={prob_up:.3f} < "
             f"required_rebuy_threshold={required_prob:.3f}."
         )
-
 
     last_sell_time = _session_state["sell_times"].get(sym)
     if last_sell_time is not None:
@@ -233,9 +272,9 @@ def _rebuy_allowed(sym: str, prob_up: float, diagnostics: Dict[str, dict] = None
             )
 
     return True, (
-    f"{sym}: same-day rebuy ALLOWED - "
-    f"prob={prob_up:.3f} >= required_rebuy_threshold={required_prob:.3f}."
-)
+        f"{sym}: same-day rebuy ALLOWED - "
+        f"prob={prob_up:.3f} >= required_rebuy_threshold={required_prob:.3f}."
+    )
 
 
 # ---------------------------------------------------------
@@ -247,7 +286,10 @@ def detect_afterhours_dip(sym: str, threshold: float = 0.015) -> bool:
     Compares current pre-market price vs yesterday's close.
     """
     try:
-        from predictive_model.data_loader import fetch_historical_data, fetch_latest_price
+        from predictive_model.data_loader import (
+            fetch_historical_data,
+            fetch_latest_price,
+        )
 
         # Get yesterday's close
         df = fetch_historical_data(sym, period="5d", interval="1d")
@@ -263,7 +305,9 @@ def detect_afterhours_dip(sym: str, threshold: float = 0.015) -> bool:
 
         drop_pct = (current - last_close) / last_close
 
-        print(f"[DIP] {sym} close={last_close:.2f} current={current:.2f} drop={drop_pct:.2%}")
+        print(
+            f"[DIP] {sym} close={last_close:.2f} current={current:.2f} drop={drop_pct:.2%}"
+        )
 
         return drop_pct <= -threshold  # True if dropped >= 1.5%
 
@@ -305,12 +349,13 @@ def apply_position_limits(qty: int, price: float, cash: float, symbol: str) -> i
 
     # Return lesser of proposed and max allowed
     if qty > max_allowed:
-        print(f"[RISK] {symbol}: Position size limited {qty} - > {max_allowed} "
-              f"(${proposed_value:.2f} - > ${max_allowed * price:.2f})")
+        print(
+            f"[RISK] {symbol}: Position size limited {qty} - > {max_allowed} "
+            f"(${proposed_value:.2f} - > ${max_allowed * price:.2f})"
+        )
         return max_allowed
 
     return qty
-
 
 
 # ---------------------------------------------------------
@@ -322,7 +367,10 @@ def _safe_float(x, default=None):
     except Exception:
         return default
 
-def _artifact_threshold_from_diag(sym: str, diagnostics: Dict[str, dict] = None) -> float:
+
+def _artifact_threshold_from_diag(
+    sym: str, diagnostics: Dict[str, dict] = None
+) -> float:
     d = (diagnostics or {}).get(sym.upper(), {}) or {}
     thr = _safe_float(d.get("decision_threshold"), None)
 
@@ -367,6 +415,7 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
     # Outside last hour: use normal threshold
     return thr
 
+
 def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
     if USE_ARTIFACT_THRESHOLDS:
@@ -374,21 +423,27 @@ def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> 
         return max(0.05, base - float(MODEL_EXIT_BUFFER))
     return float(SELL_THRESHOLD)
 
+
 def _effective_rebuy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     base_buy = _effective_buy_threshold(sym, diagnostics)
     legacy = float(REBUY_THRESHOLD)
     return max(legacy, min(0.98, base_buy + float(MODEL_REBUY_BUFFER)))
 
-def _effective_pyramid_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
+
+def _effective_pyramid_threshold(
+    sym: str, diagnostics: Dict[str, dict] = None
+) -> float:
     base_buy = _effective_buy_threshold(sym, diagnostics)
     legacy = float(PYRAMID_THRESHOLD)
     return max(legacy, min(0.99, base_buy + float(MODEL_PYRAMID_BUFFER)))
+
 
 def _effective_spy_entry_threshold(diagnostics: Dict[str, dict] = None) -> float:
     if not SPY_USE_ARTIFACT_THRESHOLDS:
         return float(SPY_ENTRY_THRESHOLD)
     base = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
     return min(0.98, base + float(SPY_MODEL_ENTRY_BUFFER))
+
 
 def _effective_spy_exit_threshold(diagnostics: Dict[str, dict] = None) -> float:
     if not SPY_USE_ARTIFACT_THRESHOLDS:
@@ -403,10 +458,17 @@ def make_decision(action: str, qty: int, explain: str, **meta):
     return d
 
 
-def _core_buy_intent(preds: Dict[str, float], core_symbols: List[str], diagnostics: Dict[str, dict] = None) -> List[str]:
+def _core_buy_intent(
+    preds: Dict[str, float],
+    core_symbols: List[str],
+    diagnostics: Dict[str, dict] = None,
+) -> List[str]:
     """Symbols that WANT to buy based on prob only (ignores cash/qty)."""
-    return [s for s in core_symbols if preds.get(s, 0.0) >= _effective_buy_threshold(s, diagnostics)]
-
+    return [
+        s
+        for s in core_symbols
+        if preds.get(s, 0.0) >= _effective_buy_threshold(s, diagnostics)
+    ]
 
 
 def _any_core_buy(decisions: Dict[str, dict], core_symbols: List[str]) -> bool:
@@ -414,7 +476,9 @@ def _any_core_buy(decisions: Dict[str, dict], core_symbols: List[str]) -> bool:
     return any((decisions.get(s) or {}).get("action") == "buy" for s in core_symbols)
 
 
-def _force_spy_exit_if_core_buy(decisions: Dict[str, dict], spy_sym: str, explain_suffix: str = ""):
+def _force_spy_exit_if_core_buy(
+    decisions: Dict[str, dict], spy_sym: str, explain_suffix: str = ""
+):
     """If core has a BUY, sell SPY if held; otherwise hold SPY."""
     spy_pm = PortfolioManager(spy_sym)
     try:
@@ -423,18 +487,17 @@ def _force_spy_exit_if_core_buy(decisions: Dict[str, dict], spy_sym: str, explai
         pass
     spy_shares = float(spy_pm.data.get("shares", 0.0))
 
-
     if spy_shares > 0:
         decisions[spy_sym] = make_decision(
             "sell",
             int(spy_shares),
-            f"{spy_sym}: SELL (rotate into core) - core BUY opportunity detected. {explain_suffix}".strip()
+            f"{spy_sym}: SELL (rotate into core) - core BUY opportunity detected. {explain_suffix}".strip(),
         )
     else:
         decisions[spy_sym] = make_decision(
             "hold",
             0,
-            f"{spy_sym}: HOLD - no position, core BUY opportunity detected. {explain_suffix}".strip()
+            f"{spy_sym}: HOLD - no position, core BUY opportunity detected. {explain_suffix}".strip(),
         )
 
 
@@ -502,6 +565,7 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02):
 
     return decisions
 
+
 # ---------------------------------------------------------
 # Helper for daily profit
 # ---------------------------------------------------------
@@ -567,6 +631,7 @@ def apply_daily_profit_guard(decisions, diagnostics=None):
 
     return decisions
 
+
 # ---------------------------------------------------------
 # Helper for weak market
 # ---------------------------------------------------------
@@ -606,11 +671,15 @@ def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
             last_price = float(fetch_latest_price(sym) or 0.0)
 
             if prev_close <= 0 or last_price <= 0:
-                print(f"[WEAK-MARKET PRICE] {sym}: invalid prices (prev_close={prev_close}, last={last_price}), skipping.")
+                print(
+                    f"[WEAK-MARKET PRICE] {sym}: invalid prices (prev_close={prev_close}, last={last_price}), skipping."
+                )
                 continue
 
             ret = (last_price - prev_close) / prev_close
-            print(f"[WEAK-MARKET PRICE] {sym}: prev_close={prev_close:.2f}, last={last_price:.2f}, ret={ret:.2%}")
+            print(
+                f"[WEAK-MARKET PRICE] {sym}: prev_close={prev_close:.2f}, last={last_price:.2f}, ret={ret:.2%}"
+            )
 
             if ret <= PRICE_WEAK_THRESHOLD:
                 weak_price.append(sym)
@@ -620,7 +689,9 @@ def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
 
     price_ratio = len(weak_price) / max(len(universe), 1)
 
-    is_weak = (prob_ratio >= WEAK_RATIO_THRESHOLD) or (price_ratio >= WEAK_RATIO_THRESHOLD)
+    is_weak = (prob_ratio >= WEAK_RATIO_THRESHOLD) or (
+        price_ratio >= WEAK_RATIO_THRESHOLD
+    )
 
     print(
         f"[WEAK-MARKET DEBUG] universe={universe} "
@@ -632,6 +703,7 @@ def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
 
     return is_weak
 
+
 def _any_stock_trade(decisions: Dict[str, dict], symbols: List[str]) -> bool:
     """True if any non-SPY symbol has buy/sell decision."""
     for s in symbols:
@@ -641,7 +713,6 @@ def _any_stock_trade(decisions: Dict[str, dict], symbols: List[str]) -> bool:
         if a in ("buy", "sell"):
             return True
     return False
-
 
 
 # ---------------------------------------------------------
@@ -661,7 +732,6 @@ def check_stop_tp(
     """
     symbol = str(symbol).upper().strip()
 
-
     symbol = symbol.upper()
     shares = float(pm.data.get("shares", 0.0))
     entry_price = float(pm.data.get("avg_price", 0.0))
@@ -674,7 +744,9 @@ def check_stop_tp(
         unrealized_pct = (price - entry_price) / entry_price
         if unrealized_pct <= -0.015 and prob_up > effective_buy_threshold:
             # record that we bailed via soft stop today
-            _session_state.setdefault("soft_stops", {})[symbol] = _dt.now(timezone.utc).isoformat()
+            _session_state.setdefault("soft_stops", {})[symbol] = _dt.now(
+                timezone.utc
+            ).isoformat()
 
             return make_decision(
                 "sell",
@@ -684,50 +756,6 @@ def check_stop_tp(
                     f"(prob_up={prob_up:.3f} > BUY={effective_buy_threshold:.3f})."
                 ),
             )
-
-    # ---------------------------------------------------------
-    # margin context (only used to limit selling opened-today shares)
-    # ---------------------------------------------------------
-    margin = None
-    eq = 0.0
-    dt = 0
-
-
-    opened_today = 0.0
-    sellable_overnight = shares  # default = all shares sellable
-
-
-    if MARGIN_TIERING_ENABLED:
-        try:
-            margin = get_margin_status()  # zero-arg version from trader.py
-        except Exception:
-            margin = None
-
-        if margin:
-            try:
-                eq = float(margin.get("equity", 0.0) or 0.0)
-                bp = float(margin.get("buying_power", 0.0) or 0.0)
-            except Exception:
-                eq, bp = 0.0, 0.0
-
-            # Only tier when margin is relevant and buying_power is relatively tight
-            # (example: buying_power less than equity, meaning you're somewhat leveraged)
-            if eq > 0 and bp < eq:
-                try:
-                    opened_today = float(get_opened_today_qty(symbol) or 0.0)
-                except Exception:
-                    opened_today = 0.0
-
-                # Clamp to current shares
-                opened_today = max(0.0, min(opened_today, shares))
-
-                # Shares that are "overnight-safe" (not opened today)
-                sellable_overnight = max(0.0, shares - opened_today)
-
-                # Here you can use sellable_overnight in your tiering logic,
-                # e.g., prefer trimming overnight shares before intraday ones.
-                # (Rest of your strategy code would go below.)
-
 
     # Maintain max_price while holding
     mp = float(pm.data.get("max_price", entry_price) or entry_price)
@@ -739,58 +767,25 @@ def check_stop_tp(
             pass
         mp = price
 
-
     # helpers
     def _loss_pct() -> float:
         # positive number when losing, e.g. 0.03 == -3%
         return max(0.0, 1.0 - (float(price) / float(entry_price)))
 
-
     def _margin_tiered_sell(reason: str):
         """
-        margin-aware selling:
-        - If near margin limit: sell ONLY overnight shares (shares - opened_today)
-        - If everything was opened today: block unless emergency stop triggers
-        - If opened_today == 0: selling is safe (won't create a day-trade) -> sell all
+        Sell the position when a risk-management exit is triggered.
+
+        Legacy PDT/day-trade blocking has been removed.
+
+        Under Alpaca's current intraday-margin rules, same-day exits are
+        permitted. Accounts below $2,000 are restricted to 1x buying power,
+        but are not subject to the old PDT trade-count restriction.
         """
-        near_margin = bool(MARGIN_TIERING_ENABLED and margin and eq < 25000 and dt >= 3)
-
-
-        # Not near margin limit => sell everything normally
-        if not near_margin:
-            return make_decision("sell", int(shares), reason)
-
-
-        # If we have any overnight shares, sell ONLY those (avoid day trade)
-        if sellable_overnight > 0:
-            # If opened_today==0 then sellable_overnight==shares, so this sells all anyway.
-            return make_decision(
-                "sell",
-                int(sellable_overnight),
-                reason + f" | margin-tier: sold overnight={sellable_overnight:g}, blocked opened_today={opened_today:g}"
-            )
-
-
-        # At this point: sellable_overnight == 0 (everything opened today)
-        loss = _loss_pct()
-
-
-        # Emergency override => allow same-day exit (day-trade risk accepted)
-        if MARGIN_EMERGENCY_STOP is not None and loss >= float(MARGIN_EMERGENCY_STOP):
-            d = make_decision(
-                "sell",
-                int(shares),
-                reason + f" | ðŸš¨ margin EMERGENCY stop (loss={loss:.2%}) allowing same-day exit"
-            )
-            d["margin_emergency"] = True
-            return d
-
-
-        # Otherwise block
         return make_decision(
-            "hold",
-            0,
-            f"{symbol}: STOP blocked by margin tiering (opened_today={opened_today:g}, loss={loss:.2%})."
+            "sell",
+            int(shares),
+            reason,
         )
 
     # -- Fix Dollar stop cap --------------------------------------------
@@ -808,7 +803,6 @@ def check_stop_tp(
             f"{symbol}: STOP-LOSS hit {price:.2f} <= {STOP_LOSS*100:.1f}% of entry {entry_price:.2f}"
         )
 
-
     # 2) TRAILING STOP (ONLY AFTER +5% PROFIT)
     if price >= entry_price * TRAIL_ACTIVATE:
         trail_level = mp * TRAIL_STOP
@@ -825,7 +819,7 @@ def check_stop_tp(
         _ny = pytz.timezone("America/New_York")
         _now_ny = _dt.now(_ny)
         _mins_to_close = (16 * 60) - (_now_ny.hour * 60 + _now_ny.minute)
-        _is_near_close = 0 <= _mins_to_close <= 30   # last 30min: 3:30-4:00 PM ET
+        _is_near_close = 0 <= _mins_to_close <= 30  # last 30min: 3:30-4:00 PM ET
 
         if _is_near_close and price < entry_price * 0.99:
             return _margin_tiered_sell(
@@ -837,7 +831,6 @@ def check_stop_tp(
     # ---------------------------------------------------------------------
 
     return None
-
 
 
 # ---------------------------------------------------------
@@ -926,10 +919,9 @@ def should_trade(
                 return make_decision(
                     "hold",
                     0,
-                    explain
-                    + f"HOLD - averaging-down blocked "
-                      f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
-                      f"drawdown={unrealized_pct:.1%})."
+                    explain + f"HOLD - averaging-down blocked "
+                    f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
+                    f"drawdown={unrealized_pct:.1%}).",
                 )
 
         # -- Guard 2b: don't chase - block pyramid if already up >2% from entry --
@@ -940,9 +932,8 @@ def should_trade(
                 return make_decision(
                     "hold",
                     0,
-                    explain
-                    + f"HOLD - pyramid blocked, already up {run_up_pct:.1%} "
-                      f"from entry ${avg_cost:.2f} (chasing prevention)."
+                    explain + f"HOLD - pyramid blocked, already up {run_up_pct:.1%} "
+                    f"from entry ${avg_cost:.2f} (chasing prevention).",
                 )
 
         # -- Guard 2c: block pyramid if SPY is declining -------------------
@@ -959,9 +950,8 @@ def should_trade(
                     return make_decision(
                         "hold",
                         0,
-                        explain
-                        + f"HOLD - pyramid blocked, SPY declining "
-                          f"{spy_trend:.2%} over 2h."
+                        explain + f"HOLD - pyramid blocked, SPY declining "
+                        f"{spy_trend:.2%} over 2h.",
                     )
         except Exception:
             pass
@@ -973,10 +963,9 @@ def should_trade(
             return make_decision(
                 "hold",
                 0,
-                explain
-                + f"HOLD - already in position (shares={shares:g}); "
-                  f"pyramiding requires prob>={effective_pyramid_threshold:.3f} "
-                  f"(current={prob_up:.3f})."
+                explain + f"HOLD - already in position (shares={shares:g}); "
+                f"pyramiding requires prob>={effective_pyramid_threshold:.3f} "
+                f"(current={prob_up:.3f}).",
             )
 
         # Pyramiding: use full available cash, not fractional allocation
@@ -999,22 +988,19 @@ def should_trade(
                 explain + " " + cooldown_reason,
             )
 
-
         if qty > 0:
             return make_decision(
                 "buy",
                 qty,
-                explain
-                + f"PYRAMID BUY - adding to position "
-                  f"(current={shares:g}, new={qty}, prob={prob_up:.3f})."
+                explain + f"PYRAMID BUY - adding to position "
+                f"(current={shares:g}, new={qty}, prob={prob_up:.3f}).",
             )
         else:
             return make_decision(
                 "hold",
                 0,
-                explain
-                + f"HOLD - pyramiding signal but insufficient cash "
-                  f"(available=${cash:.2f})."
+                explain + f"HOLD - pyramiding signal but insufficient cash "
+                f"(available=${cash:.2f}).",
             )
 
     # ---------------------------------------------------------
@@ -1028,10 +1014,9 @@ def should_trade(
             return make_decision(
                 "hold",
                 0,
-                explain
-                + f"HOLD - final_prob>=BUY threshold but intraday momentum "
-                  f"is non-positive ({intraday_mom:.3%}); waiting for "
-                  f"price to turn up."
+                explain + f"HOLD - final_prob>=BUY threshold but intraday momentum "
+                f"is non-positive ({intraday_mom:.3%}); waiting for "
+                f"price to turn up.",
             )
 
         # Check if this is a same-day rebuy
@@ -1050,11 +1035,7 @@ def should_trade(
         if qty > 0:
             return make_decision("buy", qty, explain + f"BUY. qty={qty}")
 
-        return make_decision(
-            "hold",
-            0,
-            explain + "BUY signal but insufficient cash."
-        )
+        return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
 
     # ---------------------------------------------------------
     # Guard 3: minimum hold time before signal-based sell
@@ -1070,24 +1051,17 @@ def should_trade(
                         return make_decision(
                             "hold",
                             0,
-                            explain
-                            + f"SELL deferred - held only {held_min:.0f}min "
-                              f"(min=45min)."
+                            explain + f"SELL deferred - held only {held_min:.0f}min "
+                            f"(min=45min).",
                         )
                 except Exception:
                     pass
 
             return make_decision(
-                "sell",
-                int(shares),
-                explain + f"SELL. qty={int(shares)}"
+                "sell", int(shares), explain + f"SELL. qty={int(shares)}"
             )
 
-        return make_decision(
-            "hold",
-            0,
-            explain + "SELL signal but no position."
-        )
+        return make_decision("hold", 0, explain + "SELL signal but no position.")
 
     # ---------------------------------------------------------
     # HOLD
@@ -1104,52 +1078,52 @@ def check_momentum_breakout(sym: str, diagnostics: dict, preds: dict) -> tuple:
     Returns: (force_buy: bool, reason: str)
     """
     import pandas as pd
-    
+
     d = diagnostics.get(sym, {})
     prob = preds.get(sym, 0.0)
-    
+
     # Get momentum metrics
     mom = d.get("intraday_mom")
     vol = d.get("intraday_vol")
     price = d.get("price")
-    
+
     if not all([mom is not None, price]):
         return False, ""
-    
+
     try:
         mom = float(mom)
         vol = float(vol) if vol else 0.0
         price = float(price)
-        
+
         # Fetch 50-day MA for trend context
         df = fetch_historical_data(sym, period="3mo", interval="1d")
         if df is None or len(df) < 50:
             return False, ""
-        
+
         # âœ… FIX: Extract scalar value from Series
-        close_series = df['Close']
+        close_series = df["Close"]
         if isinstance(close_series, pd.DataFrame):
             close_series = close_series.iloc[:, 0]
-        
+
         ma50_series = close_series.rolling(50).mean()
         ma50 = float(ma50_series.iloc[-1])  # âœ… Convert to scalar
-        
+
         # Calculate how far above MA50
         above_ma = (price - ma50) / ma50
-        
+
         # BREAKOUT CONDITIONS:
         # 1. Price >3% above 50-day MA (established uptrend)
         # 2. Intraday momentum >1% (strong continuation)
         # 3. Model at least neutral (prob >= 0.45)
         # 4. High volatility confirms real move (vol > 1.5%)
-        
-        if (
-            above_ma > 0.02 and      # âœ… LOWERED: 2% above MA50 (was 3%)
-            mom > 0.008 and          # âœ… LOWERED: 0.8% hourly momentum (was 1%)
-            prob >= 0.52 and         # âœ… LOWERED: Model prob >=50% (was 45%)
-            vol > 0.012):            # âœ… LOWERED: Vol >1.2% (was 1.5%)
 
-            
+        if (
+            above_ma > 0.02  # âœ… LOWERED: 2% above MA50 (was 3%)
+            and mom > 0.008  # âœ… LOWERED: 0.8% hourly momentum (was 1%)
+            and prob >= 0.52  # âœ… LOWERED: Model prob >=50% (was 45%)
+            and vol > 0.012
+        ):  # âœ… LOWERED: Vol >1.2% (was 1.5%)
+
             return True, (
                 f"[MOMENTUM BREAKOUT] {sym}: "
                 f"+{above_ma:.1%} above MA50, "
@@ -1157,10 +1131,10 @@ def check_momentum_breakout(sym: str, diagnostics: dict, preds: dict) -> tuple:
                 f"vol={vol:.2%}, "
                 f"model_prob={prob:.1%}"
             )
-            
+
     except Exception as e:
         print(f"[WARN] Momentum breakout check failed for {sym}: {e}")
-    
+
     return False, ""
 
 
@@ -1186,15 +1160,12 @@ def compute_strategy_decisions(
 
     spy_sym = SPY_SYMBOL.upper()
 
-
     if symbols is None:
         symbols = list(predictions.keys())
-
 
     symbols = [s.upper() for s in symbols]
     preds = {k.upper(): v for k, v in predictions.items()}
     core_symbols = [s for s in symbols if s != spy_sym]
-
 
     # ---------------------------------------------------------
     # BUY GUARDRAIL HELPERS (use intraday diagnostics)
@@ -1208,7 +1179,9 @@ def compute_strategy_decisions(
     _opening_window = 0 <= _market_open_min <= 30
 
     if _opening_window:
-        print(f"[WEIGHT] First 30min of session - capping intraday weight to 0.30 for all symbols")
+        print(
+            f"[WEIGHT] First 30min of session - capping intraday weight to 0.30 for all symbols"
+        )
         for sym in list(diagnostics.keys()):
             d = diagnostics[sym]
             if isinstance(d, dict) and d.get("intraday_weight") is not None:
@@ -1221,7 +1194,6 @@ def compute_strategy_decisions(
     def _diag(sym: str) -> dict:
         return diagnostics.get(sym.upper()) or {}
 
-
     def _block_buy_on_pullback(sym: str) -> bool:
         """
         Guardrail: avoid buying while short-term momentum is negative
@@ -1229,12 +1201,10 @@ def compute_strategy_decisions(
         """
         d = _diag(sym)
 
-
         dp = d.get("daily_prob")
         ip = d.get("intraday_prob")
-        mom = d.get("intraday_mom")   # e.g. -0.0060 == -0.60% over ~2h
+        mom = d.get("intraday_mom")  # e.g. -0.0060 == -0.60% over ~2h
         q = d.get("intraday_quality_score")
-
 
         try:
             dp = None if dp is None else float(dp)
@@ -1244,16 +1214,13 @@ def compute_strategy_decisions(
         except Exception:
             return False
 
-
         # no intraday diagnostics => don't block
         if mom is None or ip is None or dp is None:
             return False
 
-
         # require reasonable intraday quality
         if q is not None and q < 0.60:
             return False
-
 
         # pullback + intraday weaker than daily
         if (mom <= -0.003) and (ip < dp):
@@ -1265,7 +1232,7 @@ def compute_strategy_decisions(
         # block if intraday vol is high AND momentum is positive (chasing a spike)
         vol = float(d.get("intraday_vol") or 0)
         mom = float(d.get("intraday_mom") or 0)
-        if mom > 0.008 and vol > 0.005:   # price spiked hard - > wait for pullback
+        if mom > 0.008 and vol > 0.005:  # price spiked hard - > wait for pullback
             return True
 
         return False
@@ -1292,14 +1259,13 @@ def compute_strategy_decisions(
 
         # Regime-specific thresholds
         if regime == "mom":
-            min_ratio = 1.20   # momentum needs volume expansion
+            min_ratio = 1.20  # momentum needs volume expansion
         elif regime == "mr":
-            min_ratio = 0.80   # mean-reversion can work in quieter conditions
+            min_ratio = 0.80  # mean-reversion can work in quieter conditions
         else:
-            min_ratio = 1.00   # default for legacy intraday
+            min_ratio = 1.00  # default for legacy intraday
 
         return vol_ratio < min_ratio
-
 
     def _block_buy_overbought(sym: str) -> bool:
         """Block buy if RSI indicates overbought conditions."""
@@ -1307,16 +1273,16 @@ def compute_strategy_decisions(
             df = fetch_historical_data(sym, period="1mo", interval="1d")
             if df is None or len(df) < 15:
                 return False
-            
+
             close = df["Close"]
             close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
-            
+
             delta = close.diff()
-            gain  = delta.clip(lower=0).rolling(14).mean()
-            loss  = (-delta.clip(upper=0)).rolling(14).mean()
-            rs    = gain / loss.replace(0, 1e-9)
-            rsi   = float((100 - 100 / (1 + rs)).iloc[-1])
-            
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss.replace(0, 1e-9)
+            rsi = float((100 - 100 / (1 + rs)).iloc[-1])
+
             if rsi > 70:
                 print(f"[RSI BLOCK] {sym} RSI={rsi:.1f} - overbought, blocking BUY")
                 return True
@@ -1324,12 +1290,12 @@ def compute_strategy_decisions(
             pass
         return False
 
-
     # ---------------------------------------------------------
     # ABBV secondary logic helpers
     # ---------------------------------------------------------
-    rs_margin = max(0.0, min(float(RS_MARGIN), 0.25))  # require ABBV to beat AAPL by 0.05 to switch (anti-churn)
-
+    rs_margin = max(
+        0.0, min(float(RS_MARGIN), 0.25)
+    )  # require ABBV to beat AAPL by 0.05 to switch (anti-churn)
 
     # âœ… MOVED: Define _is_buy() BEFORE pick_secondary_among_stocks()
     def _is_buy(sym: str) -> bool:
@@ -1343,7 +1309,9 @@ def compute_strategy_decisions(
         """
         threshold = _effective_buy_threshold(sym, diagnostics)
         if preds.get(sym, 0.0) < threshold:
-            print(f"[DEBUG _is_buy] {sym} BLOCKED: prob={preds.get(sym,0):.3f} < threshold={threshold}")
+            print(
+                f"[DEBUG _is_buy] {sym} BLOCKED: prob={preds.get(sym,0):.3f} < threshold={threshold}"
+            )
             return False
 
         if _block_buy_on_pullback(sym):
@@ -1353,9 +1321,9 @@ def compute_strategy_decisions(
         if _block_buy_on_weak_volume(sym):
             print(f"[DEBUG _is_buy] {sym} BLOCKED: weak volume guard")
             return False
-        
+
         if _block_buy_overbought(sym):
-            print(f"[DEBUG _is_buy] {sym} BLOCKED: overbought guard")        # ðŸ†•
+            print(f"[DEBUG _is_buy] {sym} BLOCKED: overbought guard")  # ðŸ†•
             return False
 
         # -- NEW: don't chase - block if intraday momentum is already extended --
@@ -1363,12 +1331,14 @@ def compute_strategy_decisions(
         mom = d.get("intraday_mom")
         try:
             mom = float(mom)
-            if mom > 0.01:   # already up >1.0% in last 2h - likely overextended
-                print(f"[BLOCK] {sym}: entry blocked - momentum overextended (mom={mom:.2%})")
+            if mom > 0.01:  # already up >1.0% in last 2h - likely overextended
+                print(
+                    f"[BLOCK] {sym}: entry blocked - momentum overextended (mom={mom:.2%})"
+                )
                 return False
         except Exception:
             pass
-        
+
         # Session rebuy guard - block same-day re-entry below REBUY_THRESHOLD
         if sym in _session_state["buys"]:
             allowed, reason = _rebuy_allowed(sym, preds.get(sym, 0.0))
@@ -1381,7 +1351,6 @@ def compute_strategy_decisions(
         print(f"[DEBUG _is_buy] {sym} PASSED all guards: prob={preds.get(sym,0):.3f}")
         return True
 
-
     # âœ… NOW pick_secondary_among_stocks() can use _is_buy()
     def pick_secondary_among_stocks() -> Optional[str]:
         """
@@ -1391,22 +1360,18 @@ def compute_strategy_decisions(
         """
         candidates = {}
 
-
         for sym in ["AAPL", "ABBV", "PLTR"]:
             if sym in core_symbols:
                 prob = preds.get(sym)
                 if prob is not None and _is_buy(sym):  # âœ… Now visible!
                     candidates[sym] = prob
 
-
         if not candidates:
             return None
-
 
         # Return highest probability
         best_sym = max(candidates.keys(), key=lambda s: candidates[s])
         best_prob = candidates[best_sym]
-
 
         # Optional: margin requirement (prevent flipping on tiny differences)
         others = {s: p for s, p in candidates.items() if s != best_sym}
@@ -1420,13 +1385,10 @@ def compute_strategy_decisions(
                     # after pms is populated
                     pass  # Will fix after pms is defined
 
-
         return best_sym
-
 
     # Default decisions
     decisions = {s: make_decision("hold", 0, f"{s}: default HOLD") for s in symbols}
-
 
     # ---------------------------------------------------------
     # Fetch live state + prices (for stop/tp + funding calcs)
@@ -1436,7 +1398,6 @@ def compute_strategy_decisions(
     account_cache.invalidate()  # Fresh data for this strategy cycle
     account_state = account_cache.get_account()
 
-
     pms = {}
     prices = {}
     for sym in symbols:
@@ -1445,7 +1406,6 @@ def compute_strategy_decisions(
             pm.refresh_live()
         except:
             pass
-
 
         pms[sym] = pm
         d = diagnostics.get(sym.upper()) or {}
@@ -1472,7 +1432,9 @@ def compute_strategy_decisions(
             group_median_vr = None
 
     if group_median_vr is not None:
-        print(f"[VR] group_median_vr={group_median_vr:.3f} from {len(vr_values)} symbols")
+        print(
+            f"[VR] group_median_vr={group_median_vr:.3f} from {len(vr_values)} symbols"
+        )
 
     # Ensure SPY state exists even if not in symbols (safe)
     if spy_sym not in pms:
@@ -1484,7 +1446,6 @@ def compute_strategy_decisions(
         pms[spy_sym] = pm
         prices[spy_sym] = fetch_latest_price(spy_sym) or 0.0
 
-
     # âœ… NOW fix pick_secondary_among_stocks() to use pms
     # We need to redefine it here after pms is available
     def pick_secondary_among_stocks_fixed() -> Optional[str]:
@@ -1495,22 +1456,18 @@ def compute_strategy_decisions(
         """
         candidates = {}
 
-
         for sym in ["AAPL", "ABBV", "PLTR"]:
             if sym in core_symbols:
                 prob = preds.get(sym)
                 if prob is not None and _is_buy(sym):
                     candidates[sym] = prob
 
-
         if not candidates:
             return None
-
 
         # Return highest probability
         best_sym = max(candidates.keys(), key=lambda s: candidates[s])
         best_prob = candidates[best_sym]
-
 
         # Optional: margin requirement (prevent flipping on tiny differences)
         others = {s: p for s, p in candidates.items() if s != best_sym}
@@ -1521,20 +1478,16 @@ def compute_strategy_decisions(
                     if float(pms[sym].data.get("shares", 0)) > 0:
                         return sym  # keep what we hold
 
-
         return best_sym
 
     # Use the fixed version
     pick_secondary_among_stocks = pick_secondary_among_stocks_fixed
 
-
     def spy_shares() -> float:
         return float(pms[spy_sym].data.get("shares", 0.0))
 
-
     def spy_price() -> float:
         return float(prices.get(spy_sym, 0.0) or 0.0)
-
 
     # ---------------------------------------------------------
     # 1) STOP-LOSS / TAKE-PROFIT always first (including SPY)
@@ -1547,15 +1500,15 @@ def compute_strategy_decisions(
             if d:
                 sl_tp_decisions[sym] = d
 
-
     if sl_tp_decisions:
         for sym in symbols:
             if sym in sl_tp_decisions:
                 decisions[sym] = sl_tp_decisions[sym]
             else:
-                decisions[sym] = make_decision("hold", 0, f"{sym}: HOLD during SL/TP event.")
+                decisions[sym] = make_decision(
+                    "hold", 0, f"{sym}: HOLD during SL/TP event."
+                )
         return decisions
-
 
     # ---------------------------------------------------------
     # 2) SPY candidate (ONLY for entering SPY on weak market)
@@ -1563,14 +1516,12 @@ def compute_strategy_decisions(
     spy_candidate = None
     spy_prob = preds.get(spy_sym)
 
-
     if spy_prob is not None:
         market_is_weak = _weak_market(symbols, preds)  # your helper excludes SPY
         if market_is_weak:
             sh = spy_shares()
             cash = float(pms[spy_sym].data.get("cash", 0.0))
             px = spy_price()
-
 
             if px > 0:
                 spy_entry_threshold = _effective_spy_entry_threshold(diagnostics)
@@ -1580,20 +1531,20 @@ def compute_strategy_decisions(
                     spy_candidate = make_decision(
                         "buy",
                         max(qty, 0),
-                        f"{spy_sym}: SPY fallback BUY - market weak and spy_prob={spy_prob:.3f} >= {spy_entry_threshold}"
+                        f"{spy_sym}: SPY fallback BUY - market weak and spy_prob={spy_prob:.3f} >= {spy_entry_threshold}",
                     )
                 elif spy_prob <= spy_exit_threshold and sh > 0:
                     spy_candidate = make_decision(
                         "sell",
                         int(sh),
-                        f"{spy_sym}: SPY fallback SELL - spy_prob={spy_prob:.3f} <= {spy_exit_threshold}"
+                        f"{spy_sym}: SPY fallback SELL - spy_prob={spy_prob:.3f} <= {spy_exit_threshold}",
                     )
                 else:
                     spy_candidate = make_decision(
-                        "hold", 0,
-                        f"{spy_sym}: SPY fallback HOLD - spy_prob={spy_prob:.3f}"
+                        "hold",
+                        0,
+                        f"{spy_sym}: SPY fallback HOLD - spy_prob={spy_prob:.3f}",
                     )
-
 
     # ---------------------------------------------------------
     # 3) GLOBAL SELL (core only)
@@ -1603,34 +1554,41 @@ def compute_strategy_decisions(
         for sym in symbols:
             sh = float(pms[sym].data.get("shares", 0.0))
             if sh > 0:
-                decisions[sym] = make_decision("sell", int(sh), f"{sym}: Global SELL - liquidating.")
+                decisions[sym] = make_decision(
+                    "sell", int(sh), f"{sym}: Global SELL - liquidating."
+                )
             else:
-                decisions[sym] = make_decision("hold", 0, f"{sym}: Global SELL - no position.")
+                decisions[sym] = make_decision(
+                    "hold", 0, f"{sym}: Global SELL - no position."
+                )
         return decisions
-
 
     # ---------------------------------------------------------
     # 4) Core strategy with NVDA priority (core only)
     # ---------------------------------------------------------
     if "NVDA" not in core_symbols:
-        concurrent_buys = sum(1 for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD)
+        concurrent_buys = sum(
+            1 for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD
+        )
         for sym in core_symbols:
             decisions[sym] = should_trade(
-                sym, preds.get(sym, 0.0),
+                sym,
+                preds.get(sym, 0.0),
                 total_symbols=len(core_symbols),
-                concurrent_buys=concurrent_buys
+                concurrent_buys=concurrent_buys,
             )
     else:
-        def live_shares(sym): return float(pms[sym].data.get("shares", 0.0))
 
+        def live_shares(sym):
+            return float(pms[sym].data.get("shares", 0.0))
 
-        concurrent_buys = sum(1 for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD)
-
+        concurrent_buys = sum(
+            1 for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD
+        )
 
         nvda_prob = preds.get("NVDA", 0.0)
         nvda_base = should_trade("NVDA", nvda_prob, len(core_symbols), concurrent_buys)
         nvda_action = nvda_base["action"]
-
 
         # ---- NVDA BUY priority: sell other core positions (funding) + plan big buy
         if nvda_action == "buy":
@@ -1639,79 +1597,67 @@ def compute_strategy_decisions(
             if nvda_px <= 0:
                 return decisions
 
-
             # ---------------------------------------------------------
             # NVDA ROTATION RULE:
             # If NVDA is BUY and AAPL is NOT BUY (hold/sell), then sell AAPL (if held)
             # to fund NVDA.
             # ---------------------------------------------------------
             aapl_prob = preds.get("AAPL", 0.0)
-            aapl_sig = should_trade("AAPL", aapl_prob, len(core_symbols), concurrent_buys)
+            aapl_sig = should_trade(
+                "AAPL", aapl_prob, len(core_symbols), concurrent_buys
+            )
             aapl_action = (aapl_sig.get("action") or "hold").lower()
 
-
             # fund with other core positions (excluding NVDA)
+            # Fund NVDA with other core positions
             for sym in core_symbols:
                 if sym == "NVDA":
                     continue
 
                 sh = live_shares(sym)
                 px = float(prices.get(sym, 0.0) or 0.0)
+
                 if sh <= 0 or px <= 0:
                     continue
 
-                # âœ… margin CHECK: Don't sell if opened today
-                try:
-                    opened_today_qty = float(get_opened_today_qty(sym) or 0.0)
-                    if opened_today_qty >= sh:  # Entire position opened today
-                        print(f"[margin BLOCK] Cannot sell {sym} to fund NVDA - entire position opened today ({sh} shares)")
-                        continue  # Skip this symbol, don't create SELL decision
-                except Exception as e:
-                    print(f"[WARN] margin check failed for {sym}: {e}")
-                    # Fail safe - don't sell if we can't verify
+                # AAPL special rule:
+                # keep AAPL if it independently has a BUY signal.
+                if sym == "AAPL" and aapl_action == "buy":
+                    continue
 
+                # Same-day positions may be sold.
+                # Legacy PDT trade-count restrictions no longer apply.
                 sim_cash += sh * px
+
+                if sym == "AAPL":
+                    reason = (
+                        f"AAPL: Rotated out to fund NVDA BUY "
+                        f"(AAPL={aapl_action.upper()}, NVDA=BUY)."
+                    )
+                else:
+                    reason = f"{sym}: Sold to fund NVDA priority BUY."
+
                 decisions[sym] = make_decision(
                     "sell",
                     int(sh),
-                    f"{sym}: Sold to fund NVDA BUY (NVDA priority)."
+                    reason,
                 )
-
-
-
-                # Only force-sell AAPL if NVDA BUY and AAPL is HOLD/SELL (not BUY)
-                if sym == "AAPL":
-                    if aapl_action != "buy":
-                        sim_cash += sh * px
-                        decisions["AAPL"] = make_decision(
-                            "sell",
-                            int(sh),
-                            f"AAPL: Rotated out to fund NVDA BUY (AAPL={aapl_action.upper()}, NVDA=BUY)."
-                        )
-                    # else: AAPL is also BUY -> keep existing behavior (don't force sell it)
-                    continue
-
-
-                # For other symbols (if you add more later), keep the old "sell to fund NVDA"
-                sim_cash += sh * px
-                decisions[sym] = make_decision("sell", int(sh), f"{sym}: Sold to fund NVDA priority buy.")
 
             max_shares = int(sim_cash // nvda_px)
 
-
             # NEW: Apply limits
             max_shares = apply_position_limits(max_shares, nvda_px, sim_cash, "NVDA")
-
 
             if max_shares >= 1:
                 decisions["NVDA"] = make_decision(
                     "buy",
                     max_shares,
-                    f"NVDA BUY priority - capital ${sim_cash:.2f}, qty={max_shares}"
+                    f"NVDA BUY priority - capital ${sim_cash:.2f}, qty={max_shares}",
                 )
             else:
-                decisions["NVDA"] = make_decision("hold", 0, "NVDA BUY priority but insufficient capital.")
-
+                decisions["NVDA"] = make_decision(
+                    "hold", 0, "NVDA BUY priority but insufficient capital."
+                )
 
             # NOTE: do NOT apply SPY here; final enforcement below will handle it.
         elif nvda_action == "sell":
@@ -1719,55 +1665,67 @@ def compute_strategy_decisions(
             if sh > 0:
                 decisions["NVDA"] = make_decision("sell", int(sh), "NVDA SELL signal.")
             else:
-                decisions["NVDA"] = make_decision("hold", 0, "NVDA SELL but no position.")
-
+                decisions["NVDA"] = make_decision(
+                    "hold", 0, "NVDA SELL but no position."
+                )
 
             # rotate into strongest other BUY
-            buyers = [s for s in core_symbols if s != "NVDA" and preds.get(s, 0.0) >= BUY_THRESHOLD]
+            buyers = [
+                s
+                for s in core_symbols
+                if s != "NVDA" and preds.get(s, 0.0) >= BUY_THRESHOLD
+            ]
             if buyers:
                 strongest = max(buyers, key=lambda x: preds.get(x, 0.0))
-                cash_now = float(pms[core_symbols[0]].data.get("cash", 0.0)) + sh * float(prices.get("NVDA", 0.0) or 0.0)
+                cash_now = float(
+                    pms[core_symbols[0]].data.get("cash", 0.0)
+                ) + sh * float(prices.get("NVDA", 0.0) or 0.0)
                 tgt_px = float(prices.get(strongest, 0.0) or 0.0)
                 qty = int(cash_now // tgt_px) if tgt_px > 0 else 0
                 if qty >= 1:
-                    decisions[strongest] = make_decision("buy", qty, f"{strongest}: Rotated from NVDA sell, qty={qty}")
+                    decisions[strongest] = make_decision(
+                        "buy", qty, f"{strongest}: Rotated from NVDA sell, qty={qty}"
+                    )
         else:
             # NVDA HOLD -> allow at most ONE secondary BUY: AAPL vs ABBV vs PLTR
             secondary = pick_secondary_among_stocks()
 
-
             for sym in core_symbols:
                 d0 = should_trade(
-                    sym, preds.get(sym, 0.0),
+                    sym,
+                    preds.get(sym, 0.0),
                     total_symbols=len(core_symbols),
-                    concurrent_buys=concurrent_buys
+                    concurrent_buys=concurrent_buys,
                 )
 
-
                 # suppress BUY for the non-selected secondary candidate
-                if d0.get("action") == "buy" and secondary is not None and sym in ("AAPL", "ABBV", "PLTR") and sym != secondary:
-                    d0 = make_decision("hold", 0, f"{sym}: BUY suppressed (secondary={secondary}).")
-
+                if (
+                    d0.get("action") == "buy"
+                    and secondary is not None
+                    and sym in ("AAPL", "ABBV", "PLTR")
+                    and sym != secondary
+                ):
+                    d0 = make_decision(
+                        "hold", 0, f"{sym}: BUY suppressed (secondary={secondary})."
+                    )
 
                 decisions[sym] = d0
 
-
             # If ABBV chosen AND AAPL is not BUY AND we hold AAPL -> sell AAPL to fund ABBV
-            if secondary == "ABBV" and "AAPL" in core_symbols and "ABBV" in core_symbols:
+            if (
+                secondary == "ABBV"
+                and "AAPL" in core_symbols
+                and "ABBV" in core_symbols
+            ):
                 aapl_action = (decisions.get("AAPL") or {}).get("action", "hold")
                 aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
 
-
                 if aapl_sh > 0 and aapl_action in ("hold", "sell"):
-                    # âœ… margin CHECK
-                    try:
-                        opened_today_qty = float(get_opened_today_qty("AAPL") or 0.0)
-                        if opened_today_qty >= aapl_sh:
-                            print(f"[margin BLOCK] Cannot sell AAPL to fund ABBV - opened today")
-                        else:
-                            decisions["AAPL"] = make_decision("sell", int(aapl_sh), "AAPL: Sold to fund ABBV BUY (rotation).")
-                    except Exception as e:
-                        print(f"[WARN] margin check failed for AAPL: {e}")
+                    decisions["AAPL"] = make_decision(
+                        "sell",
+                        int(aapl_sh),
+                        "AAPL: Sold to fund ABBV BUY (rotation).",
+                    )
 
     # ---------------------------------------------------------
     # Cross-sectional low-volume guardrail for MR BUYs
@@ -1800,7 +1758,7 @@ def compute_strategy_decisions(
                     "hold",
                     0,
                     f"{sym}: MR BUY blocked - vr={stock_vr:.3f} < 0.02 (dead tape). "
-                    f"orig_reason=({prev.get('explain','')})"
+                    f"orig_reason=({prev.get('explain','')})",
                 )
                 continue
 
@@ -1810,9 +1768,8 @@ def compute_strategy_decisions(
                     "hold",
                     0,
                     f"{sym}: MR BUY blocked - vr={stock_vr:.3f} << group_median_vr={group_median_vr:.3f}. "
-                    f"orig_reason=({prev.get('explain','')})"
+                    f"orig_reason=({prev.get('explain','')})",
                 )
-
 
     # ---------------------------------------------------------
     # 4.5) BUY CONFIRMATION GUARDRAIL
@@ -1823,26 +1780,23 @@ def compute_strategy_decisions(
         except Exception:
             return default
 
-
     for sym in core_symbols:
         d = decisions.get(sym) or {}
         if d.get("action") == "buy":
             if _block_buy_on_pullback(sym):
                 dd = _diag(sym)
                 mom = _safe_f(dd.get("intraday_mom"))
-                ip  = _safe_f(dd.get("intraday_prob"))
-                dp  = _safe_f(dd.get("daily_prob"))
-
+                ip = _safe_f(dd.get("intraday_prob"))
+                dp = _safe_f(dd.get("daily_prob"))
 
                 mom_str = "NA" if mom is None else f"{mom:.2%}"
-                ip_str  = "NA" if ip is None else f"{ip:.3f}"
-                dp_str  = "NA" if dp is None else f"{dp:.3f}"
-
+                ip_str = "NA" if ip is None else f"{ip:.3f}"
+                dp_str = "NA" if dp is None else f"{dp:.3f}"
 
                 decisions[sym] = make_decision(
                     "hold",
                     0,
-                    f"{sym}: BUY blocked by pullback guardrail (mom={mom_str}, ip={ip_str} < dp={dp_str})."
+                    f"{sym}: BUY blocked by pullback guardrail (mom={mom_str}, ip={ip_str} < dp={dp_str}).",
                 )
 
     # ---------------------------------------------------------
@@ -1852,57 +1806,63 @@ def compute_strategy_decisions(
         nvda_d = decisions.get("NVDA") or {}
         aapl_d = decisions.get("AAPL") or {}
 
-
-        nvda_wants_buy = (nvda_d.get("action") == "buy") or (preds.get("NVDA", 0.0) >= BUY_THRESHOLD)
-        aapl_is_not_buy = (aapl_d.get("action") in ("hold", "sell")) and (preds.get("AAPL", 0.0) < BUY_THRESHOLD + 0.05) 
-
+        nvda_wants_buy = (nvda_d.get("action") == "buy") or (
+            preds.get("NVDA", 0.0) >= BUY_THRESHOLD
+        )
+        aapl_is_not_buy = (aapl_d.get("action") in ("hold", "sell")) and (
+            preds.get("AAPL", 0.0) < BUY_THRESHOLD + 0.05
+        )
 
         if nvda_wants_buy and aapl_is_not_buy:
             aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
             if aapl_sh > 0:
-                # âœ… margin CHECK
-                try:
-                    opened_today_qty = float(get_opened_today_qty("AAPL") or 0.0)
-                    if opened_today_qty >= aapl_sh:
-                        print(f"[margin BLOCK] Cannot rotate AAPL to fund NVDA - opened today")
-                    else:
-                        decisions["AAPL"] = make_decision(
-                            "sell",
-                            int(aapl_sh),
-                            "AAPL: Sold to fund NVDA rotation buy."
-                        )
-                except Exception as e:
-                    print(f"[WARN] margin check failed for AAPL rotation: {e}")
-
-
+                decisions["AAPL"] = make_decision(
+                    "sell",
+                    int(aapl_sh),
+                    "AAPL: Sold to fund NVDA rotation buy.",
+                )
 
             # mark NVDA as priority buy (main.py will recalc after sells)
             decisions["NVDA"] = make_decision(
-                "buy", 1,
+                "buy",
+                1,
                 "NVDA PRIORITY BUY - recalc all-in after sells (AAPL rotation + SPY liquidation if any).",
                 recalc_all_in=True,
                 priority_rank=1,
             )
-
 
     # ---------------------------------------------------------
     # 5) FINAL ENFORCEMENT: if NVDA/AAPL/ABBV/PLTR has BUY INTENT => SELL SPY + recalc flags
     # (prob-based intent, not cash-based)
     # ---------------------------------------------------------
     wanted = []
-    if "NVDA" in core_symbols and preds.get("NVDA", 0.0) >= BUY_THRESHOLD and not _block_buy_on_pullback("NVDA"):
+    if (
+        "NVDA" in core_symbols
+        and preds.get("NVDA", 0.0) >= BUY_THRESHOLD
+        and not _block_buy_on_pullback("NVDA")
+    ):
         wanted.append("NVDA")
-    if "AAPL" in core_symbols and preds.get("AAPL", 0.0) >= BUY_THRESHOLD and not _block_buy_on_pullback("AAPL"):
+    if (
+        "AAPL" in core_symbols
+        and preds.get("AAPL", 0.0) >= BUY_THRESHOLD
+        and not _block_buy_on_pullback("AAPL")
+    ):
         wanted.append("AAPL")
-    if "ABBV" in core_symbols and preds.get("ABBV", 0.0) >= BUY_THRESHOLD and not _block_buy_on_pullback("ABBV"):
+    if (
+        "ABBV" in core_symbols
+        and preds.get("ABBV", 0.0) >= BUY_THRESHOLD
+        and not _block_buy_on_pullback("ABBV")
+    ):
         wanted.append("ABBV")
-    if "PLTR" in core_symbols and preds.get("PLTR", 0.0) >= BUY_THRESHOLD and not _block_buy_on_pullback("PLTR"):
+    if (
+        "PLTR" in core_symbols
+        and preds.get("PLTR", 0.0) >= BUY_THRESHOLD
+        and not _block_buy_on_pullback("PLTR")
+    ):
         wanted.append("PLTR")
-
 
     if wanted:
         sh_spy = float(spy_shares() or 0.0)
-
 
         # --------------------------------------------
         # Funding sanity: only do "recalc after sells"
@@ -1912,39 +1872,41 @@ def compute_strategy_decisions(
         has_other_core_positions = any(
             float(pms[s].data.get("shares", 0.0) or 0.0) > 0.0
             for s in core_symbols
-            if s not in ("NVDA", "AAPL", "ABBV", "PLTR")   # exclude targets; optional but recommended
+            if s
+            not in (
+                "NVDA",
+                "AAPL",
+                "ABBV",
+                "PLTR",
+            )  # exclude targets; optional but recommended
         )
 
-
         has_funding = (sh_spy > 0.0) or has_other_core_positions
-
 
         if not has_funding:
             # Nothing to sell -> don't emit fake "priority buy recalc" intents
             # Just keep the earlier computed decisions (including guardrail HOLDs).
             return decisions
 
-
         # If we DO have SPY, sell it to fund core
         if sh_spy > 0.0:
             decisions[spy_sym] = make_decision(
                 "sell",
                 int(sh_spy),
-                f"{spy_sym}: SELL (rotate into core) - core BUY intent: {', '.join(wanted)}."
+                f"{spy_sym}: SELL (rotate into core) - core BUY intent: {', '.join(wanted)}.",
             )
-
 
         # --------------------------------------------
         # mark priority buys for main.py to recalc AFTER sells
         # --------------------------------------------
         if "NVDA" in wanted:
             decisions["NVDA"] = make_decision(
-                "buy", 1,
+                "buy",
+                1,
                 "NVDA PRIORITY BUY - recalc all-in after sells (SPY liquidation).",
                 recalc_all_in=True,
                 priority_rank=1,
             )
-
 
             # choose best secondary among AAPL, ABBV, PLTR
             secondary = None
@@ -1955,7 +1917,9 @@ def compute_strategy_decisions(
 
             if secondary_candidates:
                 # Pick highest probability with margin
-                sorted_candidates = sorted(secondary_candidates.items(), key=lambda x: x[1], reverse=True)
+                sorted_candidates = sorted(
+                    secondary_candidates.items(), key=lambda x: x[1], reverse=True
+                )
                 if len(sorted_candidates) == 1:
                     secondary = sorted_candidates[0][0]
                 else:
@@ -1972,15 +1936,14 @@ def compute_strategy_decisions(
                         if secondary is None:
                             secondary = best[0]
 
-
             if secondary:
                 decisions[secondary] = make_decision(
-                    "buy", 1,
+                    "buy",
+                    1,
                     f"{secondary} BUY intent - secondary to NVDA (after sells).",
                     recalc_after_sells=True,
                     priority_rank=2,
                 )
-
 
         else:
             # NVDA not wanted -> pick best of AAPL/ABBV/PLTR if any
@@ -1991,7 +1954,9 @@ def compute_strategy_decisions(
                     secondary_candidates[sym] = preds.get(sym, 0.0)
 
             if secondary_candidates:
-                sorted_candidates = sorted(secondary_candidates.items(), key=lambda x: x[1], reverse=True)
+                sorted_candidates = sorted(
+                    secondary_candidates.items(), key=lambda x: x[1], reverse=True
+                )
                 if len(sorted_candidates) == 1:
                     secondary = sorted_candidates[0][0]
                 else:
@@ -2007,74 +1972,72 @@ def compute_strategy_decisions(
                         if secondary is None:
                             secondary = best[0]
 
-
             if secondary:
                 decisions[secondary] = make_decision(
-                    "buy", 1,
+                    "buy",
+                    1,
                     f"{secondary} PRIORITY BUY - recalc all-in after sells (SPY liquidation).",
                     recalc_all_in=True,
                     priority_rank=1,
                 )
 
-
         # When core wants to buy, we do NOT allow SPY buy this cycle
         return decisions
-
 
     # ---------------------------------------------------------
     # 6) If no core buy intent, allow SPY candidate (entry/exit) with mutual exclusive rules
     # ---------------------------------------------------------
     if spy_candidate is not None:
-        if (not SPY_MUTUAL_EXCLUSIVE) or (not _any_stock_trade(decisions, core_symbols)):
+        if (not SPY_MUTUAL_EXCLUSIVE) or (
+            not _any_stock_trade(decisions, core_symbols)
+        ):
             decisions[spy_sym] = spy_candidate
         else:
-            decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: Mutual-exclusive - > skipping SPY this cycle.")
+            decisions[spy_sym] = make_decision(
+                "hold", 0, f"{spy_sym}: Mutual-exclusive - > skipping SPY this cycle."
+            )
 
-    
-    
     # ============================================================
     # MOMENTUM BREAKOUT OVERRIDE (before dip-buy)
     # ============================================================
     for sym in core_symbols:
         force_buy, reason = check_momentum_breakout(sym, diagnostics, preds)
-        
+
         if force_buy:
             # Check if we can afford it
             pm = pms[sym]
             shares = float(pm.data.get("shares", 0.0))
-            
+
             if shares > 0:
                 # Already holding - keep it
                 print(reason + " - > HOLDING existing position")
                 continue
-            
+
             # Session rebuy guard
             if sym.upper() in _session_state["buys"]:
                 allowed, rb_reason = _rebuy_allowed(sym, preds.get(sym, 0.0))
                 if not allowed:
-                    print(f"[MOMENTUM BREAKOUT] {sym} blocked by session lock: {rb_reason}")
+                    print(
+                        f"[MOMENTUM BREAKOUT] {sym} blocked by session lock: {rb_reason}"
+                    )
                     continue
-            
+
             cash = float(account_state.get("cash", 0.0))
             price = float(prices.get(sym, 0.0))
-            
+
             if price <= 0:
                 continue
-            
+
             # Allocate 80% of cash for breakout (aggressive)
             buy_qty = int((cash * 0.80) // price)
             buy_qty = apply_position_limits(buy_qty, price, cash, sym)
-            
+
             if buy_qty > 0:
                 decisions[sym] = make_decision(
-                    "buy",
-                    buy_qty,
-                    reason,
-                    momentum_override=True,
-                    priority_rank=1
+                    "buy", buy_qty, reason, momentum_override=True, priority_rank=1
                 )
                 print(f"âœ… {reason} - > BUY {buy_qty} shares")
-    
+
     # ============================================================
     # EXTREME MOMENTUM OVERRIDE (>1.5% hourly move)
     # ============================================================
@@ -2084,7 +2047,7 @@ def compute_strategy_decisions(
         prob = preds.get(sym, 0.0)
         pm = pms[sym]
         shares = float(pm.data.get("shares", 0.0))
-        
+
         if mom is not None and float(mom) > 0.015:  # >1.5% hourly momentum
             # If not holding and model is negative, override to neutral/buy
             if shares <= 0 and prob < 0.50:
@@ -2092,16 +2055,20 @@ def compute_strategy_decisions(
                 if sym.upper() in _session_state["buys"]:
                     allowed, rb_reason = _rebuy_allowed(sym, preds.get(sym, 0.0))
                     if not allowed:
-                        print(f"[EXTREME MOMENTUM] {sym} blocked by session lock: {rb_reason}")
+                        print(
+                            f"[EXTREME MOMENTUM] {sym} blocked by session lock: {rb_reason}"
+                        )
                         continue
-                    print(f"âš¡ [EXTREME MOMENTUM] {sym} mom={float(mom):.2%} overriding prob {prob:.2%} - > treating as neutral")
+                    print(
+                        f"âš¡ [EXTREME MOMENTUM] {sym} mom={float(mom):.2%} overriding prob {prob:.2%} - > treating as neutral"
+                    )
                 # Don't force sell on extreme upward momentum
                 if decisions.get(sym, {}).get("action") == "sell":
                     decisions[sym] = make_decision(
-                        "hold", 0,
-                        f"{sym}: SELL blocked by extreme upward momentum (mom={float(mom):.2%})"
+                        "hold",
+                        0,
+                        f"{sym}: SELL blocked by extreme upward momentum (mom={float(mom):.2%})",
                     )
-
 
     # ============================================================
     # IP-BUY OVERRIDE
@@ -2121,10 +2088,14 @@ def compute_strategy_decisions(
                 if prob >= DIP_BUY_MIN_PROB:
                     if detect_afterhours_dip(sym, threshold=DIP_BUY_THRESHOLD):
 
-                        print(f"ðŸš€ [DIP-BUY] {sym} prob={prob:.2f} + dip - > 100% capital override!")
+                        print(
+                            f"ðŸš€ [DIP-BUY] {sym} prob={prob:.2f} + dip - > 100% capital override!"
+                        )
 
                         try:
-                            price = prices.get(sym, 0.0) or fetch_latest_price(sym) or 0.0
+                            price = (
+                                prices.get(sym, 0.0) or fetch_latest_price(sym) or 0.0
+                            )
                             if price > 0:
                                 pm = pms.get(sym)
                                 if pm:
@@ -2134,11 +2105,12 @@ def compute_strategy_decisions(
                                     if new_qty > decision.get("qty", 0):
                                         old_qty = decision.get("qty", 0)
                                         decision["qty"] = new_qty
-                                        decision["explain"] = f"{decision.get('explain', '')} [DIP-BUY 100%]"
+                                        decision["explain"] = (
+                                            f"{decision.get('explain', '')} [DIP-BUY 100%]"
+                                        )
                                         print(f"   - > {old_qty} - > {new_qty} shares")
                         except Exception as e:
                             print(f"[ERROR] Dip-buy: {e}")
-
 
     # ---------------------------------------------------------
     # WEAK-MARKET BUY BLOCKER (core symbols only)
@@ -2157,7 +2129,7 @@ def compute_strategy_decisions(
                 decisions[sym] = make_decision(
                     "hold",
                     0,
-                    f"{sym} BUY blocked by weak-market filter. {d.get('explain','')}"
+                    f"{sym} BUY blocked by weak-market filter. {d.get('explain','')}",
                 )
         return decisions
     else:
