@@ -24,3 +24,11 @@ else:
 # Re-assert BOT_ENV because wildcard imports may contain
 # another BOT_ENV definition.
 BOT_ENV = os.getenv("BOT_ENV", "live").strip().lower()
+
+# ------------------------------------------------------------
+# Backward compatibility
+# ------------------------------------------------------------
+# Older modules such as strategy.py still import ENV_NAME.
+# Keep ENV_NAME synchronized with the single source of truth:
+# BOT_ENV=paper|live|live2
+ENV_NAME = BOT_ENV
