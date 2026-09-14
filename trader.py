@@ -352,8 +352,8 @@ def execute_trade(action, quantity, symbol, decision=None):
         allowed_qty = quantity
 
         if action == "buy":
-            if not is_buy_allowed_by_margin(client, symU, quantity):
-                return 0.0, None
+            # if not is_buy_allowed_by_margin(client, symU, quantity):
+            #     return 0.0, None
 
             price = _get_live_price(symU)
             if not price or price <= 0:
