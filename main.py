@@ -518,18 +518,32 @@ def apply_close_time_derisk(
         f"loss_limit_pct_close={loss_limit_pct_close:.2%}"
     )
 
-    # Only run this guard after close_cutoff
+    # Only run this guard after close_cutoff.
     if now_ny.time() < close_cutoff:
         print("[CLOSE-TIME DERISK] Not applied (before close_cutoff).")
         return decisions
 
-    # Margin_status no longer needs 'remaining' PDT field; keep only trading_blocked if you want
-    # margin_safe = not bool((margin_status or {}).get("trading_blocked", False))
-    blocked = bool((margin_status or {}).get("trading_blocked", False))
-    if blocked:
-        # Broker will reject new orders; you might still adjust local decisions
-        print("[MARGIN] trading_blocked=true — skipping close-time de-risk trades.")
-        return decisions
+    # ---------------------------------------------------------
+    # Broker account status
+    # ---------------------------------------------------------
+    # Keep margin_status for diagnostics only.
+    #
+    # Do NOT suppress a close-time risk exit merely because
+    # trading_blocked=True. Closing an existing long position is
+    # risk-reducing, so let the broker accept/reject the order.
+    #
+    # Legacy PDT fields such as "remaining" are intentionally
+    # not used here.
+
+    trading_blocked = bool((margin_status or {}).get("trading_blocked", False))
+
+    if trading_blocked:
+        print(
+            "[CLOSE-TIME DERISK] WARNING: "
+            "broker reports trading_blocked=true. "
+            "Risk-reducing SELL decisions will still be generated; "
+            "broker will determine whether the order is permitted."
+        )
 
     any_triggered = False
 
@@ -807,12 +821,6 @@ def execute_decisions(decisions, diagnostics=None):
         print(f"Reason: {explain}")
         _print_probabilities_with_thresholds(sym)
 
-        # 🚨 NEW: Emergency logging
-        if decision.get("margin_emergency"):
-            print(f"🚨 margin EMERGENCY SELL: {sym}")
-            print(f"   Reason: {explain}")
-            print(f"   prob_up: {decision.get('prob_up', 'N/A')}")
-
         if price is None or qty <= 0:
             print(f"[WARN] {sym} invalid sell input, skipping.")
             sell_failed.add(sym)
@@ -984,9 +992,6 @@ def process_all_symbols(symbols):
         diagnostics=diagnostics,
     )
 
-    # 🚨 EMERGENCY SELLS (highest priority)
-    margin_status = get_margin_status()
-
     # ✅ NEW: portfolio-level weak guard
     decisions = apply_portfolio_weak_guard(
         decisions,
@@ -1001,24 +1006,54 @@ def process_all_symbols(symbols):
     decisions = apply_daily_profit_guard(decisions, diagnostics)
 
     # Close-time de-risk (for gain - loss trimming)
+    try:
+        margin_status = get_margin_status() or {}
+        if not isinstance(margin_status, dict):
+            print("[WARN] Unexpected margin status; using empty status.")
+            margin_status = {}
+    except Exception as e:
+        print(f"[WARN] Could not fetch margin status for close-time de-risk: {e}")
+        margin_status = {}
+
     decisions = apply_close_time_derisk(decisions, diagnostics, margin_status)
+
+    # ============================================================
+    # Emergency signal deterioration exit
+    # ============================================================
 
     for sym in core_symbols:
         sig_prob = predictions.get(sym)
-        if sig_prob and sig_prob < MARGIN_EMERGENCY_PROB_THRESH:
-            pm = PortfolioManager(sym)
-            pm.refresh_live()
-            shares = pm.data.get("shares", 0)
 
-            if shares > 0 and margin_status.get("remaining", 0) > 0:
-                decisions[sym] = {
-                    "action": "sell",
-                    "qty": shares,
-                    "explain": f"🚨 EMERGENCY prob_up={sig_prob:.3f} < {MARGIN_EMERGENCY_PROB_THRESH}",
-                    "margin_emergency": True,
-                    "priority_rank": 0,  # Execute first
-                }
-                print(f"🚨 EMERGENCY SELL OVERRIDE: {sym} prob_up={sig_prob:.3f}")
+        if sig_prob is None:
+            continue
+
+        if sig_prob >= MARGIN_EMERGENCY_PROB_THRESH:
+            continue
+
+        pm = PortfolioManager(sym)
+        pm.refresh_live()
+
+        shares = int(float(pm.data.get("shares", 0) or 0))
+
+        if shares <= 0:
+            continue
+
+        decisions[sym] = {
+            "action": "sell",
+            "qty": shares,
+            "explain": (
+                f"🚨 EMERGENCY EXIT: "
+                f"prob_up={sig_prob:.3f} < "
+                f"{MARGIN_EMERGENCY_PROB_THRESH:.3f}"
+            ),
+            "priority_rank": 0,
+        }
+
+        print(
+            f"🚨 EMERGENCY SELL OVERRIDE: "
+            f"{sym} shares={shares} "
+            f"prob_up={sig_prob:.3f}"
+        )
 
     print("\n================== DECISIONS ==================")
     for sym, d in decisions.items():
@@ -1255,7 +1290,6 @@ def main():
     if not is_market_open():
         print("⏳ Market is closed. Exiting.")
         return
-
 
     # margin Display
     try:

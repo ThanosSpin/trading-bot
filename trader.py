@@ -6,20 +6,19 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 from broker import get_trading_api
-from pdt.pdt_guardrails import max_sell_allowed
-from pdt.pdt_tracker import add_opened_today, reduce_opened_today, get_opened_today_qty
+from pdt.pdt_tracker import add_opened_today, reduce_opened_today
 
 from config import USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS
 from market import is_market_open, is_trading_day
 from predictive_model.data_loader import fetch_latest_price
 from portfolio import PortfolioManager
 
-
-
 UTC = pytz.UTC
+
 
 def _api():
     return get_trading_api()
+
 
 # =====================================================================
 # PDT (Pattern Day Trading) Utilities
@@ -74,7 +73,9 @@ def estimate_daytrade_count(api_client, days=5):
     return est
 
 
-def is_buy_allowed_by_margin(api_client, symbol, quantity, min_equity_for_margin=2000.0):
+def is_buy_allowed_by_margin(
+    api_client, symbol, quantity, min_equity_for_margin=2000.0
+):
     """
     Margin-aware BUY guard under Alpaca's intraday margin framework.
     - Uses equity and buying_power instead of PDT/daytrade_count.
@@ -100,7 +101,9 @@ def is_buy_allowed_by_margin(api_client, symbol, quantity, min_equity_for_margin
 
     # Optional: require some minimum equity before allowing margin-driven buys
     if equity < min_equity_for_margin:
-        print(f"[MARGIN CAUTION] Equity={equity:.2f} below bot threshold {min_equity_for_margin:.2f} → suppressing margin BUY for {symU}.")
+        print(
+            f"[MARGIN CAUTION] Equity={equity:.2f} below bot threshold {min_equity_for_margin:.2f} → suppressing margin BUY for {symU}."
+        )
         # You can choose to allow small cash-only buys here instead of outright blocking.
         # For now, keep it conservative:
         return False
@@ -118,12 +121,16 @@ def is_buy_allowed_by_margin(api_client, symbol, quantity, min_equity_for_margin
     # Use live price approximation to estimate required notional
     price = _get_live_price(symU)
     if not price or price <= 0:
-        print(f"[MARGIN WARN] No live price for {symU} — cannot validate margin, skipping BUY.")
+        print(
+            f"[MARGIN WARN] No live price for {symU} — cannot validate margin, skipping BUY."
+        )
         return False
 
     required_notional = qty_f * price
     if required_notional > buying_power:
-        print(f"[MARGIN BLOCK] {symU}: required {required_notional:.2f} > buying_power {buying_power:.2f} → cannot BUY.")
+        print(
+            f"[MARGIN BLOCK] {symU}: required {required_notional:.2f} > buying_power {buying_power:.2f} → cannot BUY."
+        )
         return False
 
     return True
@@ -195,13 +202,15 @@ def get_recent_filled_sells(symbols, lookback_hours=24):
         if filled_at < since_dt:
             continue
 
-        fills.append({
-            "id": str(o.id),
-            "symbol": o.symbol,
-            "side": o.side,
-            "filled_qty": filled_qty,
-            "filled_at": filled_at.isoformat(),
-        })
+        fills.append(
+            {
+                "id": str(o.id),
+                "symbol": o.symbol,
+                "side": o.side,
+                "filled_qty": filled_qty,
+                "filled_at": filled_at.isoformat(),
+            }
+        )
 
     return fills
 
@@ -224,7 +233,9 @@ def _get_live_price(symbol):
 # =====================================================================
 # Log paper trade
 # =====================================================================
-def log_paper_trade(symbol, action, quantity, price, cash=0.0, shares_after=0.0, value=0.0):
+def log_paper_trade(
+    symbol, action, quantity, price, cash=0.0, shares_after=0.0, value=0.0
+):
     """
     Log paper trades with the same schema as trades_<symbol>.csv (pm.log()).
     Ensures analyze_trades.py works on paper_trades_<symbol>.csv directly.
@@ -232,38 +243,47 @@ def log_paper_trade(symbol, action, quantity, price, cash=0.0, shares_after=0.0,
     import csv, os
     from datetime import datetime
 
-
-    filename = f'paper_trades_{symbol}.csv'
+    filename = f"paper_trades_{symbol}.csv"
     file_exists = os.path.exists(filename)
 
     try:
-        with open(filename, 'a', newline='') as f:
+        with open(filename, "a", newline="") as f:
             writer = csv.writer(f)
 
-
             if not file_exists:
-                writer.writerow([
-                    "timestamp", "symbol", "action", "qty",
-                    "price", "cash", "shares", "value",
-                    "shares_before", "shares_after",
-                ])
+                writer.writerow(
+                    [
+                        "timestamp",
+                        "symbol",
+                        "action",
+                        "qty",
+                        "price",
+                        "cash",
+                        "shares",
+                        "value",
+                        "shares_before",
+                        "shares_after",
+                    ]
+                )
 
-
-            writer.writerow([
-                datetime.utcnow().isoformat(),
-                symbol,
-                action.upper(),
-                f"{float(quantity):g}",
-                f"{float(price):.2f}",
-                f"{float(cash):.2f}",
-                f"{float(shares_after):.8g}",
-                f"{float(value):.2f}",
-                "",
-                f"{float(shares_after):.8g}",
-            ])
+            writer.writerow(
+                [
+                    datetime.utcnow().isoformat(),
+                    symbol,
+                    action.upper(),
+                    f"{float(quantity):g}",
+                    f"{float(price):.2f}",
+                    f"{float(cash):.2f}",
+                    f"{float(shares_after):.8g}",
+                    f"{float(value):.2f}",
+                    "",
+                    f"{float(shares_after):.8g}",
+                ]
+            )
 
     except Exception as e:
         print(f"[WARN] Failed to log paper trade for {symbol}: {e}")
+
 
 # =====================================================================
 # ORDER EXECUTION
@@ -292,14 +312,14 @@ def execute_trade(action, quantity, symbol, decision=None):
     if not is_trading_day() or not is_market_open():
         print(f"⏳ Market closed → skipping {action.upper()} {symU}.")
         return 0.0, None
-    
+
     # -------------------------------------------------------
     # CHECK: Per-Symbol Paper Trading Override
     # -------------------------------------------------------
     # If this symbol is in PAPER_TRADE_SYMBOLS, force paper mode
     # even if USE_LIVE_TRADING=True
     is_paper_symbol = symU in [s.upper() for s in PAPER_TRADE_SYMBOLS]
-    
+
     # -------------------------------------------------------
     # SIMULATED/PAPER TRADING
     # -------------------------------------------------------
@@ -308,31 +328,38 @@ def execute_trade(action, quantity, symbol, decision=None):
         if price:
             mode = "[PAPER]" if is_paper_symbol else "[SIM]"
             print(f"{mode} {action.upper()} {quantity:g} {symU} @ {price}")
-            
+
             # Log paper trades separately for analysis
             if is_paper_symbol:
-                         # Load pm state to capture cash/shares/value for correct schema
+                # Load pm state to capture cash/shares/value for correct schema
                 try:
                     pm = PortfolioManager(symU)
                     pm.refresh_live()
-                    _cash   = float(pm.data.get("cash", 0.0))
+                    _cash = float(pm.data.get("cash", 0.0))
                     _shares = float(pm.data.get("shares", 0.0))
                     # Simulate post-trade shares for logging
                     if action == "buy":
                         _shares_after = _shares + quantity
-                        _cash_after   = _cash - quantity * price   # spent cash
+                        _cash_after = _cash - quantity * price  # spent cash
                     else:
                         _shares_after = max(0.0, _shares - quantity)
-                        _cash_after   = _cash + quantity * price   # received cash
+                        _cash_after = _cash + quantity * price  # received cash
                     _value = _cash_after + _shares_after * price
                 except Exception:
                     _cash, _shares_after, _value = 0.0, 0.0, 0.0
 
-                log_paper_trade(symU, action, quantity, price,
-                                cash=_cash, shares_after=_shares_after, value=_value)
-            
+                log_paper_trade(
+                    symU,
+                    action,
+                    quantity,
+                    price,
+                    cash=_cash,
+                    shares_after=_shares_after,
+                    value=_value,
+                )
+
             return quantity, float(price)
-        
+
         mode = "PAPER" if is_paper_symbol else "SIM"
         print(f"[{mode} WARN] No price for {symU}")
         return 0.0, None
@@ -362,21 +389,61 @@ def execute_trade(action, quantity, symbol, decision=None):
 
             bp = float(getattr(acct, "buying_power", 0) or 0)
             if price * quantity > bp:
-                print(f"[WARN] Buying power insufficient for {symU}: need {price * quantity:.2f}, have {bp:.2f}")
+                print(
+                    f"[WARN] Buying power insufficient for {symU}: need {price * quantity:.2f}, have {bp:.2f}"
+                )
                 return 0.0, None
 
         elif action == "sell":
-            emergency = bool((decision or {}).get("pdt_emergency", False))
-            margin_status = get_margin_status()
+            # ---------------------------------------------------------
+            # SELL validation
+            # ---------------------------------------------------------
+            # Legacy PDT restrictions removed.
+            #
+            # Same-day exits are allowed. The only execution-level
+            # protection here is that we never sell more shares than
+            # the broker says we currently own, preventing an accidental
+            # transition from long -> short.
+            # ---------------------------------------------------------
+
+            requested_qty = max(0, int(quantity))
+
+            if requested_qty <= 0:
+                print(f"[INFO] SELL skipped → {symU}: " f"invalid quantity={quantity}")
+                return 0.0, None
 
             try:
-                allowed_qty = max_sell_allowed(client, symU, quantity, margin_status, emergency=emergency)
-            except TypeError:
-                allowed_qty = max_sell_allowed(client, symU, quantity, margin_status)
+                position = client.get_position(symU)
+
+                current_long_qty = max(0, int(float(position.qty)))
+
+            except Exception as e:
+                print(
+                    f"[WARN] SELL skipped → {symU}: "
+                    f"could not verify broker position: {e}"
+                )
+                return 0.0, None
+
+            allowed_qty = min(
+                requested_qty,
+                current_long_qty,
+            )
 
             if allowed_qty <= 0:
-                print(f"[INFO] SELL suppressed by PDT guardrail → {symU}")
+                print(
+                    f"[INFO] SELL skipped → {symU}: "
+                    f"requested={requested_qty}, "
+                    f"current_long_position={current_long_qty}"
+                )
                 return 0.0, None
+
+            if allowed_qty < requested_qty:
+                print(
+                    f"[SELL CLAMP] {symU}: "
+                    f"requested={requested_qty} → "
+                    f"allowed={allowed_qty} "
+                    f"(broker long position={current_long_qty})"
+                )
 
         else:
             print(f"[WARN] Unknown action '{action}' for {symU}")
@@ -391,7 +458,9 @@ def execute_trade(action, quantity, symbol, decision=None):
             type="market",
             time_in_force="gtc",
         )
-        print(f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})")
+        print(
+            f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})"
+        )
 
         time.sleep(2)
         result = client.get_order(order.id)
@@ -415,22 +484,7 @@ def execute_trade(action, quantity, symbol, decision=None):
 
     except Exception as e:
         msg = str(e)
-        low = msg.lower()
 
         print(f"[ERROR] Trade failed for {symU}: {msg}")
-
-        pdt_markers = [
-            "pattern day trader",
-            "day trade buying power",
-            "dtbp",
-            "daytrade",
-            "day-trade",
-            "opening trades would exceed",
-            "insufficient day trade buying power",
-        ]
-
-        if any(m in low for m in pdt_markers):
-            print(f"[PDT WARNING] Possible PDT/day-trade restriction for {symU}.")
-            return 0.0, None
 
         return 0.0, None
