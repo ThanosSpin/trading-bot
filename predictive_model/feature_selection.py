@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import shap
 import matplotlib.pyplot as plt
+from typing import Optional
 
 try:
     from predictive_model.model_xgb import MODEL_DIR
@@ -37,7 +38,7 @@ def get_optimal_feature_count(n_samples: int, n_features: int, mode: str = "dail
 def prune_correlated_features(
     X: pd.DataFrame,
     threshold: float = 0.97,
-    preserve: list | None = None,
+    preserve: Optional[list] = None,
 ):
     """
     Remove one feature from highly correlated pairs.
