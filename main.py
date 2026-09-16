@@ -1286,11 +1286,6 @@ def main():
         print("⏳ Market is closed. Exiting.")
         return
 
-    # Optional market-hours guard
-    if not is_market_open():
-        print("⏳ Market is closed. Exiting.")
-        return
-
     # margin Display
     try:
         margin = get_margin_status()
