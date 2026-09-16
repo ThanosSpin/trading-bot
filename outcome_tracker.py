@@ -23,7 +23,7 @@ print("[DEBUG] Running outcome_tracker from:", __file__)
 
 # Import your existing modules
 try:
-    from predictive_model.data_loader import fetch_historical_data
+    from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
     from config import SYMBOL, LOGS_DIR
 except ImportError:
     print("[WARN] Could not import from data_loader or config")
@@ -108,14 +108,59 @@ def get_next_day_close(symbol: str, pred_time: pd.Timestamp) -> float:
         print(f"[ERROR] get_next_day_close({symbol}): {e}")
         return None
 
+
+def get_intraday_horizon_close(
+    symbol: str,
+    pred_time: pd.Timestamp,
+    horizon_minutes: int = 15,
+) -> float:
+    """Return the first completed intraday close at the prediction horizon."""
+    try:
+        pred_time = pd.Timestamp(pred_time)
+        if pred_time.tzinfo is None:
+            pred_time = pred_time.tz_localize("UTC")
+        else:
+            pred_time = pred_time.tz_convert("UTC")
+
+        age_minutes = max(
+            horizon_minutes * 4,
+            int((pd.Timestamp.now(tz="UTC") - pred_time).total_seconds() / 60)
+            + horizon_minutes * 4,
+        )
+        df = fetch_intraday_history(
+            symbol,
+            lookback_minutes=age_minutes,
+            interval=f"{horizon_minutes}min",
+        )
+        if df is None or df.empty:
+            return None
+
+        df = df.copy().sort_index()
+        index = pd.to_datetime(df.index, utc=True, errors="coerce")
+        valid = ~index.isna()
+        df = df.loc[valid]
+        df.index = index[valid]
+        target_time = pred_time + pd.Timedelta(minutes=horizon_minutes)
+        future = df.loc[df.index >= target_time]
+        if future.empty:
+            return None
+
+        close = future["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        return float(close.iloc[0])
+    except Exception as e:
+        print(f"[ERROR] get_intraday_horizon_close({symbol}): {e}")
+        return None
+
 # ============================================================
 # MAIN OUTCOME UPDATE LOGIC
 # ============================================================
 
 def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
     """
-    Update actual outcomes for a specific symbol (all modes) using next-day close.
-    Uses the *_old.csv logs which have timestamps like '2026-06-03 11:12:48.728575+00:00'.
+    Update outcomes using the same horizon and no-trade band as training:
+    next daily close for daily models and the next 15-minute close for intraday.
     """
     log_file = os.path.join(LOGS_DIR, f"predictions_{symbol}.csv")
     core_cols = ["timestamp", "symbol", "mode", "predicted_prob", "price"]
@@ -143,13 +188,16 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
             errors="coerce",
         )
 
-        # Reset outcome columns for bootstrapping on *_old files
-        df["actual_outcome"] = np.nan
-        df["actual_price"] = np.nan
-        df["return_pct"] = np.nan
+        # Preserve outcomes already resolved by earlier runs.
+        for column in ("actual_outcome", "actual_price", "return_pct", "outcome_horizon"):
+            if column not in df.columns:
+                df[column] = np.nan
 
-        # For *_old bootstrap, ignore lookback and process ALL rows
         df_update = df.copy()
+        if lookback_hours is not None:
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
+            timestamp_utc = pd.to_datetime(df_update["timestamp"], utc=True, errors="coerce")
+            df_update = df_update.loc[timestamp_utc >= cutoff]
 
         # Only consider rows with missing outcomes
         df_pending = df_update[df_update["actual_outcome"].isna()].copy()
@@ -167,8 +215,6 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
         print(f"\n[UPDATE] {symbol} : Processing {len(df_pending)} predictions...")
 
         updated_count = 0
-        min_move = 0.0  # label any non-zero move for now
-
         for idx, row in df_pending.iterrows():
             pred_time = row["timestamp"]
             pred_price = row.get("price", None)
@@ -183,8 +229,15 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
 
             start_price = float(pred_price)
 
-            # Get next day's close
-            actual_price = get_next_day_close(symbol, pred_time)
+            mode = str(row.get("mode", "")).lower()
+            if mode.startswith("intraday"):
+                actual_price = get_intraday_horizon_close(symbol, pred_time, 15)
+                min_move = 0.0008
+                outcome_horizon = "15min"
+            else:
+                actual_price = get_next_day_close(symbol, pred_time)
+                min_move = 0.002
+                outcome_horizon = "next_trading_day"
             if actual_price is None:
                 print(f"[DEBUG] {symbol} row {idx}: no next-day close found, skipping")
                 continue
@@ -206,6 +259,7 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
             df.loc[idx, "actual_outcome"] = actual_outcome
             df.loc[idx, "actual_price"] = actual_price
             df.loc[idx, "return_pct"] = ret * 100.0
+            df.loc[idx, "outcome_horizon"] = outcome_horizon
 
             updated_count += 1
 

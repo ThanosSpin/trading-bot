@@ -88,7 +88,7 @@ def evaluate_predictions(
     Returns:
         Dict with metrics (accuracy, brier_score, calibration_error, etc.)
     """
-    filename = f"predictions_{symbol.upper()}_{mode}.csv"
+    filename = f"predictions_{symbol.upper()}.csv"
     path = os.path.join(logs_dir, filename)
 
     if not os.path.exists(path):
@@ -112,7 +112,10 @@ def evaluate_predictions(
         cutoff = pd.Timestamp.utcnow() - timedelta(days=lookback_days)
         df = df[df['timestamp'] >= cutoff].copy()
 
-        # Remove rows without actual outcomes
+        if 'mode' in df.columns:
+            df = df[df['mode'] == mode].copy()
+
+        # Outcomes must be populated by the horizon-aware outcome tracker.
         df = df.dropna(subset=['actual_outcome', 'predicted_prob'])
 
         if len(df) < 5:
@@ -171,7 +174,7 @@ class ModelMonitor:
 
     def _get_prediction_log_path(self, symbol: str, mode: str) -> str:
         """Get path to prediction log CSV."""
-        return os.path.join(self.logs_dir, f"signals_{symbol.upper()}.csv")
+        return os.path.join(self.logs_dir, f"predictions_{symbol.upper()}.csv")
 
 
     def _load_prediction_log(self, symbol: str, lookback_days: int = 7) -> pd.DataFrame:
@@ -236,16 +239,9 @@ class ModelMonitor:
                 'actual_win_rate': 0.5
             }
 
-        # Map mode to column
-        mode_col_map = {
-            'daily': 'dailyprob',
-            'intraday_mr': 'intradayprob',  # Approximate
-            'intraday_mom': 'intradayprob'  # Approximate
-        }
-
-        prob_col = mode_col_map.get(mode, 'finalprob')
-
-        if prob_col not in df.columns or 'price' not in df.columns:
+        prob_col = 'predicted_prob'
+        required = {'mode', 'actual_outcome', prob_col}
+        if not required.issubset(df.columns):
             return {
                 'sample_size': 0,
                 'accuracy': 0.0,
@@ -256,10 +252,8 @@ class ModelMonitor:
                 'actual_win_rate': 0.5
             }
 
-        # Calculate actual outcomes (next day's price movement)
-        df = df.copy()
-        df['actual_up'] = (df['price'].shift(-1) > df['price']).astype(int)
-        df = df.dropna(subset=['actual_up', prob_col])
+        df = df[df['mode'] == mode].copy()
+        df = df.dropna(subset=['actual_outcome', prob_col])
 
         if len(df) < 5:
             return {
@@ -272,7 +266,7 @@ class ModelMonitor:
                 'actual_win_rate': 0.5
             }
 
-        y_true = df['actual_up'].values
+        y_true = df['actual_outcome'].astype(int).values
         y_pred_prob = df[prob_col].values
         y_pred = (y_pred_prob >= 0.5).astype(int)
 
@@ -336,7 +330,7 @@ class ModelMonitor:
         cutoff = pd.Timestamp.utcnow() - timedelta(days=days_to_keep)
 
         for filename in os.listdir(self.logs_dir):
-            if not filename.startswith("signals_") or not filename.endswith(".csv"):
+            if not filename.startswith("predictions_") or not filename.endswith(".csv"):
                 continue
 
             path = os.path.join(self.logs_dir, filename)

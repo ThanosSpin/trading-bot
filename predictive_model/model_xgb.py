@@ -170,29 +170,13 @@ def _time_ordered_train_cal_test_split(
         raise ValueError("X and y must have the same length")
 
     n = len(X)
-    # Tier 1: very small datasets → still refuse
-    if n < 40:
-        raise ValueError(f"Not enough rows for any reasonable split: n={n}")
-
-    # Tier 2: small but usable (e.g., 40–99 rows) → simple 80/20 split, no separate cal window
     if n < 100:
-        # Use 80% train, 20% test; reuse test as "cal" to keep API stable
-        split_idx = int(n * 0.8)
-        if split_idx <= 0 or split_idx >= n:
-            raise ValueError(f"Not enough data to split train/test for n={n}")
+        raise ValueError(
+            "At least 100 chronological rows are required for independent "
+            f"train/calibration/test windows; received n={n}."
+        )
 
-        X_train = X.iloc[:split_idx].copy()
-        y_train = y.iloc[:split_idx].copy()
-        X_test = X.iloc[split_idx:].copy()
-        y_test = y.iloc[split_idx:].copy()
-
-        # For small-n case, treat test as calibration too
-        X_cal = X_test.copy()
-        y_cal = y_test.copy()
-
-        return X_train, y_train, X_cal, y_cal, X_test, y_test
-
-    # Tier 3: normal path (n >= 100) → proper train/cal/test
+    # Calibration and final test data must never overlap.
     train_end = int(n * train_frac)
     cal_end = int(n * (train_frac + cal_frac))
 
@@ -250,73 +234,72 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return out
 
 
-def _add_intraday_regime_cols(dffeat: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add regime columns with CONSISTENT names: mom_12_abs, vol_12.
-    """
-    dffeat = dffeat.copy()
-    try:
-        close = dffeat["Close"]
-        if isinstance(close, pd.DataFrame):
-            close = close.iloc[:, 0]
-        close = pd.to_numeric(close, errors="coerce")
-
-        ret12 = close.pct_change(12)
-        dffeat["ret_12"] = ret12
-        dffeat["mom_12_abs"] = ret12.abs()
-        dffeat["vol_12"] = close.pct_change().rolling(12).std()
-    except Exception as e:
-        print(f"[REGIME COLS] Error adding regime features: {e}")
-    return dffeat
-
-
-def _filter_intraday_rows_by_mode(df_feat: pd.DataFrame, mode: str) -> pd.DataFrame:
-    """
-    Filters intraday feature rows by regime.
-    Uses percentile-based thresholds computed only from the current training frame.
-    """
-    df_feat = _add_intraday_regime_cols(df_feat)
-
-    df_feat = df_feat.replace([np.inf, -np.inf], np.nan)
-    df_feat = df_feat.dropna(subset=["mom_12_abs", "vol_12"])
-
-    if df_feat.empty:
-        print(f"[WARN] Empty dataframe after regime column addition for mode={mode}")
-        return df_feat
-
-    mom_p60 = df_feat["mom_12_abs"].quantile(0.60)
-    vol_p60 = df_feat["vol_12"].quantile(0.60)
-    mom_p30 = df_feat["mom_12_abs"].quantile(0.30)
-    vol_p30 = df_feat["vol_12"].quantile(0.30)
-
-    print(
-        f"[REGIME] {mode}: mom_p30={mom_p30:.4f} mom_p60={mom_p60:.4f} "
-        f"vol_p30={vol_p30:.5f} vol_p60={vol_p60:.5f}"
-    )
-
-    if mode == "intraday_mom":
-        filtered = df_feat[
-            (df_feat["mom_12_abs"] >= mom_p60) |
-            (df_feat["vol_12"] >= vol_p60)
-        ]
-        print(
-            f"[REGIME] intraday_mom: {len(df_feat)} -> {len(filtered)} rows "
-            f"({len(filtered) / len(df_feat) * 100:.1f}%)"
-        )
-        return filtered
-
-    if mode == "intraday_mr":
-        filtered = df_feat[
-            (df_feat["mom_12_abs"] < mom_p30) &
-            (df_feat["vol_12"] < vol_p30)
-        ]
-        print(
-            f"[REGIME] intraday_mr: {len(df_feat)} -> {len(filtered)} rows "
-            f"({len(filtered) / len(df_feat) * 100:.1f}%)"
-        )
-        return filtered
-
+def _add_intraday_regime_cols(df_feat: pd.DataFrame) -> pd.DataFrame:
+    """Add the regime measures used by both training and live routing."""
+    df_feat = df_feat.copy()
+    close = df_feat["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = pd.to_numeric(close, errors="coerce")
+    returns = close.pct_change()
+    df_feat["mom_4_abs"] = close.pct_change(4).abs()
+    df_feat["vol_12"] = returns.rolling(12).std()
     return df_feat
+
+
+def _filter_intraday_rows_by_mode(
+    df_feat: pd.DataFrame,
+    mode: str,
+    train_frac: float = 0.70,
+    percentile: float = 0.70,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Fit regime thresholds on the earliest training portion only, then apply
+    the identical rule used by live model routing.
+    """
+    if mode not in ("intraday_mom", "intraday_mr"):
+        return df_feat.copy(), {}
+
+    with_regime = _add_intraday_regime_cols(df_feat)
+    with_regime = with_regime.replace([np.inf, -np.inf], np.nan)
+    with_regime = with_regime.dropna(subset=["mom_4_abs", "vol_12"])
+    if with_regime.empty:
+        raise ValueError(f"No valid regime rows for mode={mode}")
+
+    fit_end = int(len(with_regime) * train_frac)
+    if fit_end < 20:
+        raise ValueError(
+            f"Insufficient pre-split rows to fit regime thresholds: {fit_end}"
+        )
+    threshold_frame = with_regime.iloc[:fit_end]
+    mom_threshold = float(threshold_frame["mom_4_abs"].quantile(percentile))
+    vol_threshold = float(threshold_frame["vol_12"].quantile(percentile))
+    if not np.isfinite(mom_threshold) or not np.isfinite(vol_threshold):
+        raise ValueError("Regime thresholds are not finite")
+
+    momentum_mask = (
+        (with_regime["mom_4_abs"] >= mom_threshold)
+        | (with_regime["vol_12"] >= vol_threshold)
+    )
+    selected_mask = momentum_mask if mode == "intraday_mom" else ~momentum_mask
+    filtered = with_regime.loc[selected_mask].copy()
+
+    regime_config = {
+        "version": 1,
+        "momentum_bars": 4,
+        "volatility_bars": 12,
+        "percentile": float(percentile),
+        "momentum_threshold": mom_threshold,
+        "volatility_threshold": vol_threshold,
+        "fit_rows": fit_end,
+        "fit_end": str(threshold_frame.index[-1]),
+        "rule": "mom_when_abs_momentum_or_volatility_meets_threshold",
+    }
+    print(
+        f"[REGIME] {mode}: {len(with_regime)} -> {len(filtered)} rows "
+        f"| train-only mom={mom_threshold:.6f} vol={vol_threshold:.6f}"
+    )
+    return filtered, regime_config
 
 
 # ---------------------------------------------------------
@@ -332,8 +315,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
     from predictive_model.feature_selection import select_features_with_shap
 
     df = df.copy()
-
-    df = df.copy()
+    regime_config = None
 
     print(f"\n[FEATURES] Building engineered features for {symbol}/{mode}...")
     if mode == "daily":
@@ -341,10 +323,8 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
     elif mode in ("intraday", "intraday_mr", "intraday_mom"):
         df_feat = build_intraday_features(df)
         if mode in ("intraday_mr", "intraday_mom"):
-            df_feat = _filter_intraday_rows_by_mode(df_feat, mode=mode)
-            target_col = "target"
-            num_classes = 2
-        for c in ["ret_12", "mom_12_abs", "vol_12"]:
+            df_feat, regime_config = _filter_intraday_rows_by_mode(df_feat, mode=mode)
+        for c in ["ret_12", "mom_12_abs", "mom_4_abs", "vol_12"]:
             if c in df_feat.columns:
                 df_feat = df_feat.drop(columns=[c])
     else:
@@ -694,7 +674,9 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
             "train_samples": len(X_train),
             "calibration_samples": len(X_cal),
             "test_samples": len(X_test),
+            "windows_overlap": False,
         },
+        "regime_config": regime_config,
         "metrics": metrics,
         "decision_threshold": metrics.get("decision_threshold", 0.5),
         "threshold_optimization": {
@@ -765,21 +747,8 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
             prob = float(proba[1])
             decision_threshold = float(model_dict.get("decision_threshold", 0.5))
 
-            # NEW: Platt calibration if available
-            try:
-                sym = str(model_dict.get("symbol") or "").upper()
-                mode = str(model_dict.get("mode") or "")
-                platt = load_platt_calibrator(sym, mode) if sym and mode else None
-            except Exception:
-                platt = None
-
-            if platt is not None:
-                try:
-                    prob = float(platt.predict_proba([[prob]])[0, 1])
-                except Exception:
-                    # Fail safe: if calibration breaks, keep raw prob
-                    pass
-                
+            # The saved artifact owns calibration. Applying a second external
+            # calibrator here would distort an already calibrated probability.
             return {
                 "final_prob": prob,
                 "decision_threshold": decision_threshold,
@@ -1161,19 +1130,39 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                 mom1h = close.pct_change(4).iloc[-1]
                 results["intraday_mom"] = float(mom1h) if not pd.isna(mom1h) else None
 
-            try:
-                adaptive = get_adaptive_regime_thresholds(symU, lookback_days=30, percentile=0.70)
-                MOMTRIG = float(adaptive["mom_trig"])
-                VOLTRIG = float(adaptive["vol_trig"])
-                print(f"[ADAPTIVE] {symU} using adaptive: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
-            except Exception:
-                MOMTRIG = float(INTRADAY_MOM_TRIG)
-                VOLTRIG = float(INTRADAY_VOL_TRIG)
-                ovr = (INTRADAY_REGIME_OVERRIDES or {}).get(symU)
-                if ovr:
-                    MOMTRIG = float(ovr.get("mom_trig", MOMTRIG))
-                    VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
-                print(f"[CONFIG] {symU} using config: mom={MOMTRIG:.4f} vol={VOLTRIG:.5f}")
+            regime_config = None
+            for artifact in (model_intra_mom, model_intra_mr):
+                candidate_config = (artifact or {}).get("regime_config")
+                if candidate_config:
+                    regime_config = candidate_config
+                    break
+
+            if regime_config:
+                MOMTRIG = float(regime_config["momentum_threshold"])
+                VOLTRIG = float(regime_config["volatility_threshold"])
+                results["intraday_regime_source"] = "model_artifact"
+                print(
+                    f"[REGIME] {symU} artifact thresholds: "
+                    f"mom={MOMTRIG:.6f} vol={VOLTRIG:.6f}"
+                )
+            else:
+                # Backward compatibility for artifacts trained before regime
+                # metadata was persisted. New models always use the branch above.
+                try:
+                    adaptive = get_adaptive_regime_thresholds(
+                        symU, lookback_days=30, percentile=0.70
+                    )
+                    MOMTRIG = float(adaptive["mom_trig"])
+                    VOLTRIG = float(adaptive["vol_trig"])
+                    results["intraday_regime_source"] = "legacy_adaptive"
+                except Exception:
+                    MOMTRIG = float(INTRADAY_MOM_TRIG)
+                    VOLTRIG = float(INTRADAY_VOL_TRIG)
+                    ovr = (INTRADAY_REGIME_OVERRIDES or {}).get(symU)
+                    if ovr:
+                        MOMTRIG = float(ovr.get("mom_trig", MOMTRIG))
+                        VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
+                    results["intraday_regime_source"] = "legacy_config"
 
             candidate_models = []
 
