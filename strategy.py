@@ -45,6 +45,7 @@ from config import (
     SPY_MODEL_ENTRY_BUFFER,
     SPY_MODEL_EXIT_BUFFER,
     PROFIT_TRIGGER_PCT,
+    ROTATION_MIN_EDGE,
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
@@ -1712,19 +1713,41 @@ def compute_strategy_decisions(
                 decisions[sym] = d0
 
             # If ABBV chosen AND AAPL is not BUY AND we hold AAPL -> sell AAPL to fund ABBV
+            # Rotate AAPL into ABBV only when ABBV has a meaningful signal advantage.
             if (
                 secondary == "ABBV"
                 and "AAPL" in core_symbols
                 and "ABBV" in core_symbols
             ):
-                aapl_action = (decisions.get("AAPL") or {}).get("action", "hold")
                 aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
+                aapl_prob = float(preds.get("AAPL", 0.0) or 0.0)
+                abbv_prob = float(preds.get("ABBV", 0.0) or 0.0)
 
-                if aapl_sh > 0 and aapl_action in ("hold", "sell"):
+                rotation_is_better = (
+                    aapl_sh > 0
+                    and abbv_prob >= aapl_prob + ROTATION_MIN_EDGE
+                )
+
+                if rotation_is_better:
                     decisions["AAPL"] = make_decision(
                         "sell",
                         int(aapl_sh),
-                        "AAPL: Sold to fund ABBV BUY (rotation).",
+                        (
+                            f"AAPL: Rotated into stronger ABBV signal "
+                            f"(AAPL={aapl_prob:.3f}, ABBV={abbv_prob:.3f})."
+                        ),
+                        priority_rank=0,
+                    )
+
+                    decisions["ABBV"] = make_decision(
+                        "buy",
+                        1,
+                        (
+                            f"ABBV: Rotation BUY after AAPL sale "
+                            f"(ABBV={abbv_prob:.3f}, AAPL={aapl_prob:.3f})."
+                        ),
+                        recalc_after_sells=True,
+                        priority_rank=1,
                     )
 
     # ---------------------------------------------------------
