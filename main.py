@@ -992,6 +992,12 @@ def process_all_symbols(symbols):
         diagnostics=diagnostics,
     )
 
+    if not isinstance(decisions, dict):
+        raise RuntimeError(
+            "compute_strategy_decisions() must return a decisions dictionary; "
+            f"received {type(decisions).__name__}"
+        )
+
     # ✅ NEW: portfolio-level weak guard
     decisions = apply_portfolio_weak_guard(
         decisions,

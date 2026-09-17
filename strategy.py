@@ -2157,3 +2157,4 @@ def compute_strategy_decisions(
         return decisions
     else:
         print("WEAK-MARKET: market NOT weak (no filter applied).")
+        return decisions
