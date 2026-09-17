@@ -31,6 +31,17 @@ except ImportError:
     SYMBOL = ['NVDA', 'AAPL', 'ABBV', 'PLTR', 'SPY']
     LOGS_DIR = 'logs'
 
+# Resolve relative log paths from this checkout, not from the shell's current
+# working directory. This keeps the main and correctness worktrees isolated.
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if not os.path.isabs(LOGS_DIR):
+    LOGS_DIR = os.path.join(PROJECT_ROOT, LOGS_DIR)
+
+# SPY predictions are logged and evaluated alongside the configured core symbols.
+SYMBOL = list(SYMBOL) if isinstance(SYMBOL, (list, tuple, set)) else [SYMBOL]
+if "SPY" not in SYMBOL:
+    SYMBOL.append("SPY")
+
 # Ensure logs directory exists
 os.makedirs(LOGS_DIR, exist_ok=True)
 
