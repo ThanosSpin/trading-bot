@@ -12,6 +12,19 @@ from typing import Dict, Tuple, Optional
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
 from config import MODEL_DIR
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _prediction_logs_dir() -> str:
+    """Return the shared prediction-log directory for this checkout."""
+    configured = os.getenv(
+        "PREDICTION_LOGS_DIR",
+        os.path.join(PROJECT_ROOT, "logs"),
+    )
+    if not os.path.isabs(configured):
+        configured = os.path.join(PROJECT_ROOT, configured)
+    return configured
+
 
 
 def log_prediction(symbol: str, mode: str, predicted_prob: float, price: float, prediction_details: dict = None):
@@ -29,7 +42,7 @@ def log_prediction(symbol: str, mode: str, predicted_prob: float, price: float, 
     import os
     import pandas as pd
     
-    log_dir = "logs"
+    log_dir = _prediction_logs_dir()
     os.makedirs(log_dir, exist_ok=True)
     
     log_file = os.path.join(log_dir, f"predictions_{symbol}.csv")
@@ -74,7 +87,7 @@ def evaluate_predictions(
     symbol: str,
     mode: str,
     lookback_days: int = 7,
-    logs_dir: str = "logs"
+    logs_dir: str = None,
 ) -> Dict:
     """
     Evaluate model performance from logged predictions.
@@ -88,6 +101,7 @@ def evaluate_predictions(
     Returns:
         Dict with metrics (accuracy, brier_score, calibration_error, etc.)
     """
+    logs_dir = logs_dir or _prediction_logs_dir()
     filename = f"predictions_{symbol.upper()}.csv"
     path = os.path.join(logs_dir, filename)
 
@@ -167,9 +181,9 @@ def evaluate_predictions(
 
 
 class ModelMonitor:
-    def __init__(self, logs_dir: str = "logs"):
-        self.logs_dir = logs_dir
-        os.makedirs(logs_dir, exist_ok=True)
+    def __init__(self, logs_dir: str = None):
+        self.logs_dir = logs_dir or _prediction_logs_dir()
+        os.makedirs(self.logs_dir, exist_ok=True)
 
 
     def _get_prediction_log_path(self, symbol: str, mode: str) -> str:

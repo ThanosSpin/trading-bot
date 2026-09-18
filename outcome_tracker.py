@@ -32,12 +32,13 @@ except ImportError:
     LOGS_DIR = 'logs'
 
 # Resolve prediction logs from this checkout, not from an absolute LOGS_DIR in
-# shared configuration that may point at a different worktree. An explicit
-# OUTCOME_LOGS_DIR remains available for deployments that store logs elsewhere.
+# shared configuration that may point at a different worktree. The writer and
+# tracker share PREDICTION_LOGS_DIR; OUTCOME_LOGS_DIR remains as a legacy alias.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-LOGS_DIR = os.getenv(
-    "OUTCOME_LOGS_DIR",
-    os.path.join(PROJECT_ROOT, "logs"),
+LOGS_DIR = (
+    os.getenv("PREDICTION_LOGS_DIR")
+    or os.getenv("OUTCOME_LOGS_DIR")
+    or os.path.join(PROJECT_ROOT, "logs")
 )
 if not os.path.isabs(LOGS_DIR):
     LOGS_DIR = os.path.join(PROJECT_ROOT, LOGS_DIR)

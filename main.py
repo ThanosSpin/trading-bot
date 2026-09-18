@@ -25,7 +25,6 @@ from trader import execute_trade, get_margin_status, get_recent_filled_sells
 from predictive_model.model_monitor import (
     get_monitor,
     evaluate_predictions,
-    log_prediction,
 )
 from account_cache import account_cache
 from config import (
@@ -236,38 +235,6 @@ def get_predictions(symbols, debug=True):
         if sig is None:
             print(f"[WARN] compute_signals returned None for {sym}, skipping.")
             continue
-
-        # ✅ FIX: Log predictions for EACH model type separately
-        try:
-            if sig.get("daily_prob") is not None:
-                details = sig.get("daily_prediction")
-                if not isinstance(details, dict):
-                    details = None
-                log_prediction(
-                    symbol=sym,
-                    mode="daily",
-                    predicted_prob=float(sig.get("daily_prob")),
-                    price=float(sig.get("price")) if sig.get("price") else None,
-                    prediction_details=details,
-                )
-        except Exception as e:
-            print(f"[WARN] Could not log daily prediction: {e}")
-
-        try:
-            if sig.get("intraday_prob") is not None and sig.get("intraday_model_used"):
-                intraday_mode = sig.get("intraday_model_used")
-                details = sig.get("intraday_prediction")
-                if not isinstance(details, dict):
-                    details = None
-                log_prediction(
-                    symbol=sym,
-                    mode=intraday_mode,
-                    predicted_prob=float(sig.get("intraday_prob")),
-                    price=float(sig.get("price")) if sig.get("price") else None,
-                    prediction_details=details,
-                )
-        except Exception as e:
-            print(f"[WARN] Could not log intraday prediction: {e}")
 
         # ✅ DEBUG
         print(
