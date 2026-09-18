@@ -31,11 +31,17 @@ except ImportError:
     SYMBOL = ['NVDA', 'AAPL', 'ABBV', 'PLTR', 'SPY']
     LOGS_DIR = 'logs'
 
-# Resolve relative log paths from this checkout, not from the shell's current
-# working directory. This keeps the main and correctness worktrees isolated.
+# Resolve prediction logs from this checkout, not from an absolute LOGS_DIR in
+# shared configuration that may point at a different worktree. An explicit
+# OUTCOME_LOGS_DIR remains available for deployments that store logs elsewhere.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+LOGS_DIR = os.getenv(
+    "OUTCOME_LOGS_DIR",
+    os.path.join(PROJECT_ROOT, "logs"),
+)
 if not os.path.isabs(LOGS_DIR):
     LOGS_DIR = os.path.join(PROJECT_ROOT, LOGS_DIR)
+print("[DEBUG] Outcome logs directory:", LOGS_DIR)
 
 # SPY predictions are logged and evaluated alongside the configured core symbols.
 SYMBOL = list(SYMBOL) if isinstance(SYMBOL, (list, tuple, set)) else [SYMBOL]
