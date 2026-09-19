@@ -92,13 +92,37 @@ def _daily_observations(symbol: str) -> pd.DataFrame:
     """Return one resolved daily prediction per New York trading date."""
     path = _prediction_path(symbol)
     if not path.exists():
-        raise FileNotFoundError(f"prediction log not found: {path}")
+        print(f"[MONITOR] {symbol}: prediction log not found yet: {path}")
+        return pd.DataFrame(
+            columns=[
+                "timestamp",
+                "mode",
+                "predicted_prob",
+                "actual_outcome",
+                "prediction_date_ny",
+            ]
+        )
 
     frame = pd.read_csv(path)
-    required = {"timestamp", "mode", "predicted_prob", "actual_outcome"}
+    required = {"timestamp", "mode", "predicted_prob"}
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"prediction log missing columns: {missing}")
+
+    if "actual_outcome" not in frame.columns:
+        print(
+            f"[MONITOR] {symbol}: actual_outcome column is not available yet; "
+            "treating as no resolved daily outcomes"
+        )
+        return pd.DataFrame(
+            columns=[
+                "timestamp",
+                "mode",
+                "predicted_prob",
+                "actual_outcome",
+                "prediction_date_ny",
+            ]
+        )
 
     frame = frame.copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
