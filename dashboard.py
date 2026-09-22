@@ -2484,7 +2484,7 @@ if os.path.exists(portfolio_path):
                     # -------------------------------------------------
                     #
                     # Complete fee period:
-                    #   charge resource fee on deposits made in that period.
+                    #   charge resource fee on net deposits made in that period.
                     #
                     # Current incomplete period:
                     #   charge resource fee on opening capital carried forward
@@ -2493,14 +2493,23 @@ if os.path.exists(portfolio_path):
 
                     if is_complete:
                         # Completed period:
-                        # resource fee based on deposits that funded that period
-                        resource_fee_base = period_deposits
+                        # resource fee based on net capital that funded that period
+                        resource_fee_base = max(
+                            period_deposits - period_withdrawals,
+                            0.0,
+                        )
 
                     else:
                         # Current / incomplete period:
                         # opening capital carried from the previous period
                         # + any new deposits made during this period
-                        resource_fee_base = opening_investor_capital + period_deposits
+                        # - any withdrawals made during this period
+                        resource_fee_base = max(
+                            opening_investor_capital
+                            + period_deposits
+                            - period_withdrawals,
+                            0.0,
+                        )
 
                     # -------------------------------------------------
                     # Apply your fee_model.py rules
