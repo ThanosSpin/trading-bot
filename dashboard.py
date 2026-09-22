@@ -132,8 +132,14 @@ st.caption("🔍 Decision = what main.py will use for trading.")
 
 
 # Auto-refresh
-# Refresh full dashboard (and therefore prob_up) every 10 minutes
-REFRESH_INTERVAL = 600  # seconds
+# Refresh the full dashboard (and therefore prob_up) every 30 minutes by
+# default. The interval can be overridden per service without a code change.
+try:
+    REFRESH_INTERVAL = int(os.getenv("DASHBOARD_REFRESH_SECONDS", "1800"))
+except (TypeError, ValueError):
+    REFRESH_INTERVAL = 1800
+
+REFRESH_INTERVAL = max(REFRESH_INTERVAL, 60)
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="global_refresh")
 st.caption(f"⏳ Auto-refreshing every {REFRESH_INTERVAL // 60} minutes.")
 
