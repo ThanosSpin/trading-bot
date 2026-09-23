@@ -43,11 +43,12 @@ USE_MULTICLASS = bool(config.USE_MULTICLASS_MODELS)
 
 
 def _symbols(requested: Optional[Iterable[str]] = None) -> List[str]:
-    source = requested or config.TRAIN_SYMBOLS
+    source = requested if requested is not None else config.TRAIN_SYMBOLS
     values = [str(symbol).strip().upper() for symbol in source if str(symbol).strip()]
-    spy = str(config.SPY_SYMBOL).strip().upper()
-    if spy and spy not in values:
-        values.append(spy)
+    if requested is None:
+        spy = str(config.SPY_SYMBOL).strip().upper()
+        if spy and spy not in values:
+            values.append(spy)
     return list(dict.fromkeys(values))
 
 
