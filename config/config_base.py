@@ -140,11 +140,11 @@ LIMIT_BUFFER_PCT = 0.01
 # Performance Fee
 # ============================================================
 
-# Performance fee used in the annual Investor / Performance Fee table.
-# Example: 0.2 = 25% - 5% (hurdle_pct) = 20%
+# Performance fee applied to profit remaining after the resource fee
+# and the 5% hurdle. The hurdle does not reduce the fee rate.
 RESOURCE_FEE_PCT = 2.0
 HURDLE_PCT = 5.0
-PERFORMANCE_FEE_PCT = 25.0
+PERFORMANCE_FEE_PCT = 20.0
 
 TIMEZONE = "US/Eastern"
 USE_LIVE_TRADING = True
