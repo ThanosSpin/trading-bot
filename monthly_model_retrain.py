@@ -164,7 +164,11 @@ def _fetch_training_data(symbol: str, mode: str):
     return fetch_historical_data(symbol, period=INTRADAY_PERIOD, interval=INTRADAY_INTERVAL)
 
 
-def _train_to_stage(symbols: List[str], stage_dir: Path) -> Tuple[dict, List[str]]:
+def _train_to_stage(
+    symbols: List[str],
+    stage_dir: Path,
+    enforce_promotion_gate: bool = True,
+) -> Tuple[dict, List[str]]:
     summaries: Dict[str, dict] = {}
     failures: List[str] = []
 
@@ -197,14 +201,17 @@ def _train_to_stage(symbols: List[str], stage_dir: Path) -> Tuple[dict, List[str
                 champion = joblib.load(active_path) if active_path.exists() else None
                 decision = promotion_decision(artifact, champion)
                 artifact["promotion_evaluation"] = decision
-                if not decision["accepted"]:
+                if enforce_promotion_gate and not decision["accepted"]:
                     raise ValueError(
                         "challenger rejected: " + "; ".join(decision["reasons"])
                     )
+                gate_status = "accepted" if decision["accepted"] else "rejected"
                 print(
-                    f"[PROMOTION GATE] {label}: accepted "
+                    f"[PROMOTION GATE] {label}: {gate_status} "
                     f"({decision['kind']}, overlap={decision['overlap_samples']})"
                 )
+                if not decision["accepted"]:
+                    print("[PROMOTION GATE] " + "; ".join(decision["reasons"]))
 
                 stage_path = stage_dir / f"{symbol}_{mode}_xgb.pkl"
                 joblib.dump(artifact, stage_path)
@@ -346,8 +353,18 @@ def main() -> int:
         action="store_true",
         help="Validate active artifacts without fetching data or training",
     )
+    parser.add_argument(
+        "--shadow",
+        action="store_true",
+        help=(
+            "Train and evaluate all challengers, record promotion decisions, "
+            "and replace no active artifacts"
+        ),
+    )
     parser.add_argument("--no-email", action="store_true")
     args = parser.parse_args()
+    if args.validate_only and args.shadow:
+        parser.error("--validate-only and --shadow cannot be used together")
 
     symbols = _symbols(args.symbols)
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -366,12 +383,17 @@ def main() -> int:
     if args.validate_only:
         summaries, failures = _validate_existing(symbols)
     else:
-        summaries, failures = _train_to_stage(symbols, stage_dir)
+        summaries, failures = _train_to_stage(
+            symbols,
+            stage_dir,
+            enforce_promotion_gate=not args.shadow,
+        )
 
     report = {
         "run_id": run_id,
         "status": "failed" if failures else "success",
         "validate_only": args.validate_only,
+        "shadow": args.shadow,
         "symbols": symbols,
         "modes": list(MODES),
         "expected_models": expected_models,
@@ -385,7 +407,7 @@ def main() -> int:
         )
         report["status"] = "failed"
 
-    if not failures and not args.validate_only:
+    if not failures and not args.validate_only and not args.shadow:
         try:
             _promote_batch(stage_dir, symbols)
             report["promoted"] = True
@@ -412,7 +434,12 @@ def main() -> int:
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
 
-    action = "validated" if args.validate_only else "trained, validated, and promoted"
+    if args.validate_only:
+        action = "validated"
+    elif args.shadow:
+        action = "trained and evaluated in shadow mode; none promoted"
+    else:
+        action = "trained, validated, and promoted"
     print(f"[MONTHLY] SUCCESS - {expected_models} models {action}.")
     return 0
 
