@@ -25,6 +25,7 @@ import joblib
 
 import config
 from predictive_model.data_loader import fetch_historical_data
+from predictive_model.model_evaluation import promotion_decision
 from predictive_model.model_xgb import train_model
 
 
@@ -58,7 +59,12 @@ def _finite_positive(value) -> bool:
     return math.isfinite(number) and number > 0
 
 
-def validate_artifact(artifact: dict, symbol: str, mode: str) -> None:
+def validate_artifact(
+    artifact: dict,
+    symbol: str,
+    mode: str,
+    require_walk_forward: bool = True,
+) -> None:
     """Raise ValueError when an artifact is unsafe to promote."""
     if not isinstance(artifact, dict):
         raise ValueError("training did not return an artifact dictionary")
@@ -94,6 +100,19 @@ def validate_artifact(artifact: dict, symbol: str, mode: str) -> None:
     if split.get("windows_overlap") is not False:
         raise ValueError("artifact does not confirm non-overlapping time windows")
 
+    if require_walk_forward:
+        walk_forward = artifact.get("walk_forward_evaluation")
+        if not isinstance(walk_forward, dict):
+            raise ValueError("artifact has no walk_forward_evaluation")
+        if int(walk_forward.get("n_splits", 0)) < 3:
+            raise ValueError("artifact has fewer than three walk-forward folds")
+        if int(walk_forward.get("gap_bars", 0)) < 1:
+            raise ValueError("artifact walk-forward evaluation has no embargo gap")
+        if not isinstance(walk_forward.get("aggregate"), dict):
+            raise ValueError("artifact has no aggregate walk-forward metrics")
+        if not walk_forward.get("predictions"):
+            raise ValueError("artifact has no out-of-fold prediction records")
+
     if mode.startswith("intraday_"):
         regime = artifact.get("regime_config")
         if not isinstance(regime, dict):
@@ -109,6 +128,9 @@ def _artifact_summary(artifact: dict) -> dict:
     split = artifact.get("split_metadata") or {}
     metrics = artifact.get("metrics") or {}
     regime = artifact.get("regime_config") or {}
+    walk_forward = artifact.get("walk_forward_evaluation") or {}
+    wf_metrics = walk_forward.get("aggregate") or {}
+    promotion = artifact.get("promotion_evaluation") or {}
     return {
         "trained_at": artifact.get("trained_at"),
         "calibrated": artifact.get("calibrated"),
@@ -124,6 +146,15 @@ def _artifact_summary(artifact: dict) -> dict:
         "momentum_threshold": regime.get("momentum_threshold"),
         "volatility_threshold": regime.get("volatility_threshold"),
         "regime_fit_end": regime.get("fit_end"),
+        "walk_forward_folds": walk_forward.get("n_splits"),
+        "walk_forward_gap_bars": walk_forward.get("gap_bars"),
+        "walk_forward_cost_bps": walk_forward.get("cost_bps"),
+        "walk_forward_trades": wf_metrics.get("trade_count"),
+        "walk_forward_net_return": wf_metrics.get("net_return"),
+        "walk_forward_profit_factor": wf_metrics.get("profit_factor"),
+        "walk_forward_max_drawdown": wf_metrics.get("max_drawdown"),
+        "walk_forward_brier": wf_metrics.get("brier_score"),
+        "promotion": promotion,
     }
 
 
@@ -161,6 +192,19 @@ def _train_to_stage(symbols: List[str], stage_dir: Path) -> Tuple[dict, List[str
                     use_multiclass=USE_MULTICLASS,
                 )
                 validate_artifact(artifact, symbol, mode)
+
+                active_path = MODEL_DIR / f"{symbol}_{mode}_xgb.pkl"
+                champion = joblib.load(active_path) if active_path.exists() else None
+                decision = promotion_decision(artifact, champion)
+                artifact["promotion_evaluation"] = decision
+                if not decision["accepted"]:
+                    raise ValueError(
+                        "challenger rejected: " + "; ".join(decision["reasons"])
+                    )
+                print(
+                    f"[PROMOTION GATE] {label}: accepted "
+                    f"({decision['kind']}, overlap={decision['overlap_samples']})"
+                )
 
                 stage_path = stage_dir / f"{symbol}_{mode}_xgb.pkl"
                 joblib.dump(artifact, stage_path)

@@ -31,6 +31,7 @@ import config
 from monthly_model_retrain import _artifact_summary, validate_artifact
 from predictive_model.data_loader import fetch_historical_data
 from predictive_model.model_monitor import _prediction_logs_dir
+from predictive_model.model_evaluation import promotion_decision
 from predictive_model.model_xgb import train_model
 
 
@@ -72,7 +73,9 @@ def _load_artifact(symbol: str) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"active daily artifact not found: {path}")
     artifact = joblib.load(path)
-    validate_artifact(artifact, symbol, "daily")
+    # Existing champions from correctness phase 1 do not yet contain the new
+    # walk-forward metadata. They remain loadable for the one-time transition.
+    validate_artifact(artifact, symbol, "daily", require_walk_forward=False)
     return artifact
 
 
@@ -235,6 +238,20 @@ def _train_candidate(symbol: str, run_dir: Path) -> Tuple[dict, Path]:
     accepted, reasons = _candidate_quality(artifact)
     if not accepted:
         raise ValueError("candidate rejected: " + "; ".join(reasons))
+
+    active_path = _artifact_path(symbol)
+    champion = joblib.load(active_path) if active_path.exists() else None
+    decision = promotion_decision(artifact, champion)
+    artifact["promotion_evaluation"] = decision
+    if not decision["accepted"]:
+        raise ValueError(
+            "candidate rejected by champion/challenger gate: "
+            + "; ".join(decision["reasons"])
+        )
+    print(
+        f"[PROMOTION GATE] {symbol}/daily: accepted "
+        f"({decision['kind']}, overlap={decision['overlap_samples']})"
+    )
 
     candidate_path = run_dir / f"{symbol}_daily_xgb.pkl"
     joblib.dump(artifact, candidate_path)

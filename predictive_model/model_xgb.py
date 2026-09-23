@@ -30,6 +30,7 @@ from predictive_model.data_loader import (
 )
 from predictive_model.features import build_daily_features, build_intraday_features
 from predictive_model.model_monitor import evaluate_predictions, log_prediction
+from predictive_model.model_evaluation import evaluate_walk_forward
 from predictive_model.target_labels import backtest_threshold, create_target_label
 from predictive_model.trading_metrics import (
     calculate_financial_metrics,
@@ -42,6 +43,9 @@ from config import (
     INTRADAY_VOL_TRIG,
     INTRADAY_WEIGHT,
     MIN_INTRADAY_BARS_FOR_FEATURES,
+    MODEL_EVAL_GAP_BARS,
+    MODEL_EVAL_TRANSACTION_COST_BPS,
+    MODEL_EVAL_WALK_FORWARD_FOLDS,
 )
 
 MODEL_DIR = "models"
@@ -203,6 +207,10 @@ def _build_thresholded_binary_target(df_feat: pd.DataFrame, mode: str) -> pd.Dat
 
     next_ret = df_feat["Close"].shift(-1) / df_feat["Close"] - 1.0
     min_move = 0.002 if mode == "daily" else 0.0008
+
+    # Retain the realized next-bar return for cost-aware out-of-fold evaluation.
+    # It is explicitly excluded from the feature matrix below.
+    df_feat["forward_return"] = next_ret
 
     df_feat["target"] = np.where(
         next_ret > min_move,
@@ -381,7 +389,15 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         print(f"[CLASS REMAP] Mapping: {class_mapping}")
 
     print("\n[FEATURES] Preparing feature matrix...")
-    exclude_cols = [target_col, "Close", "Open", "High", "Low", "Volume"]
+    exclude_cols = [
+        target_col,
+        "forward_return",
+        "Close",
+        "Open",
+        "High",
+        "Low",
+        "Volume",
+    ]
     feature_cols = [col for col in df_feat.columns if col not in exclude_cols]
 
     X = df_feat[feature_cols].copy()
@@ -514,6 +530,41 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         except Exception as e:
             # print(f"[FEATURE SELECTION] Skipping due to error: {e}")
             print("[FEATURE SELECTION] Skipping SHAP feature selection due to XGBoost shape mismatch.")
+
+    walk_forward_evaluation = None
+    if num_classes == 2:
+        print("\n[WALK-FORWARD] Running expanding-fold evaluation with embargo gaps...")
+        # Give every fold the full pre-selection schema. When the final model
+        # selected a smaller schema, each fold independently selects the same
+        # number of features using only its own fit window.
+        evaluation_X = X.copy()
+        evaluation_returns = pd.to_numeric(
+            df_feat.loc[evaluation_X.index, "forward_return"],
+            errors="coerce",
+        )
+        if evaluation_returns.isna().any():
+            raise ValueError("forward returns contain NaN values during walk-forward evaluation")
+        walk_forward_evaluation = evaluate_walk_forward(
+            X=evaluation_X,
+            y=y.loc[evaluation_X.index],
+            forward_returns=evaluation_returns,
+            model_params=params,
+            mode=mode,
+            n_splits=MODEL_EVAL_WALK_FORWARD_FOLDS,
+            gap_bars=MODEL_EVAL_GAP_BARS,
+            cost_bps=MODEL_EVAL_TRANSACTION_COST_BPS,
+            max_features=len(feature_list),
+        )
+        wf_metrics = walk_forward_evaluation["aggregate"]
+        print(
+            "[WALK-FORWARD] "
+            f"folds={walk_forward_evaluation['n_splits']} "
+            f"trades={wf_metrics['trade_count']} "
+            f"net_return={wf_metrics['net_return']:.2%} "
+            f"profit_factor={wf_metrics['profit_factor']:.3f} "
+            f"max_drawdown={wf_metrics['max_drawdown']:.2%} "
+            f"brier={wf_metrics.get('brier_score')}"
+        )
 
     base_model = model
     final_model = model
@@ -678,6 +729,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         },
         "regime_config": regime_config,
         "metrics": metrics,
+        "walk_forward_evaluation": walk_forward_evaluation,
         "decision_threshold": metrics.get("decision_threshold", 0.5),
         "threshold_optimization": {
             "metric": metrics.get("threshold_metric"),

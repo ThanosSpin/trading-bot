@@ -23,6 +23,7 @@ import joblib
 
 from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
 from predictive_model.model_xgb import train_model, MODEL_DIR
+from predictive_model.model_evaluation import promotion_decision
 from config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
 
 MAX_BACKUPS = 6
@@ -36,23 +37,39 @@ INTRADAY_INTERVAL = "15m"
 
 
 def save_model_with_backup(artifact, symbol: str, mode: str = "daily"):
-    """Save full patched artifact and maintain rolling monthly backups."""
+    """Promote an accepted challenger and maintain rolling monthly backups."""
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     active_path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
-    joblib.dump(artifact, active_path)
-    print(f"✅ Active {mode} model saved: {active_path}")
+    champion = joblib.load(active_path) if os.path.exists(active_path) else None
+    decision = promotion_decision(artifact, champion)
+    artifact["promotion_evaluation"] = decision
+    if not decision["accepted"]:
+        print(
+            f"[PROMOTION REJECTED] {symbol}/{mode}: "
+            + "; ".join(decision["reasons"])
+        )
+        return False
 
     month_tag = datetime.now().strftime("%Y-%m")
     backup_path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb_{month_tag}.pkl")
 
-    if not os.path.exists(backup_path):
+    if os.path.exists(active_path) and not os.path.exists(backup_path):
         shutil.copy2(active_path, backup_path)
         print(f"📦 Monthly backup created: {backup_path}")
     else:
         print(f"ℹ️ Monthly backup for {symbol} ({mode}) in {month_tag} already exists — skipping.")
 
+    temporary_path = f"{active_path}.challenger"
+    joblib.dump(artifact, temporary_path)
+    os.replace(temporary_path, active_path)
+    print(
+        f"✅ Active {mode} model promoted: {active_path} "
+        f"({decision['kind']}, overlap={decision['overlap_samples']})"
+    )
+
     cleanup_old_backups(symbol, mode)
+    return True
 
 
 def cleanup_old_backups(symbol: str, mode: str):
@@ -126,8 +143,8 @@ def train_daily_model(sym: str):
             use_multiclass=USE_MULTICLASS,
         )
 
-        save_model_with_backup(artifact, symbol=sym, mode="daily")
-        print_model_summary(artifact, sym, "daily")
+        if save_model_with_backup(artifact, symbol=sym, mode="daily"):
+            print_model_summary(artifact, sym, "daily")
 
     except Exception as e:
         print(f"[ERROR] Failed to train daily model for {sym}: {e}")
@@ -161,8 +178,8 @@ def train_intraday_models(sym: str):
                 use_multiclass=USE_MULTICLASS,
             )
 
-            save_model_with_backup(artifact, symbol=sym, mode=mode)
-            print_model_summary(artifact, sym, mode)
+            if save_model_with_backup(artifact, symbol=sym, mode=mode):
+                print_model_summary(artifact, sym, mode)
 
         except ValueError as e:
             msg = str(e)

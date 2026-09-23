@@ -100,6 +100,11 @@ VOL_HOLD = 0.0035
 TRAIN_SYMBOLS = ["NVDA", "AAPL", "SPY", "ABBV", "PLTR"]
 SHAP_TOP_N = 40
 
+# Leakage-aware evaluation and promotion assumptions.
+MODEL_EVAL_WALK_FORWARD_FOLDS = 4
+MODEL_EVAL_GAP_BARS = 1
+MODEL_EVAL_TRANSACTION_COST_BPS = 10.0
+
 STOP_LOSS = 0.97
 TAKE_PROFIT = None
 TRAIL_STOP = 0.985
@@ -140,8 +145,8 @@ LIMIT_BUFFER_PCT = 0.01
 # Performance Fee
 # ============================================================
 
-# Performance fee used in the annual Investor / Performance Fee table.
-# Example: 0.2 = 25% - 5% (hurdle_pct) = 20%
+# Performance fee applied to eligible profit after the resource fee and hurdle.
+# The hurdle determines eligible profit; it does not reduce the fee rate.
 RESOURCE_FEE_PCT = 2.0
 HURDLE_PCT = 5.0
 PERFORMANCE_FEE_PCT = 25.0
