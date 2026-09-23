@@ -46,6 +46,7 @@ from config import (
     MODEL_EVAL_GAP_BARS,
     MODEL_EVAL_TRANSACTION_COST_BPS,
     MODEL_EVAL_WALK_FORWARD_FOLDS,
+    MODEL_TRAIN_N_JOBS,
 )
 
 MODEL_DIR = "models"
@@ -480,7 +481,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         "reg_alpha": 0.05,
         "reg_lambda": 1.0,
         "random_state": 42,
-        "n_jobs": -1,
+        "n_jobs": MODEL_TRAIN_N_JOBS,
     }
 
     if mode == "daily":
@@ -577,7 +578,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
             model,
             method=calibration_method,
             cv="prefit",
-            n_jobs=-1,
+            n_jobs=MODEL_TRAIN_N_JOBS,
         )
         calibrated_model.fit(X_cal, y_cal)
         final_model = calibrated_model

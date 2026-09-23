@@ -104,6 +104,9 @@ SHAP_TOP_N = 40
 MODEL_EVAL_WALK_FORWARD_FOLDS = 4
 MODEL_EVAL_GAP_BARS = 1
 MODEL_EVAL_TRANSACTION_COST_BPS = 10.0
+# Keep training responsive on the small VM. Models are trained sequentially,
+# so one worker avoids CPU saturation and calibration process duplication.
+MODEL_TRAIN_N_JOBS = 1
 
 STOP_LOSS = 0.97
 TAKE_PROFIT = None

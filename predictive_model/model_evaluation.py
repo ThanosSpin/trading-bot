@@ -200,7 +200,10 @@ def evaluate_walk_forward(
             estimator,
             method="sigmoid",
             cv="prefit",
-            n_jobs=-1,
+            # The estimator already carries the configured worker limit.
+            # Keeping calibration single-process avoids duplicating a fitted
+            # XGBoost model in memory on small VMs.
+            n_jobs=1,
         )
         calibrated.fit(X_cal, y_cal)
         cal_probability = calibrated.predict_proba(X_cal)[:, 1]
