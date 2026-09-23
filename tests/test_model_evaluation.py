@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from predictive_model.model_evaluation import (
+    EVALUATION_VERSION,
     cost_aware_metrics,
     evaluate_walk_forward,
     promotion_decision,
@@ -29,7 +30,20 @@ class ModelEvaluationTests(unittest.TestCase):
         free = cost_aware_metrics(actual, probability, returns, 0.5, cost_bps=0)
         costly = cost_aware_metrics(actual, probability, returns, 0.5, cost_bps=10)
         self.assertLess(costly["net_return"], free["net_return"])
-        self.assertEqual(costly["trade_count"], 3)
+        self.assertEqual(costly["trade_count"], 2)
+        self.assertEqual(costly["bars_in_market"], 3)
+
+    def test_fold_boundary_resets_a_held_position(self):
+        metrics = cost_aware_metrics(
+            actual=np.ones(4),
+            probability=np.full(4, 0.9),
+            forward_returns=np.full(4, 0.002),
+            threshold=0.5,
+            cost_bps=10,
+            group_ids=np.array([1, 1, 2, 2]),
+        )
+        self.assertEqual(metrics["trade_count"], 2)
+        self.assertEqual(metrics["bars_in_market"], 4)
 
     def test_walk_forward_evaluation_records_out_of_fold_predictions(self):
         rows = 180
@@ -86,7 +100,7 @@ class ModelEvaluationTests(unittest.TestCase):
         candidate = {
             "mode": "daily",
             "walk_forward_evaluation": {
-                "version": 1,
+                "version": EVALUATION_VERSION,
                 "n_splits": 4,
                 "gap_bars": 1,
                 "cost_bps": 10.0,
@@ -134,7 +148,7 @@ class ModelEvaluationTests(unittest.TestCase):
         champion = {
             "mode": "daily",
             "walk_forward_evaluation": {
-                "version": 1,
+                "version": EVALUATION_VERSION,
                 "n_splits": 4,
                 "gap_bars": 1,
                 "cost_bps": 10.0,
@@ -145,7 +159,7 @@ class ModelEvaluationTests(unittest.TestCase):
         challenger = {
             "mode": "daily",
             "walk_forward_evaluation": {
-                "version": 1,
+                "version": EVALUATION_VERSION,
                 "n_splits": 4,
                 "gap_bars": 1,
                 "cost_bps": 10.0,

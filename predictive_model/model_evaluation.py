@@ -12,7 +12,7 @@ from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, log_loss
 from xgboost import XGBClassifier
 
 
-EVALUATION_VERSION = 1
+EVALUATION_VERSION = 2
 DEFAULT_COST_BPS = 10.0
 
 
@@ -75,8 +75,9 @@ def cost_aware_metrics(
     threshold: float,
     cost_bps: float = DEFAULT_COST_BPS,
     periods_per_year: int = 252,
+    group_ids: Optional[np.ndarray] = None,
 ) -> dict:
-    """Evaluate a long signal after an explicit round-trip cost assumption."""
+    """Evaluate a held long position after an explicit round-trip cost assumption."""
     actual = np.asarray(actual, dtype=int)
     probability = np.asarray(probability, dtype=float)
     forward_returns = np.asarray(forward_returns, dtype=float)
@@ -85,10 +86,35 @@ def cost_aware_metrics(
     if len(actual) == 0:
         raise ValueError("cannot evaluate an empty prediction set")
 
+    if group_ids is None:
+        group_ids = np.zeros(len(actual), dtype=int)
+    else:
+        group_ids = np.asarray(group_ids)
+        if len(group_ids) != len(actual):
+            raise ValueError("group_ids must match the evaluation arrays")
+
     signal = probability >= float(threshold)
     per_trade_cost = float(cost_bps) / 10000.0
-    strategy_returns = np.where(signal, forward_returns - per_trade_cost, 0.0)
-    trade_returns = strategy_returns[signal]
+    previous_signal = np.r_[False, signal[:-1]]
+    group_changed = np.r_[True, group_ids[1:] != group_ids[:-1]]
+    entries = signal & (~previous_signal | group_changed)
+
+    # Consecutive positive bars represent one continuously held position.
+    # Charge the configured round-trip allowance once when that position opens.
+    strategy_returns = np.where(signal, forward_returns, 0.0)
+    strategy_returns[entries] -= per_trade_cost
+
+    trade_returns = []
+    for start in np.flatnonzero(entries):
+        end = start + 1
+        while (
+            end < len(signal)
+            and signal[end]
+            and group_ids[end] == group_ids[start]
+        ):
+            end += 1
+        trade_returns.append(float(np.prod(1.0 + strategy_returns[start:end]) - 1.0))
+    trade_returns = np.asarray(trade_returns, dtype=float)
     equity = np.cumprod(1.0 + strategy_returns)
     running_max = np.maximum.accumulate(equity)
     drawdown = equity / running_max - 1.0
@@ -123,7 +149,8 @@ def cost_aware_metrics(
         ),
         "threshold": float(threshold),
         "cost_bps": float(cost_bps),
-        "trade_count": int(signal.sum()),
+        "trade_count": int(entries.sum()),
+        "bars_in_market": int(signal.sum()),
         "win_rate": float(np.mean(trade_returns > 0)) if len(trade_returns) else 0.0,
         "average_net_trade_return": float(np.mean(trade_returns)) if len(trade_returns) else 0.0,
         "net_return": float(equity[-1] - 1.0),
@@ -291,6 +318,11 @@ def _metrics_from_signals(
         threshold=0.5,
         cost_bps=cost_bps,
         periods_per_year=periods_per_year,
+        group_ids=(
+            frame["fold"].to_numpy()
+            if "fold" in frame.columns
+            else None
+        ),
     )
     metrics["accuracy"] = float(accuracy_score(actual, signals.astype(int)))
     metrics["brier_score"] = (
@@ -370,6 +402,7 @@ def promotion_decision(candidate: dict, champion: Optional[dict]) -> dict:
         {
             "actual": overlap["actual_candidate"],
             "forward_return": overlap["forward_return_candidate"],
+            "fold": overlap["fold_candidate"],
         }
     )
     candidate_comparison = comparison_frame.assign(
