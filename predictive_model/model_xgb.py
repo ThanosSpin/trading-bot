@@ -213,13 +213,20 @@ def _build_thresholded_binary_target(df_feat: pd.DataFrame, mode: str) -> pd.Dat
     # It is explicitly excluded from the feature matrix below.
     df_feat["forward_return"] = next_ret
 
+    # Training keeps a no-trade band, but deployment evaluation must include
+    # every eligible bar. Neutral moves are therefore negative evaluation
+    # outcomes even though they are excluded from model fitting.
+    df_feat["evaluation_target"] = np.where(
+        next_ret.isna(),
+        np.nan,
+        (next_ret > min_move).astype(int),
+    )
+
     df_feat["target"] = np.where(
         next_ret > min_move,
         1,
         np.where(next_ret < -min_move, 0, np.nan),
     )
-    df_feat = df_feat.dropna(subset=["target"]).copy()
-    df_feat["target"] = df_feat["target"].astype(int)
     return df_feat
 
 
@@ -325,6 +332,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
 
     df = df.copy()
     regime_config = None
+    binary_evaluation_frame = None
 
     print(f"\n[FEATURES] Building engineered features for {symbol}/{mode}...")
     if mode == "daily":
@@ -357,6 +365,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
     else:
         print("\n[TARGET] Creating thresholded binary target...")
         df_feat = _build_thresholded_binary_target(df_feat, mode=mode)
+        binary_evaluation_frame = df_feat.copy()
         target_col = "target"
         num_classes = 2
         objective = "binary:logistic"
@@ -393,6 +402,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
     exclude_cols = [
         target_col,
         "forward_return",
+        "evaluation_target",
         "Close",
         "Open",
         "High",
@@ -434,6 +444,40 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         "features": feature_list,
         "feature_count": len(feature_list),
     }
+
+    evaluation_X = None
+    evaluation_training_target = None
+    evaluation_target = None
+    evaluation_returns = None
+    if num_classes == 2:
+        evaluation_columns = list(X.columns)
+        evaluation_X = _clean_feature_dataframe(
+            binary_evaluation_frame.loc[:, evaluation_columns]
+        )
+        evaluation_bundle = pd.concat(
+            [
+                evaluation_X,
+                pd.to_numeric(binary_evaluation_frame["target"], errors="coerce").rename(
+                    "training_target"
+                ),
+                pd.to_numeric(
+                    binary_evaluation_frame["evaluation_target"], errors="coerce"
+                ).rename("evaluation_target"),
+                pd.to_numeric(
+                    binary_evaluation_frame["forward_return"], errors="coerce"
+                ).rename("forward_return"),
+            ],
+            axis=1,
+        ).replace([np.inf, -np.inf], np.nan)
+        # Feature and realized-return values are required on every evaluation
+        # row. training_target intentionally remains nullable for neutral bars.
+        evaluation_bundle = evaluation_bundle.dropna(
+            subset=evaluation_columns + ["evaluation_target", "forward_return"]
+        )
+        evaluation_X = evaluation_bundle.loc[:, evaluation_columns].copy()
+        evaluation_training_target = evaluation_bundle["training_target"].copy()
+        evaluation_target = evaluation_bundle["evaluation_target"].astype(int)
+        evaluation_returns = evaluation_bundle["forward_return"].copy()
 
     X_train, y_train, X_cal, y_cal, X_test, y_test = _time_ordered_train_cal_test_split(X, y)
 
@@ -538,17 +582,11 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         # Give every fold the full pre-selection schema. When the final model
         # selected a smaller schema, each fold independently selects the same
         # number of features using only its own fit window.
-        evaluation_X = X.copy()
-        evaluation_returns = pd.to_numeric(
-            df_feat.loc[evaluation_X.index, "forward_return"],
-            errors="coerce",
-        )
-        if evaluation_returns.isna().any():
-            raise ValueError("forward returns contain NaN values during walk-forward evaluation")
         walk_forward_evaluation = evaluate_walk_forward(
             X=evaluation_X,
-            y=y.loc[evaluation_X.index],
+            y=evaluation_target,
             forward_returns=evaluation_returns,
+            training_target=evaluation_training_target,
             model_params=params,
             mode=mode,
             n_splits=MODEL_EVAL_WALK_FORWARD_FOLDS,

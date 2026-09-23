@@ -12,7 +12,7 @@ from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, log_loss
 from xgboost import XGBClassifier
 
 
-EVALUATION_VERSION = 2
+EVALUATION_VERSION = 3
 DEFAULT_COST_BPS = 10.0
 
 
@@ -181,8 +181,16 @@ def evaluate_walk_forward(
     gap_bars: int = 1,
     cost_bps: float = DEFAULT_COST_BPS,
     max_features: Optional[int] = None,
+    training_target: Optional[pd.Series] = None,
 ) -> dict:
-    """Fit expanding folds and retain out-of-fold records for later comparison."""
+    """Fit expanding folds and test every eligible out-of-fold market bar."""
+    if training_target is None:
+        training_target = y.copy()
+    if not (
+        len(X) == len(y) == len(forward_returns) == len(training_target)
+    ):
+        raise ValueError("walk-forward inputs must have identical lengths")
+
     folds = walk_forward_splits(len(X), n_splits=n_splits, gap_bars=gap_bars)
     records = []
     fold_summaries = []
@@ -196,12 +204,19 @@ def evaluate_walk_forward(
             raise ValueError(f"fold {fold['fold']} has insufficient fit rows")
 
         X_fit = X.iloc[:fit_end]
-        y_fit = y.iloc[:fit_end]
+        y_fit = training_target.iloc[:fit_end]
         X_cal = X.iloc[fit_end + gap_bars : train_end]
-        y_cal = y.iloc[fit_end + gap_bars : train_end]
+        y_cal = training_target.iloc[fit_end + gap_bars : train_end]
         X_test = X.iloc[fold["test_start"] : fold["test_end"]]
         y_test = y.iloc[fold["test_start"] : fold["test_end"]]
         returns_test = forward_returns.iloc[fold["test_start"] : fold["test_end"]]
+
+        fit_mask = y_fit.notna()
+        calibration_mask = y_cal.notna()
+        X_fit = X_fit.loc[fit_mask]
+        y_fit = y_fit.loc[fit_mask].astype(int)
+        X_cal = X_cal.loc[calibration_mask]
+        y_cal = y_cal.loc[calibration_mask].astype(int)
 
         if y_fit.nunique() < 2 or y_cal.nunique() < 2:
             raise ValueError(f"fold {fold['fold']} lacks two classes in fit/calibration")
@@ -249,6 +264,7 @@ def evaluate_walk_forward(
                 **fold,
                 "fit_rows": int(len(X_fit)),
                 "calibration_rows": int(len(X_cal)),
+                "test_rows_all_market_bars": int(len(X_test)),
                 "feature_count": int(len(fold_features)),
                 "train_end_timestamp": str(X.index[train_end - 1]),
                 "test_start_timestamp": str(X_test.index[0]),
@@ -285,6 +301,7 @@ def evaluate_walk_forward(
     return {
         "version": EVALUATION_VERSION,
         "method": "expanding_walk_forward_with_embargo",
+        "evaluation_universe": "all_eligible_bars_including_neutral_moves",
         "mode": mode,
         "n_splits": len(fold_summaries),
         "gap_bars": int(gap_bars),

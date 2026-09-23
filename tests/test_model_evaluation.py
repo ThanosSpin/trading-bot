@@ -57,6 +57,8 @@ class ModelEvaluationTests(unittest.TestCase):
             index=index,
         )
         y = pd.Series(signal.astype(int), index=index)
+        training_target = y.astype(float).copy()
+        training_target.iloc[::3] = np.nan
         returns = pd.Series(np.where(y == 1, 0.01, -0.01), index=index)
         result = evaluate_walk_forward(
             X,
@@ -76,9 +78,17 @@ class ModelEvaluationTests(unittest.TestCase):
             n_splits=3,
             gap_bars=1,
             cost_bps=10,
+            training_target=training_target,
         )
         self.assertEqual(result["n_splits"], 3)
         self.assertGreater(len(result["predictions"]), 0)
+        record_index = pd.to_datetime(
+            [record["timestamp"] for record in result["predictions"]]
+        )
+        self.assertGreater(
+            len(record_index),
+            int(training_target.reindex(record_index).notna().sum()),
+        )
         self.assertGreater(result["aggregate"]["trade_count"], 0)
         for fold in result["folds"]:
             self.assertEqual(fold["test_start"] - fold["train_end"], 1)
