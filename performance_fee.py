@@ -108,7 +108,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--perf-fee",
         type=float,
-        default=25.0,
+        default=20.0,
         help="Performance fee as %% of excess profit (default: 15.0)",
     )
     parser.add_argument(
