@@ -75,6 +75,9 @@ INTRADAY_WEIGHT = 0.65
 MIN_INTRADAY_BARS_FOR_FEATURES = 25
 RS_MARGIN = 0.05
 USE_MULTICLASS_MODELS = False
+# Train a meaningful-move gate followed by conditional direction. Existing
+# binary and multiclass artifacts remain loadable for champion comparison.
+USE_TWO_STAGE_TARGETS = True
 
 SPY_SYMBOL = "SPY"
 PRICE_WEAK_THRESHOLD = -0.01 

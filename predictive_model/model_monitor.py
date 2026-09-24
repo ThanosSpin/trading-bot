@@ -64,6 +64,9 @@ def log_prediction(symbol: str, mode: str, predicted_prob: float, price: float, 
         entry['bullish_prob'] = prediction_details.get('bullish_prob')
         entry['bearish_prob'] = prediction_details.get('bearish_prob')
         entry['flat_prob'] = prediction_details.get('flat_prob')
+        entry['movement_prob'] = prediction_details.get('movement_prob')
+        entry['movement_threshold'] = prediction_details.get('movement_threshold')
+        entry['target_horizon'] = prediction_details.get('target_horizon')
         
         # Class breakdown
         breakdown = prediction_details.get('class_breakdown', {})
@@ -77,6 +80,15 @@ def log_prediction(symbol: str, mode: str, predicted_prob: float, price: float, 
     df_entry = pd.DataFrame([entry])
     
     if os.path.exists(log_file):
+        existing_columns = list(pd.read_csv(log_file, nrows=0).columns)
+        new_columns = [column for column in df_entry.columns if column not in existing_columns]
+        if new_columns:
+            existing = pd.read_csv(log_file)
+            for column in new_columns:
+                existing[column] = np.nan
+            existing_columns.extend(new_columns)
+            existing.to_csv(log_file, mode='w', header=True, index=False)
+        df_entry = df_entry.reindex(columns=existing_columns)
         df_entry.to_csv(log_file, mode='a', header=False, index=False)
     else:
         df_entry.to_csv(log_file, mode='w', header=True, index=False)

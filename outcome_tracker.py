@@ -207,7 +207,14 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
         )
 
         # Preserve outcomes already resolved by earlier runs.
-        for column in ("actual_outcome", "actual_price", "return_pct", "outcome_horizon"):
+        for column in (
+            "actual_outcome",
+            "actual_movement",
+            "actual_direction",
+            "actual_price",
+            "return_pct",
+            "outcome_horizon",
+        ):
             if column not in df.columns:
                 df[column] = np.nan
 
@@ -249,9 +256,13 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
 
             mode = str(row.get("mode", "")).lower()
             if mode.startswith("intraday"):
-                actual_price = get_intraday_horizon_close(symbol, pred_time, 15)
+                target_horizon = str(row.get("target_horizon", "")).lower()
+                horizon_minutes = 60 if target_horizon == "60min" else 15
+                actual_price = get_intraday_horizon_close(
+                    symbol, pred_time, horizon_minutes
+                )
                 min_move = 0.0008
-                outcome_horizon = "15min"
+                outcome_horizon = f"{horizon_minutes}min"
             else:
                 actual_price = get_next_day_close(symbol, pred_time)
                 min_move = 0.002
@@ -265,16 +276,19 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
                 print(f"[DEBUG] {symbol} row {idx}: ret is None, skipping")
                 continue
 
-            # Apply min-move band
+            # actual_outcome matches deployment evaluation: only a meaningful
+            # upward move is positive; neutral and downward bars are negative.
+            meaningful_move = abs(ret) >= min_move
             if ret >= min_move:
                 actual_outcome = 1
-            elif ret <= -min_move:
-                actual_outcome = 0
             else:
-                print(f"[DEBUG] {symbol} row {idx}: ret {ret:.4%} inside noise band, skipping")
-                continue
+                actual_outcome = 0
 
             df.loc[idx, "actual_outcome"] = actual_outcome
+            df.loc[idx, "actual_movement"] = int(meaningful_move)
+            df.loc[idx, "actual_direction"] = (
+                int(ret > 0) if meaningful_move else np.nan
+            )
             df.loc[idx, "actual_price"] = actual_price
             df.loc[idx, "return_pct"] = ret * 100.0
             df.loc[idx, "outcome_horizon"] = outcome_horizon

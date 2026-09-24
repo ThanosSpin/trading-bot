@@ -53,6 +53,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 MODEL_DIR = Path(config.MODEL_DIR).resolve()
 REPORT_DIR = PROJECT_ROOT / "logs" / "daily_retrain"
 USE_MULTICLASS = bool(config.USE_MULTICLASS_MODELS)
+USE_TWO_STAGE = bool(config.USE_TWO_STAGE_TARGETS)
 
 
 def _symbols(requested: Optional[Iterable[str]] = None) -> List[str]:
@@ -234,6 +235,7 @@ def _train_candidate(symbol: str, run_dir: Path) -> Tuple[dict, Path]:
         symbol=symbol,
         mode="daily",
         use_multiclass=USE_MULTICLASS,
+        use_two_stage=USE_TWO_STAGE,
     )
     validate_artifact(artifact, symbol, "daily")
     accepted, reasons = _candidate_quality(artifact)

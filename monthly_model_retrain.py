@@ -40,6 +40,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 MODEL_DIR = Path(config.MODEL_DIR).resolve()
 REPORT_DIR = PROJECT_ROOT / "logs" / "monthly_retrain"
 USE_MULTICLASS = bool(config.USE_MULTICLASS_MODELS)
+USE_TWO_STAGE = bool(config.USE_TWO_STAGE_TARGETS)
 
 
 def _symbols(requested: Optional[Iterable[str]] = None) -> List[str]:
@@ -93,6 +94,16 @@ def validate_artifact(
         raise ValueError("artifact has no selected features")
     if not artifact.get("calibrated"):
         raise ValueError("artifact calibration did not succeed")
+    if artifact.get("target_type") == "two_stage":
+        if artifact.get("movement_model") is None:
+            raise ValueError("two-stage artifact has no movement_model")
+        if not _finite_positive(artifact.get("movement_threshold")):
+            raise ValueError("two-stage artifact has an invalid movement_threshold")
+        expected_horizon = "next_trading_session" if mode == "daily" else "60min"
+        if artifact.get("target_horizon") != expected_horizon:
+            raise ValueError(
+                f"two-stage target horizon mismatch: {artifact.get('target_horizon')!r}"
+            )
 
     split = artifact.get("split_metadata") or {}
     for key in ("train_samples", "calibration_samples", "test_samples"):
@@ -195,6 +206,7 @@ def _train_to_stage(
                     symbol=symbol,
                     mode=mode,
                     use_multiclass=USE_MULTICLASS,
+                    use_two_stage=USE_TWO_STAGE,
                 )
                 validate_artifact(artifact, symbol, mode)
 
@@ -380,6 +392,7 @@ def main() -> int:
     print(f"[MONTHLY] Model directory: {MODEL_DIR}")
     print(f"[MONTHLY] Intraday history: {INTRADAY_PERIOD} @ {INTRADAY_INTERVAL}")
     print(f"[MONTHLY] Multiclass: {USE_MULTICLASS}")
+    print(f"[MONTHLY] Two-stage targets: {USE_TWO_STAGE}")
 
     if args.validate_only:
         summaries, failures = _validate_existing(symbols)

@@ -47,6 +47,7 @@ from config import (
     MODEL_EVAL_TRANSACTION_COST_BPS,
     MODEL_EVAL_WALK_FORWARD_FOLDS,
     MODEL_TRAIN_N_JOBS,
+    USE_TWO_STAGE_TARGETS,
 )
 
 MODEL_DIR = "models"
@@ -198,7 +199,11 @@ def _time_ordered_train_cal_test_split(
     return X_train, y_train, X_cal, y_cal, X_test, y_test
 
 
-def _build_thresholded_binary_target(df_feat: pd.DataFrame, mode: str) -> pd.DataFrame:
+def _build_thresholded_binary_target(
+    df_feat: pd.DataFrame,
+    mode: str,
+    use_two_stage: bool = False,
+) -> pd.DataFrame:
     """
     Binary target with a no-trade band to reduce micro-noise labels.
     """
@@ -206,7 +211,8 @@ def _build_thresholded_binary_target(df_feat: pd.DataFrame, mode: str) -> pd.Dat
     if "Close" not in df_feat.columns:
         raise ValueError("Close column is required for target creation")
 
-    next_ret = df_feat["Close"].shift(-1) / df_feat["Close"] - 1.0
+    horizon_bars = 1 if mode == "daily" else (4 if use_two_stage else 1)
+    next_ret = df_feat["Close"].shift(-horizon_bars) / df_feat["Close"] - 1.0
     min_move = 0.002 if mode == "daily" else 0.0008
 
     # Retain the realized next-bar return for cost-aware out-of-fold evaluation.
@@ -220,6 +226,11 @@ def _build_thresholded_binary_target(df_feat: pd.DataFrame, mode: str) -> pd.Dat
         next_ret.isna(),
         np.nan,
         (next_ret > min_move).astype(int),
+    )
+    df_feat["movement_target"] = np.where(
+        next_ret.isna(),
+        np.nan,
+        (next_ret.abs() >= min_move).astype(int),
     )
 
     df_feat["target"] = np.where(
@@ -321,7 +332,13 @@ def _filter_intraday_rows_by_mode(
 # ---------------------------------------------------------
 # TRAIN MODEL
 # ---------------------------------------------------------
-def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multiclass: bool = False):
+def train_model(
+    df: pd.DataFrame,
+    symbol: str,
+    mode: str = "daily",
+    use_multiclass: bool = False,
+    use_two_stage: Optional[bool] = None,
+):
     """
     Train XGB model with chronological train/calibration/test split.
     Calibration is performed only on the calibration window, never on the final test window.
@@ -329,6 +346,11 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
     from class_balancing import analyze_class_balance, calculate_scale_pos_weight
     from target_engineering import create_multiclass_target, print_target_distribution
     from predictive_model.feature_selection import select_features_with_shap
+
+    if use_two_stage is None:
+        use_two_stage = bool(USE_TWO_STAGE_TARGETS)
+    if use_multiclass and use_two_stage:
+        raise ValueError("multiclass and two-stage targets cannot be enabled together")
 
     df = df.copy()
     regime_config = None
@@ -364,7 +386,9 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         print_target_distribution(df_feat, target_col)
     else:
         print("\n[TARGET] Creating thresholded binary target...")
-        df_feat = _build_thresholded_binary_target(df_feat, mode=mode)
+        df_feat = _build_thresholded_binary_target(
+            df_feat, mode=mode, use_two_stage=use_two_stage
+        )
         binary_evaluation_frame = df_feat.copy()
         target_col = "target"
         num_classes = 2
@@ -403,6 +427,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         target_col,
         "forward_return",
         "evaluation_target",
+        "movement_target",
         "Close",
         "Open",
         "High",
@@ -449,6 +474,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
     evaluation_training_target = None
     evaluation_target = None
     evaluation_returns = None
+    evaluation_movement_target = None
     if num_classes == 2:
         evaluation_columns = list(X.columns)
         evaluation_X = _clean_feature_dataframe(
@@ -466,18 +492,23 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
                 pd.to_numeric(
                     binary_evaluation_frame["forward_return"], errors="coerce"
                 ).rename("forward_return"),
+                pd.to_numeric(
+                    binary_evaluation_frame["movement_target"], errors="coerce"
+                ).rename("movement_target"),
             ],
             axis=1,
         ).replace([np.inf, -np.inf], np.nan)
         # Feature and realized-return values are required on every evaluation
         # row. training_target intentionally remains nullable for neutral bars.
         evaluation_bundle = evaluation_bundle.dropna(
-            subset=evaluation_columns + ["evaluation_target", "forward_return"]
+            subset=evaluation_columns
+            + ["evaluation_target", "forward_return", "movement_target"]
         )
         evaluation_X = evaluation_bundle.loc[:, evaluation_columns].copy()
         evaluation_training_target = evaluation_bundle["training_target"].copy()
         evaluation_target = evaluation_bundle["evaluation_target"].astype(int)
         evaluation_returns = evaluation_bundle["forward_return"].copy()
+        evaluation_movement_target = evaluation_bundle["movement_target"].astype(int)
 
     X_train, y_train, X_cal, y_cal, X_test, y_test = _time_ordered_train_cal_test_split(X, y)
 
@@ -593,6 +624,10 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
             gap_bars=MODEL_EVAL_GAP_BARS,
             cost_bps=MODEL_EVAL_TRANSACTION_COST_BPS,
             max_features=len(feature_list),
+            movement_target=(evaluation_movement_target if use_two_stage else None),
+            holding_period_bars=(
+                4 if use_two_stage and mode != "daily" else 1
+            ),
         )
         wf_metrics = walk_forward_evaluation["aggregate"]
         print(
@@ -626,6 +661,62 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         print(f"[CALIBRATION] Failed to calibrate: {e}")
         print("[CALIBRATION] Using uncalibrated model as fallback")
         final_model = model
+
+    movement_model = None
+    movement_threshold = None
+    movement_calibrated = False
+    if use_two_stage and num_classes == 2:
+        print("\n[TWO-STAGE] Training meaningful-move gate...")
+        movement_X = evaluation_X.loc[:, feature_list].copy()
+        movement_y = evaluation_movement_target.loc[movement_X.index].astype(int)
+        (
+            move_X_train,
+            move_y_train,
+            move_X_cal,
+            move_y_cal,
+            _move_X_test,
+            _move_y_test,
+        ) = _time_ordered_train_cal_test_split(movement_X, movement_y)
+        if move_y_train.nunique() < 2 or move_y_cal.nunique() < 2:
+            raise ValueError("Two-stage movement model requires two train/calibration classes")
+        movement_params = dict(params)
+        movement_params.pop("scale_pos_weight", None)
+        move_neg = int((move_y_train == 0).sum())
+        move_pos = int((move_y_train == 1).sum())
+        if move_neg and move_pos:
+            move_weight = move_neg / move_pos
+            if not 0.83 <= move_weight <= 1.2:
+                movement_params["scale_pos_weight"] = move_weight
+        movement_base = XGBClassifier(**movement_params)
+        movement_base.fit(
+            move_X_train,
+            move_y_train,
+            eval_set=[(move_X_cal, move_y_cal)],
+            verbose=False,
+        )
+        movement_model = CalibratedClassifierCV(
+            movement_base,
+            method="sigmoid",
+            cv="prefit",
+            n_jobs=MODEL_TRAIN_N_JOBS,
+        )
+        movement_model.fit(move_X_cal, move_y_cal)
+        movement_cal_probability = movement_model.predict_proba(move_X_cal)[:, 1]
+        movement_threshold = float(
+            optimize_binary_decision_threshold(
+                move_y_cal,
+                movement_cal_probability,
+                metric="f1",
+                min_threshold=0.35,
+                max_threshold=0.65,
+                step=0.01,
+            )["best_threshold"]
+        )
+        movement_calibrated = True
+        print(
+            f"[TWO-STAGE] Meaningful-move threshold={movement_threshold:.3f} "
+            f"horizon_bars={1 if mode == 'daily' else 4}"
+        )
 
     print("\n[EVALUATION] Computing metrics on final test set...")
     metrics = {}
@@ -751,12 +842,17 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
 
     return {
         "model": final_model,
+        "movement_model": movement_model,
+        "movement_threshold": movement_threshold,
         "base_model": base_model,
         "features": feature_list,
         "feature_schema": {
             "features": feature_list,
             "feature_count": len(feature_list),
-            "target_type": "multiclass" if use_multiclass else "binary",
+            "target_type": (
+                "multiclass" if use_multiclass else
+                ("two_stage" if use_two_stage else "binary")
+            ),
         },
         "full_feature_schema": full_feature_schema,
         "selected_feature_metadata": selected_feature_metadata,
@@ -779,9 +875,17 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
         "mode": mode,
-        "calibrated": calibrated,
+        "calibrated": calibrated and (movement_calibrated if use_two_stage else True),
         "num_classes": num_classes,
-        "target_type": "multiclass" if use_multiclass else "binary",
+        "target_type": (
+            "multiclass" if use_multiclass else
+            ("two_stage" if use_two_stage else "binary")
+        ),
+        "target_horizon_bars": 1 if mode == "daily" else (4 if use_two_stage else 1),
+        "target_horizon": (
+            "next_trading_session" if mode == "daily" else
+            ("60min" if use_two_stage else "15min")
+        ),
         "class_weighted": scale_pos_weight is not None,
     }
 
@@ -833,6 +937,39 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         X = latest.loc[:, feat_cols].copy()
 
         proba = model.predict_proba(X)[0]
+
+        if target_type == "two_stage":
+            movement_model = model_dict.get("movement_model")
+            if movement_model is None:
+                raise ValueError("Two-stage artifact is missing movement_model")
+            direction_probability = float(proba[1])
+            movement_probability = float(movement_model.predict_proba(X)[0][1])
+            movement_threshold = float(model_dict.get("movement_threshold", 0.5))
+            movement_expected = movement_probability >= movement_threshold
+            bullish_probability = movement_probability * direction_probability
+            bearish_probability = movement_probability * (1.0 - direction_probability)
+            flat_probability = 1.0 - movement_probability
+            final_probability = direction_probability if movement_expected else 0.5
+            decision_threshold = float(model_dict.get("decision_threshold", 0.5))
+            return {
+                "final_prob": final_probability,
+                "direction_prob": direction_probability,
+                "movement_prob": movement_probability,
+                "movement_threshold": movement_threshold,
+                "movement_expected": movement_expected,
+                "bullish_prob": bullish_probability,
+                "bearish_prob": bearish_probability,
+                "flat_prob": flat_probability,
+                "decision_threshold": decision_threshold,
+                "position_size": probability_to_position_size(
+                    final_probability, decision_threshold=decision_threshold
+                ),
+                "top_features": model_dict.get("feature_importance", {}).get(
+                    "top_features", []
+                )[:5],
+                "model_type": "two_stage",
+                "target_horizon": model_dict.get("target_horizon"),
+            }
 
         if num_classes == 2 or target_type == "binary":
             prob = float(proba[1])
