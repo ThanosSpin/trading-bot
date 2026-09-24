@@ -261,7 +261,7 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
                 actual_price = get_intraday_horizon_close(
                     symbol, pred_time, horizon_minutes
                 )
-                min_move = 0.0008
+                min_move = 0.002 if horizon_minutes == 60 else 0.0008
                 outcome_horizon = f"{horizon_minutes}min"
             else:
                 actual_price = get_next_day_close(symbol, pred_time)

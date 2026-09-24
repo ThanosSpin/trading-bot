@@ -27,6 +27,16 @@ class TwoStageTargetTests(unittest.TestCase):
         self.assertAlmostEqual(labeled.loc[0, "forward_return"], 0.04)
         self.assertTrue(np.isnan(labeled.loc[2, "forward_return"]))
 
+    def test_sixty_minute_movement_band_is_two_tenths_percent(self):
+        frame = pd.DataFrame(
+            {"Close": [100.0, 100.0, 100.0, 100.0, 100.1, 100.3]}
+        )
+        labeled = _build_thresholded_binary_target(
+            frame, mode="intraday_mom", use_two_stage=True
+        )
+        self.assertEqual(labeled.loc[0, "movement_target"], 0)
+        self.assertEqual(labeled.loc[1, "movement_target"], 1)
+
     def test_low_movement_probability_returns_neutral_strategy_score(self):
         artifact = {
             "model": _ProbabilityModel(0.8),

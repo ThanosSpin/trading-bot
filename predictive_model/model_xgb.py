@@ -213,7 +213,10 @@ def _build_thresholded_binary_target(
 
     horizon_bars = 1 if mode == "daily" else (4 if use_two_stage else 1)
     next_ret = df_feat["Close"].shift(-horizon_bars) / df_feat["Close"] - 1.0
-    min_move = 0.002 if mode == "daily" else 0.0008
+    # A four-bar intraday horizon needs a wider meaningful-move band than the
+    # legacy one-bar target; otherwise momentum-regime calibration windows can
+    # contain almost no neutral observations for the movement classifier.
+    min_move = 0.002 if mode == "daily" or use_two_stage else 0.0008
 
     # Retain the realized next-bar return for cost-aware out-of-fold evaluation.
     # It is explicitly excluded from the feature matrix below.
