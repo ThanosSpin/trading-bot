@@ -117,6 +117,19 @@ def evaluate_predictions(
     try:
         df = pd.read_csv(path)
 
+        # Fresh prediction logs do not have outcome columns until
+        # outcome_tracker.py has resolved at least one prediction horizon.
+        # That is a normal monitoring state, not an evaluation error.
+        required_columns = {'actual_outcome', 'predicted_prob'}
+        if not required_columns.issubset(df.columns):
+            return {
+                'sample_size': 0,
+                'accuracy': 0.0,
+                'brier_score': 1.0,
+                'calibration_error': 0.0,
+                'log_loss': 10.0
+            }
+
         # ✅ Convert timestamp to datetime
         if 'timestamp' in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
