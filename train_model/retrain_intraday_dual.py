@@ -20,6 +20,7 @@ import joblib
 from predictive_model.data_loader import fetch_historical_data
 from predictive_model.features import _clean_columns
 from predictive_model.model_xgb import train_model, MODEL_DIR
+from predictive_model.model_evaluation import promotion_decision
 from config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS
 
 INTRADAY_LOOKBACK_DAYS = 60
@@ -29,7 +30,7 @@ FORCE_RETRAIN = True
 
 
 def _save_artifact(artifact, symbol: str, mode: str) -> bool:
-    """Save full artifact returned by patched train_model()."""
+    """Promote a challenger only when it passes the shared evaluation gate."""
     model_dir = MODEL_DIR if MODEL_DIR else "models"
     os.makedirs(model_dir, exist_ok=True)
 
@@ -37,11 +38,26 @@ def _save_artifact(artifact, symbol: str, mode: str) -> bool:
     abs_path = os.path.abspath(path)
 
     try:
-        joblib.dump(artifact, path)
+        champion = joblib.load(path) if os.path.exists(path) else None
+        decision = promotion_decision(artifact, champion)
+        artifact["promotion_evaluation"] = decision
+        if not decision["accepted"]:
+            print(
+                f"[PROMOTION REJECTED] {symbol}/{mode}: "
+                + "; ".join(decision["reasons"])
+            )
+            return False
+
+        temporary_path = f"{path}.challenger"
+        joblib.dump(artifact, temporary_path)
+        os.replace(temporary_path, path)
 
         if os.path.exists(path):
             file_size_kb = os.path.getsize(path) / 1024.0
-            print(f"✅ Saved {symbol} {mode}: {abs_path} ({file_size_kb:.1f} KB)")
+            print(
+                f"✅ Promoted {symbol} {mode}: {abs_path} ({file_size_kb:.1f} KB) "
+                f"({decision['kind']}, overlap={decision['overlap_samples']})"
+            )
             return True
 
         print(f"❌ Failed to save {symbol} {mode} - file not found after save")

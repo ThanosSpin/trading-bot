@@ -25,6 +25,7 @@ import joblib
 
 import config
 from predictive_model.data_loader import fetch_historical_data
+from predictive_model.model_evaluation import promotion_decision
 from predictive_model.model_xgb import train_model
 
 
@@ -42,11 +43,12 @@ USE_MULTICLASS = bool(config.USE_MULTICLASS_MODELS)
 
 
 def _symbols(requested: Optional[Iterable[str]] = None) -> List[str]:
-    source = requested or config.TRAIN_SYMBOLS
+    source = requested if requested is not None else config.TRAIN_SYMBOLS
     values = [str(symbol).strip().upper() for symbol in source if str(symbol).strip()]
-    spy = str(config.SPY_SYMBOL).strip().upper()
-    if spy and spy not in values:
-        values.append(spy)
+    if requested is None:
+        spy = str(config.SPY_SYMBOL).strip().upper()
+        if spy and spy not in values:
+            values.append(spy)
     return list(dict.fromkeys(values))
 
 
@@ -58,7 +60,12 @@ def _finite_positive(value) -> bool:
     return math.isfinite(number) and number > 0
 
 
-def validate_artifact(artifact: dict, symbol: str, mode: str) -> None:
+def validate_artifact(
+    artifact: dict,
+    symbol: str,
+    mode: str,
+    require_walk_forward: bool = True,
+) -> None:
     """Raise ValueError when an artifact is unsafe to promote."""
     if not isinstance(artifact, dict):
         raise ValueError("training did not return an artifact dictionary")
@@ -94,6 +101,19 @@ def validate_artifact(artifact: dict, symbol: str, mode: str) -> None:
     if split.get("windows_overlap") is not False:
         raise ValueError("artifact does not confirm non-overlapping time windows")
 
+    if require_walk_forward:
+        walk_forward = artifact.get("walk_forward_evaluation")
+        if not isinstance(walk_forward, dict):
+            raise ValueError("artifact has no walk_forward_evaluation")
+        if int(walk_forward.get("n_splits", 0)) < 3:
+            raise ValueError("artifact has fewer than three walk-forward folds")
+        if int(walk_forward.get("gap_bars", 0)) < 1:
+            raise ValueError("artifact walk-forward evaluation has no embargo gap")
+        if not isinstance(walk_forward.get("aggregate"), dict):
+            raise ValueError("artifact has no aggregate walk-forward metrics")
+        if not walk_forward.get("predictions"):
+            raise ValueError("artifact has no out-of-fold prediction records")
+
     if mode.startswith("intraday_"):
         regime = artifact.get("regime_config")
         if not isinstance(regime, dict):
@@ -109,6 +129,9 @@ def _artifact_summary(artifact: dict) -> dict:
     split = artifact.get("split_metadata") or {}
     metrics = artifact.get("metrics") or {}
     regime = artifact.get("regime_config") or {}
+    walk_forward = artifact.get("walk_forward_evaluation") or {}
+    wf_metrics = walk_forward.get("aggregate") or {}
+    promotion = artifact.get("promotion_evaluation") or {}
     return {
         "trained_at": artifact.get("trained_at"),
         "calibrated": artifact.get("calibrated"),
@@ -124,6 +147,15 @@ def _artifact_summary(artifact: dict) -> dict:
         "momentum_threshold": regime.get("momentum_threshold"),
         "volatility_threshold": regime.get("volatility_threshold"),
         "regime_fit_end": regime.get("fit_end"),
+        "walk_forward_folds": walk_forward.get("n_splits"),
+        "walk_forward_gap_bars": walk_forward.get("gap_bars"),
+        "walk_forward_cost_bps": walk_forward.get("cost_bps"),
+        "walk_forward_trades": wf_metrics.get("trade_count"),
+        "walk_forward_net_return": wf_metrics.get("net_return"),
+        "walk_forward_profit_factor": wf_metrics.get("profit_factor"),
+        "walk_forward_max_drawdown": wf_metrics.get("max_drawdown"),
+        "walk_forward_brier": wf_metrics.get("brier_score"),
+        "promotion": promotion,
     }
 
 
@@ -133,7 +165,11 @@ def _fetch_training_data(symbol: str, mode: str):
     return fetch_historical_data(symbol, period=INTRADAY_PERIOD, interval=INTRADAY_INTERVAL)
 
 
-def _train_to_stage(symbols: List[str], stage_dir: Path) -> Tuple[dict, List[str]]:
+def _train_to_stage(
+    symbols: List[str],
+    stage_dir: Path,
+    enforce_promotion_gate: bool = True,
+) -> Tuple[dict, List[str]]:
     summaries: Dict[str, dict] = {}
     failures: List[str] = []
 
@@ -161,6 +197,22 @@ def _train_to_stage(symbols: List[str], stage_dir: Path) -> Tuple[dict, List[str
                     use_multiclass=USE_MULTICLASS,
                 )
                 validate_artifact(artifact, symbol, mode)
+
+                active_path = MODEL_DIR / f"{symbol}_{mode}_xgb.pkl"
+                champion = joblib.load(active_path) if active_path.exists() else None
+                decision = promotion_decision(artifact, champion)
+                artifact["promotion_evaluation"] = decision
+                if enforce_promotion_gate and not decision["accepted"]:
+                    raise ValueError(
+                        "challenger rejected: " + "; ".join(decision["reasons"])
+                    )
+                gate_status = "accepted" if decision["accepted"] else "rejected"
+                print(
+                    f"[PROMOTION GATE] {label}: {gate_status} "
+                    f"({decision['kind']}, overlap={decision['overlap_samples']})"
+                )
+                if not decision["accepted"]:
+                    print("[PROMOTION GATE] " + "; ".join(decision["reasons"]))
 
                 stage_path = stage_dir / f"{symbol}_{mode}_xgb.pkl"
                 joblib.dump(artifact, stage_path)
@@ -302,8 +354,18 @@ def main() -> int:
         action="store_true",
         help="Validate active artifacts without fetching data or training",
     )
+    parser.add_argument(
+        "--shadow",
+        action="store_true",
+        help=(
+            "Train and evaluate all challengers, record promotion decisions, "
+            "and replace no active artifacts"
+        ),
+    )
     parser.add_argument("--no-email", action="store_true")
     args = parser.parse_args()
+    if args.validate_only and args.shadow:
+        parser.error("--validate-only and --shadow cannot be used together")
 
     symbols = _symbols(args.symbols)
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -322,12 +384,17 @@ def main() -> int:
     if args.validate_only:
         summaries, failures = _validate_existing(symbols)
     else:
-        summaries, failures = _train_to_stage(symbols, stage_dir)
+        summaries, failures = _train_to_stage(
+            symbols,
+            stage_dir,
+            enforce_promotion_gate=not args.shadow,
+        )
 
     report = {
         "run_id": run_id,
         "status": "failed" if failures else "success",
         "validate_only": args.validate_only,
+        "shadow": args.shadow,
         "symbols": symbols,
         "modes": list(MODES),
         "expected_models": expected_models,
@@ -341,7 +408,7 @@ def main() -> int:
         )
         report["status"] = "failed"
 
-    if not failures and not args.validate_only:
+    if not failures and not args.validate_only and not args.shadow:
         try:
             _promote_batch(stage_dir, symbols)
             report["promoted"] = True
@@ -368,7 +435,12 @@ def main() -> int:
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
 
-    action = "validated" if args.validate_only else "trained, validated, and promoted"
+    if args.validate_only:
+        action = "validated"
+    elif args.shadow:
+        action = "trained and evaluated in shadow mode; none promoted"
+    else:
+        action = "trained, validated, and promoted"
     print(f"[MONTHLY] SUCCESS - {expected_models} models {action}.")
     return 0
 

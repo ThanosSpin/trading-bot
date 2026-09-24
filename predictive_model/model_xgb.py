@@ -30,6 +30,7 @@ from predictive_model.data_loader import (
 )
 from predictive_model.features import build_daily_features, build_intraday_features
 from predictive_model.model_monitor import evaluate_predictions, log_prediction
+from predictive_model.model_evaluation import evaluate_walk_forward
 from predictive_model.target_labels import backtest_threshold, create_target_label
 from predictive_model.trading_metrics import (
     calculate_financial_metrics,
@@ -42,6 +43,10 @@ from config import (
     INTRADAY_VOL_TRIG,
     INTRADAY_WEIGHT,
     MIN_INTRADAY_BARS_FOR_FEATURES,
+    MODEL_EVAL_GAP_BARS,
+    MODEL_EVAL_TRANSACTION_COST_BPS,
+    MODEL_EVAL_WALK_FORWARD_FOLDS,
+    MODEL_TRAIN_N_JOBS,
 )
 
 MODEL_DIR = "models"
@@ -204,13 +209,24 @@ def _build_thresholded_binary_target(df_feat: pd.DataFrame, mode: str) -> pd.Dat
     next_ret = df_feat["Close"].shift(-1) / df_feat["Close"] - 1.0
     min_move = 0.002 if mode == "daily" else 0.0008
 
+    # Retain the realized next-bar return for cost-aware out-of-fold evaluation.
+    # It is explicitly excluded from the feature matrix below.
+    df_feat["forward_return"] = next_ret
+
+    # Training keeps a no-trade band, but deployment evaluation must include
+    # every eligible bar. Neutral moves are therefore negative evaluation
+    # outcomes even though they are excluded from model fitting.
+    df_feat["evaluation_target"] = np.where(
+        next_ret.isna(),
+        np.nan,
+        (next_ret > min_move).astype(int),
+    )
+
     df_feat["target"] = np.where(
         next_ret > min_move,
         1,
         np.where(next_ret < -min_move, 0, np.nan),
     )
-    df_feat = df_feat.dropna(subset=["target"]).copy()
-    df_feat["target"] = df_feat["target"].astype(int)
     return df_feat
 
 
@@ -316,6 +332,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
 
     df = df.copy()
     regime_config = None
+    binary_evaluation_frame = None
 
     print(f"\n[FEATURES] Building engineered features for {symbol}/{mode}...")
     if mode == "daily":
@@ -348,6 +365,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
     else:
         print("\n[TARGET] Creating thresholded binary target...")
         df_feat = _build_thresholded_binary_target(df_feat, mode=mode)
+        binary_evaluation_frame = df_feat.copy()
         target_col = "target"
         num_classes = 2
         objective = "binary:logistic"
@@ -381,7 +399,16 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         print(f"[CLASS REMAP] Mapping: {class_mapping}")
 
     print("\n[FEATURES] Preparing feature matrix...")
-    exclude_cols = [target_col, "Close", "Open", "High", "Low", "Volume"]
+    exclude_cols = [
+        target_col,
+        "forward_return",
+        "evaluation_target",
+        "Close",
+        "Open",
+        "High",
+        "Low",
+        "Volume",
+    ]
     feature_cols = [col for col in df_feat.columns if col not in exclude_cols]
 
     X = df_feat[feature_cols].copy()
@@ -417,6 +444,40 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         "features": feature_list,
         "feature_count": len(feature_list),
     }
+
+    evaluation_X = None
+    evaluation_training_target = None
+    evaluation_target = None
+    evaluation_returns = None
+    if num_classes == 2:
+        evaluation_columns = list(X.columns)
+        evaluation_X = _clean_feature_dataframe(
+            binary_evaluation_frame.loc[:, evaluation_columns]
+        )
+        evaluation_bundle = pd.concat(
+            [
+                evaluation_X,
+                pd.to_numeric(binary_evaluation_frame["target"], errors="coerce").rename(
+                    "training_target"
+                ),
+                pd.to_numeric(
+                    binary_evaluation_frame["evaluation_target"], errors="coerce"
+                ).rename("evaluation_target"),
+                pd.to_numeric(
+                    binary_evaluation_frame["forward_return"], errors="coerce"
+                ).rename("forward_return"),
+            ],
+            axis=1,
+        ).replace([np.inf, -np.inf], np.nan)
+        # Feature and realized-return values are required on every evaluation
+        # row. training_target intentionally remains nullable for neutral bars.
+        evaluation_bundle = evaluation_bundle.dropna(
+            subset=evaluation_columns + ["evaluation_target", "forward_return"]
+        )
+        evaluation_X = evaluation_bundle.loc[:, evaluation_columns].copy()
+        evaluation_training_target = evaluation_bundle["training_target"].copy()
+        evaluation_target = evaluation_bundle["evaluation_target"].astype(int)
+        evaluation_returns = evaluation_bundle["forward_return"].copy()
 
     X_train, y_train, X_cal, y_cal, X_test, y_test = _time_ordered_train_cal_test_split(X, y)
 
@@ -464,7 +525,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         "reg_alpha": 0.05,
         "reg_lambda": 1.0,
         "random_state": 42,
-        "n_jobs": -1,
+        "n_jobs": MODEL_TRAIN_N_JOBS,
     }
 
     if mode == "daily":
@@ -515,6 +576,35 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
             # print(f"[FEATURE SELECTION] Skipping due to error: {e}")
             print("[FEATURE SELECTION] Skipping SHAP feature selection due to XGBoost shape mismatch.")
 
+    walk_forward_evaluation = None
+    if num_classes == 2:
+        print("\n[WALK-FORWARD] Running expanding-fold evaluation with embargo gaps...")
+        # Give every fold the full pre-selection schema. When the final model
+        # selected a smaller schema, each fold independently selects the same
+        # number of features using only its own fit window.
+        walk_forward_evaluation = evaluate_walk_forward(
+            X=evaluation_X,
+            y=evaluation_target,
+            forward_returns=evaluation_returns,
+            training_target=evaluation_training_target,
+            model_params=params,
+            mode=mode,
+            n_splits=MODEL_EVAL_WALK_FORWARD_FOLDS,
+            gap_bars=MODEL_EVAL_GAP_BARS,
+            cost_bps=MODEL_EVAL_TRANSACTION_COST_BPS,
+            max_features=len(feature_list),
+        )
+        wf_metrics = walk_forward_evaluation["aggregate"]
+        print(
+            "[WALK-FORWARD] "
+            f"folds={walk_forward_evaluation['n_splits']} "
+            f"trades={wf_metrics['trade_count']} "
+            f"net_return={wf_metrics['net_return']:.2%} "
+            f"profit_factor={wf_metrics['profit_factor']:.3f} "
+            f"max_drawdown={wf_metrics['max_drawdown']:.2%} "
+            f"brier={wf_metrics.get('brier_score')}"
+        )
+
     base_model = model
     final_model = model
     calibrated = False
@@ -526,7 +616,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
             model,
             method=calibration_method,
             cv="prefit",
-            n_jobs=-1,
+            n_jobs=MODEL_TRAIN_N_JOBS,
         )
         calibrated_model.fit(X_cal, y_cal)
         final_model = calibrated_model
@@ -678,6 +768,7 @@ def train_model(df: pd.DataFrame, symbol: str, mode: str = "daily", use_multicla
         },
         "regime_config": regime_config,
         "metrics": metrics,
+        "walk_forward_evaluation": walk_forward_evaluation,
         "decision_threshold": metrics.get("decision_threshold", 0.5),
         "threshold_optimization": {
             "metric": metrics.get("threshold_metric"),
