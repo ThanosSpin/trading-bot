@@ -46,6 +46,10 @@ from config import (
     SPY_MODEL_EXIT_BUFFER,
     PROFIT_TRIGGER_PCT,
     ROTATION_MIN_EDGE,
+    PYRAMID_COOLDOWN_MINUTES,
+    MAX_PYRAMID_ADDITIONS,
+    POST_STOP_REBUY_COOLDOWN_MINUTES,
+    POST_STOP_REBUY_BUFFER,
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
@@ -64,6 +68,9 @@ _session_state: dict = {
     "sell_times": {},
     "soft_stops": {},  # NEW: sym -> ISO timestamp of last soft stop today
     "processed_sell_order_ids": set(),
+    "pyramid_counts": {},
+    "last_pyramid_times": {},
+    "stop_exits": {},
 }
 
 SESSION_ENV = str(BOT_ENV).strip().lower()
@@ -86,6 +93,9 @@ def reset_session_state():
     _session_state["sell_times"].clear()
     _session_state["soft_stops"].clear()
     _session_state["processed_sell_order_ids"].clear()
+    _session_state["pyramid_counts"].clear()
+    _session_state["last_pyramid_times"].clear()
+    _session_state["stop_exits"].clear()
     print("[SESSION] Session state reset for new trading day.")
 
 
@@ -111,6 +121,15 @@ def load_session_state():
             _session_state["processed_sell_order_ids"] = set(
                 data.get("processed_sell_order_ids", [])
             )
+            _session_state["pyramid_counts"] = {
+                str(k).upper(): int(v)
+                for k, v in data.get("pyramid_counts", {}).items()
+            }
+            _session_state["last_pyramid_times"] = {
+                str(k).upper(): _dt.fromisoformat(v)
+                for k, v in data.get("last_pyramid_times", {}).items()
+            }
+            _session_state["stop_exits"] = data.get("stop_exits", {})
             print(f"[SESSION] Loaded state from {SESSION_STATE_PATH}")
     except Exception as e:
         print(f"[WARN] Failed to load session_state: {e}")
@@ -132,6 +151,12 @@ def save_session_state():
             "processed_sell_order_ids": list(
                 _session_state["processed_sell_order_ids"]
             ),
+            "pyramid_counts": _session_state["pyramid_counts"],
+            "last_pyramid_times": {
+                k: v.isoformat()
+                for k, v in _session_state["last_pyramid_times"].items()
+            },
+            "stop_exits": _session_state["stop_exits"],
         }
         with open(SESSION_STATE_PATH, "w") as f:
             json.dump(data, f)
@@ -159,10 +184,52 @@ def record_broker_sell_fills(fills):
         )
 
 
-def mark_session_buy(sym: str):
+def mark_session_buy(sym: str, is_pyramid: bool = False):
     sym = sym.upper()
     _session_state["buys"].add(sym)
     _session_state["buy_times"][sym] = _dt.now(timezone.utc)
+    if is_pyramid:
+        _session_state["pyramid_counts"][sym] = (
+            int(_session_state["pyramid_counts"].get(sym, 0)) + 1
+        )
+        _session_state["last_pyramid_times"][sym] = _dt.now(timezone.utc)
+
+
+def mark_session_position_closed(sym: str):
+    """Reset per-position pyramid state only after the broker position is flat."""
+    sym = sym.upper()
+    _session_state["pyramid_counts"].pop(sym, None)
+    _session_state["last_pyramid_times"].pop(sym, None)
+
+
+def mark_session_stop(sym: str, stop_kind: str):
+    sym = sym.upper()
+    _session_state["stop_exits"][sym] = {
+        "timestamp": _dt.now(timezone.utc).isoformat(),
+        "kind": str(stop_kind),
+    }
+
+
+def _pyramid_allowed(sym: str) -> tuple:
+    sym = sym.upper()
+    count = int(_session_state["pyramid_counts"].get(sym, 0))
+    if count >= int(MAX_PYRAMID_ADDITIONS):
+        return False, (
+            f"{sym}: pyramid blocked - maximum {MAX_PYRAMID_ADDITIONS} "
+            f"adds reached for this position."
+        )
+    last_add = _session_state["last_pyramid_times"].get(sym)
+    if last_add is not None:
+        if last_add.tzinfo is None:
+            last_add = last_add.replace(tzinfo=timezone.utc)
+        elapsed = (_dt.now(timezone.utc) - last_add).total_seconds() / 60.0
+        if elapsed < float(PYRAMID_COOLDOWN_MINUTES):
+            remaining = float(PYRAMID_COOLDOWN_MINUTES) - elapsed
+            return False, (
+                f"{sym}: pyramid cooldown active ({elapsed:.0f}min elapsed; "
+                f"{remaining:.0f}min remaining)."
+            )
+    return True, ""
 
 
 def mark_session_sell(sym: str, sold_at=None):
@@ -222,6 +289,22 @@ def _rebuy_allowed(
     if sym in _session_state["flattened"]:
         return False, f"{sym}: rebuy blocked - was force-flattened at close today."
 
+    stop_info = _session_state.get("stop_exits", {}).get(sym)
+    if stop_info:
+        try:
+            stop_time = _dt.fromisoformat(str(stop_info["timestamp"]))
+            if stop_time.tzinfo is None:
+                stop_time = stop_time.replace(tzinfo=timezone.utc)
+            elapsed = (_dt.now(timezone.utc) - stop_time).total_seconds() / 60.0
+            if elapsed < float(POST_STOP_REBUY_COOLDOWN_MINUTES):
+                remaining = float(POST_STOP_REBUY_COOLDOWN_MINUTES) - elapsed
+                return False, (
+                    f"{sym}: post-stop rebuy blocked ({elapsed:.0f}min elapsed; "
+                    f"{remaining:.0f}min remaining after {stop_info.get('kind', 'stop')})."
+                )
+        except (KeyError, TypeError, ValueError):
+            pass
+
     last_sell_time = _session_state["sell_times"].get(sym)
     if last_sell_time is not None:
         elapsed_min = (_dt.now(timezone.utc) - last_sell_time).total_seconds() / 60
@@ -238,6 +321,12 @@ def _rebuy_allowed(
         return True, ""
 
     required_prob = _effective_rebuy_threshold(sym, diagnostics)
+
+    if stop_info:
+        required_prob = max(
+            required_prob,
+            _effective_buy_threshold(sym, diagnostics) + float(POST_STOP_REBUY_BUFFER),
+        )
 
     if sym == "PLTR":
         required_prob = max(
@@ -549,6 +638,7 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02):
                     f"<= {loss_limit_pct:.2%}."
                 ),
                 "priority_rank": 0,
+                "risk_exit": "daily_loss_guard",
             }
             any_triggered = True
             print(
@@ -756,6 +846,7 @@ def check_stop_tp(
                     f"{symbol}: SOFT STOP hit - loss {unrealized_pct:.1%} despite strong signal "
                     f"(prob_up={prob_up:.3f} > BUY={effective_buy_threshold:.3f})."
                 ),
+                risk_exit="soft_stop",
             )
 
     # Maintain max_price while holding
@@ -773,7 +864,7 @@ def check_stop_tp(
         # positive number when losing, e.g. 0.03 == -3%
         return max(0.0, 1.0 - (float(price) / float(entry_price)))
 
-    def _margin_tiered_sell(reason: str):
+    def _margin_tiered_sell(reason: str, risk_exit: str):
         """
         Sell the position when a risk-management exit is triggered.
 
@@ -787,6 +878,7 @@ def check_stop_tp(
             "sell",
             int(shares),
             reason,
+            risk_exit=risk_exit,
         )
 
     # -- Fix Dollar stop cap --------------------------------------------
@@ -794,14 +886,16 @@ def check_stop_tp(
         unrealized_loss = (entry_price - price) * shares
         if unrealized_loss >= MAX_LOSS_PER_TRADE:
             return _margin_tiered_sell(
-                f"{symbol}: DOLLAR-STOP hit - loss ${unrealized_loss:.2f} >= cap ${MAX_LOSS_PER_TRADE:.2f}"
+                f"{symbol}: DOLLAR-STOP hit - loss ${unrealized_loss:.2f} >= cap ${MAX_LOSS_PER_TRADE:.2f}",
+                "dollar_stop",
             )
     # ---------------------------------------------------------------------
 
     # 1) HARD STOP-LOSS
     if price <= entry_price * STOP_LOSS:
         return _margin_tiered_sell(
-            f"{symbol}: STOP-LOSS hit {price:.2f} <= {STOP_LOSS*100:.1f}% of entry {entry_price:.2f}"
+            f"{symbol}: STOP-LOSS hit {price:.2f} <= {STOP_LOSS*100:.1f}% of entry {entry_price:.2f}",
+            "hard_stop",
         )
 
     # 2) TRAILING STOP (ONLY AFTER +5% PROFIT)
@@ -812,7 +906,8 @@ def check_stop_tp(
                 (
                     f"{symbol}: TRAIL-STOP hit {price:.2f} <= {TRAIL_STOP*100:.1f}% of max {mp:.2f} "
                     f"(activated after +{(TRAIL_ACTIVATE-1)*100:.1f}% profit)"
-                )
+                ),
+                "trailing_stop",
             )
 
     # fix: EOD exit - don't hold a losing position overnight ---------
@@ -825,7 +920,8 @@ def check_stop_tp(
         if _is_near_close and price < entry_price * 0.99:
             return _margin_tiered_sell(
                 f"{symbol}: EOD exit - down {((price/entry_price)-1):.1%} at close "
-                f"(avoiding overnight risk, entry=${entry_price:.2f})"
+                f"(avoiding overnight risk, entry=${entry_price:.2f})",
+                "eod_loss_exit",
             )
     except Exception:
         pass
@@ -969,6 +1065,10 @@ def should_trade(
                 f"(current={prob_up:.3f}).",
             )
 
+        pyramid_allowed, pyramid_reason = _pyramid_allowed(symbol)
+        if not pyramid_allowed:
+            return make_decision("hold", 0, explain + pyramid_reason)
+
         # Pyramiding: use full available cash, not fractional allocation
         affordable = int(cash // price)
 
@@ -995,6 +1095,7 @@ def should_trade(
                 qty,
                 explain + f"PYRAMID BUY - adding to position "
                 f"(current={shares:g}, new={qty}, prob={prob_up:.3f}).",
+                pyramid=True,
             )
         else:
             return make_decision(

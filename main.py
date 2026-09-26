@@ -11,6 +11,8 @@ from strategy import (
     mark_session_buy,
     mark_session_sell,
     mark_session_flattened,
+    mark_session_position_closed,
+    mark_session_stop,
     apply_position_limits,
     _effective_buy_threshold,
     _effective_sell_threshold,
@@ -583,6 +585,8 @@ def apply_close_time_derisk(
             "explain": reason,
             "priority_rank": 0,
         }
+        if hit_daily_loss:
+            decisions[sym]["risk_exit"] = "close_time_loss"
         mark_session_flattened(sym)
         any_triggered = True
         print(f"🕒 CLOSE-TIME DERISK OVERRIDE: {sym} -> SELL {qty} | {reason}")
@@ -805,6 +809,11 @@ def execute_decisions(decisions, diagnostics=None):
         account_cash = _get_live_account_cash(proxy_symbol=sym)
         pm._apply("sell", filled_price, filled_qty, account_cash=account_cash)
         mark_session_sell(sym)
+        if decision.get("risk_exit"):
+            mark_session_stop(sym, decision["risk_exit"])
+        pm.refresh_live()
+        if float(pm.data.get("shares", 0.0) or 0.0) <= 0:
+            mark_session_position_closed(sym)
         print(f"Updated Snapshot (cash + {sym} position): ${pm.value():.2f}")
 
     # -------------------------
@@ -889,7 +898,7 @@ def execute_decisions(decisions, diagnostics=None):
         pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
         pm._apply("buy", filled_price, filled_qty, account_cash=account_cash)
-        mark_session_buy(sym)
+        mark_session_buy(sym, is_pyramid=bool(decision.get("pyramid", False)))
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
         # update remaining cash after successful buy
