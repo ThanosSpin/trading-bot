@@ -48,6 +48,19 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("post-stop rebuy blocked", reason)
 
+    def test_rotation_uses_guarded_buy_and_requires_flat_target(self):
+        decisions = {
+            "AAPL": {"action": "hold", "explain": "RSI blocked"},
+            "ABBV": {"action": "buy"},
+            "NVDA": {"action": "buy"},
+        }
+        eligible = strategy._eligible_rotation_targets(
+            ["AAPL", "ABBV", "NVDA"],
+            decisions,
+            {"AAPL": 0, "ABBV": 277, "NVDA": 0},
+        )
+        self.assertEqual(eligible, ["NVDA"])
+
     def test_order_polling_waits_through_partial_fill_to_terminal_fill(self):
         client = _OrderClient(
             [

@@ -880,6 +880,10 @@ def execute_decisions(decisions, diagnostics=None):
         elif recalc_after_sells:
             # use the cash remaining after earlier buys in this same cycle
             qty = int(remaining_cash // price)
+
+            # Recalculated rotation orders must obey the same per-position
+            # sizing limits as ordinary and all-in BUY orders.
+            qty = apply_position_limits(qty, price, remaining_cash, sym)
             print(
                 f"[INFO] {sym} recalc_after_sells: remaining_cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}"
             )

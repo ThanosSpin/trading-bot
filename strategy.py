@@ -232,6 +232,16 @@ def _pyramid_allowed(sym: str) -> tuple:
     return True, ""
 
 
+def _eligible_rotation_targets(symbols, decisions, position_shares):
+    """Return guarded BUY targets that do not already have a position."""
+    return [
+        sym
+        for sym in symbols
+        if (decisions.get(sym) or {}).get("action") == "buy"
+        and float(position_shares.get(sym, 0.0) or 0.0) <= 0
+    ]
+
+
 def mark_session_sell(sym: str, sold_at=None):
     sym = sym.upper()
     _session_state["sells"].add(sym)
@@ -1693,7 +1703,7 @@ def compute_strategy_decisions(
         nvda_action = nvda_base["action"]
 
         # ---- NVDA BUY priority: sell other core positions (funding) + plan big buy
-        if nvda_action == "buy":
+        if nvda_action == "buy" and live_shares("NVDA") <= 0:
             sim_cash = float(pms[core_symbols[0]].data.get("cash", 0.0))
             nvda_px = float(prices.get("NVDA", 0.0) or 0.0)
             if nvda_px <= 0:
@@ -1772,11 +1782,26 @@ def compute_strategy_decisions(
                 )
 
             # rotate into strongest other BUY
-            buyers = [
-                s
+            # Rotation may fund a new position, but it must not revive a BUY
+            # rejected by the normal entry guards or silently pyramid an
+            # existing position. Existing positions are added to only through
+            # should_trade(), where pyramid limits and cooldowns are enforced.
+            rotation_decisions = {
+                s: should_trade(
+                    s,
+                    preds.get(s, 0.0),
+                    total_symbols=len(core_symbols),
+                    concurrent_buys=concurrent_buys,
+                )
                 for s in core_symbols
-                if s != "NVDA" and preds.get(s, 0.0) >= BUY_THRESHOLD
-            ]
+                if s != "NVDA"
+            }
+            rotation_shares = {s: live_shares(s) for s in core_symbols}
+            buyers = _eligible_rotation_targets(
+                [s for s in core_symbols if s != "NVDA"],
+                rotation_decisions,
+                rotation_shares,
+            )
             if buyers:
                 strongest = max(buyers, key=lambda x: preds.get(x, 0.0))
                 cash_now = float(
@@ -1826,6 +1851,8 @@ def compute_strategy_decisions(
 
                 rotation_is_better = (
                     aapl_sh > 0
+                    and float(pms["ABBV"].data.get("shares", 0.0) or 0.0) <= 0
+                    and (decisions.get("ABBV") or {}).get("action") == "buy"
                     and abbv_prob >= aapl_prob + ROTATION_MIN_EDGE
                 )
 
@@ -1930,8 +1957,11 @@ def compute_strategy_decisions(
         nvda_d = decisions.get("NVDA") or {}
         aapl_d = decisions.get("AAPL") or {}
 
-        nvda_wants_buy = (nvda_d.get("action") == "buy") or (
-            preds.get("NVDA", 0.0) >= BUY_THRESHOLD
+        # Use the guarded strategy decision. Raw probability alone must not
+        # resurrect a BUY blocked by entry, risk, or pyramid controls.
+        nvda_wants_buy = (
+            nvda_d.get("action") == "buy"
+            and float(pms["NVDA"].data.get("shares", 0.0) or 0.0) <= 0
         )
         aapl_is_not_buy = (aapl_d.get("action") in ("hold", "sell")) and (
             preds.get("AAPL", 0.0) < BUY_THRESHOLD + 0.05
@@ -1956,34 +1986,21 @@ def compute_strategy_decisions(
             )
 
     # ---------------------------------------------------------
-    # 5) FINAL ENFORCEMENT: if NVDA/AAPL/ABBV/PLTR has BUY INTENT => SELL SPY + recalc flags
-    # (prob-based intent, not cash-based)
+    # 5) FINAL ENFORCEMENT: a guarded new core BUY may sell SPY for funding.
     # ---------------------------------------------------------
-    wanted = []
-    if (
-        "NVDA" in core_symbols
-        and preds.get("NVDA", 0.0) >= BUY_THRESHOLD
-        and not _block_buy_on_pullback("NVDA")
-    ):
-        wanted.append("NVDA")
-    if (
-        "AAPL" in core_symbols
-        and preds.get("AAPL", 0.0) >= BUY_THRESHOLD
-        and not _block_buy_on_pullback("AAPL")
-    ):
-        wanted.append("AAPL")
-    if (
-        "ABBV" in core_symbols
-        and preds.get("ABBV", 0.0) >= BUY_THRESHOLD
-        and not _block_buy_on_pullback("ABBV")
-    ):
-        wanted.append("ABBV")
-    if (
-        "PLTR" in core_symbols
-        and preds.get("PLTR", 0.0) >= BUY_THRESHOLD
-        and not _block_buy_on_pullback("PLTR")
-    ):
-        wanted.append("PLTR")
+    # Funding rotation is for opening a guarded core position. Do not sell SPY
+    # or another holding merely to enlarge an existing core position. A normal
+    # pyramid BUY can still use available cash through should_trade().
+    funding_candidates = [
+        sym for sym in ("NVDA", "AAPL", "ABBV", "PLTR") if sym in core_symbols
+    ]
+    funding_shares = {
+        sym: float(pms[sym].data.get("shares", 0.0) or 0.0)
+        for sym in funding_candidates
+    }
+    wanted = _eligible_rotation_targets(
+        funding_candidates, decisions, funding_shares
+    )
 
     if wanted:
         sh_spy = float(spy_shares() or 0.0)
