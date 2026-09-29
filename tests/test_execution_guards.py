@@ -61,6 +61,14 @@ class ExecutionGuardTests(unittest.TestCase):
         )
         self.assertEqual(eligible, ["NVDA"])
 
+    def test_secondary_buy_is_suppressed_when_all_candidates_are_blocked(self):
+        self.assertTrue(
+            strategy._suppress_unselected_secondary_buy("ABBV", "buy", None)
+        )
+        self.assertFalse(
+            strategy._suppress_unselected_secondary_buy("ABBV", "buy", "ABBV")
+        )
+
     def test_dynamic_stop_uses_smaller_account_equity_cap(self):
         pm = SimpleNamespace(
             data={"shares": 20, "avg_price": 267.378, "max_price": 267.378},

@@ -244,6 +244,15 @@ def _eligible_rotation_targets(symbols, decisions, position_shares):
     ]
 
 
+def _suppress_unselected_secondary_buy(symbol, action, selected_secondary):
+    """Block a secondary BUY unless that symbol passed selection guards."""
+    return (
+        action == "buy"
+        and symbol in ("AAPL", "ABBV", "PLTR")
+        and symbol != selected_secondary
+    )
+
+
 def mark_session_sell(sym: str, sold_at=None):
     sym = sym.upper()
     _session_state["sells"].add(sym)
@@ -1875,14 +1884,16 @@ def compute_strategy_decisions(
                 )
 
                 # suppress BUY for the non-selected secondary candidate
-                if (
-                    d0.get("action") == "buy"
-                    and secondary is not None
-                    and sym in ("AAPL", "ABBV", "PLTR")
-                    and sym != secondary
+                if _suppress_unselected_secondary_buy(
+                    sym, d0.get("action"), secondary
                 ):
+                    suppressed_reason = (
+                        "no secondary candidate passed entry guards"
+                        if secondary is None
+                        else f"secondary={secondary}"
+                    )
                     d0 = make_decision(
-                        "hold", 0, f"{sym}: BUY suppressed (secondary={secondary})."
+                        "hold", 0, f"{sym}: BUY suppressed ({suppressed_reason})."
                     )
 
                 decisions[sym] = d0
@@ -1997,6 +2008,32 @@ def compute_strategy_decisions(
                     "hold",
                     0,
                     f"{sym}: BUY blocked by pullback guardrail (mom={mom_str}, ip={ip_str} < dp={dp_str}).",
+                )
+                continue
+
+            if _block_buy_on_weak_volume(sym):
+                decisions[sym] = make_decision(
+                    "hold",
+                    0,
+                    f"{sym}: BUY blocked by weak-volume guardrail.",
+                )
+                continue
+
+            if _block_buy_overbought(sym):
+                decisions[sym] = make_decision(
+                    "hold",
+                    0,
+                    f"{sym}: BUY blocked by overbought RSI guardrail.",
+                )
+                continue
+
+            mom = _safe_f(_diag(sym).get("intraday_mom"))
+            if mom is not None and mom > 0.01:
+                decisions[sym] = make_decision(
+                    "hold",
+                    0,
+                    f"{sym}: BUY blocked by momentum-overextension guardrail "
+                    f"(mom={mom:.2%}).",
                 )
 
     # ---------------------------------------------------------
