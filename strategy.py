@@ -31,6 +31,7 @@ from config import (
     DIP_BUY_MIN_PROB,
     PYRAMID_THRESHOLD,
     MAX_LOSS_PER_TRADE,
+    MAX_LOSS_PER_POSITION_PCT,
     AAPL_BUY_THRESHOLD,
     REBUY_THRESHOLD,
     REBUY_COOLDOWN_MINUTES,
@@ -891,7 +892,23 @@ def check_stop_tp(
             risk_exit=risk_exit,
         )
 
-    # -- Fix Dollar stop cap --------------------------------------------
+    # Position-value stop: scale the allowed loss with the position's
+    # average-cost basis instead of using the same dollar cap for every size.
+    if MAX_LOSS_PER_POSITION_PCT is not None:
+        position_cost = entry_price * shares
+        loss_cap = position_cost * float(MAX_LOSS_PER_POSITION_PCT)
+        unrealized_loss = (entry_price - price) * shares
+        if unrealized_loss >= loss_cap:
+            return _margin_tiered_sell(
+                (
+                    f"{symbol}: POSITION-STOP hit - loss ${unrealized_loss:.2f} "
+                    f">= {float(MAX_LOSS_PER_POSITION_PCT):.2%} of cost "
+                    f"(${loss_cap:.2f})"
+                ),
+                "position_stop",
+            )
+
+    # Optional legacy fixed-dollar stop.
     if MAX_LOSS_PER_TRADE is not None:
         unrealized_loss = (entry_price - price) * shares
         if unrealized_loss >= MAX_LOSS_PER_TRADE:
