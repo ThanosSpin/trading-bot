@@ -61,20 +61,27 @@ class ExecutionGuardTests(unittest.TestCase):
         )
         self.assertEqual(eligible, ["NVDA"])
 
-    def test_position_stop_scales_with_average_cost_value(self):
+    def test_dynamic_stop_uses_smaller_account_equity_cap(self):
         pm = SimpleNamespace(
             data={"shares": 20, "avg_price": 267.378, "max_price": 267.378},
             save=lambda: None,
         )
-        with patch.object(strategy, "MAX_LOSS_PER_POSITION_PCT", 0.01), patch.object(
+        with patch.object(
+            strategy, "MAX_LOSS_ACCOUNT_EQUITY_PCT", 0.005
+        ), patch.object(strategy, "MAX_LOSS_PER_POSITION_PCT", 0.015), patch.object(
             strategy, "MAX_LOSS_PER_TRADE", None
+        ), patch.object(
+            strategy.account_cache,
+            "get_account",
+            return_value={"equity": 10800.0},
         ):
             self.assertIsNone(strategy.check_stop_tp("ABBV", 266.76, pm))
-            decision = strategy.check_stop_tp("ABBV", 264.70, pm)
+            decision = strategy.check_stop_tp("ABBV", 264.65, pm)
 
         self.assertEqual(decision["action"], "sell")
-        self.assertEqual(decision["risk_exit"], "position_stop")
-        self.assertIn("1.00% of cost", decision["explain"])
+        self.assertEqual(decision["risk_exit"], "dynamic_risk_stop")
+        self.assertIn("effective cap $54.00", decision["explain"])
+        self.assertIn("position=1.50% ($80.21)", decision["explain"])
 
     def test_order_polling_waits_through_partial_fill_to_terminal_fill(self):
         client = _OrderClient(

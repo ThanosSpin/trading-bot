@@ -986,7 +986,7 @@ def process_all_symbols(symbols):
         strong_cut=0.75,  # only very strong signals allowed on bad days
     )
     # Daily loss guard for existing positions (fires intraday)
-    decisions = apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02)
+    decisions = apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.015)
 
     # Daily profit guard (intraday; trims 50% at +2%)
     decisions = apply_daily_profit_guard(decisions, diagnostics)

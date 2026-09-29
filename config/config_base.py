@@ -121,10 +121,11 @@ TAKE_PROFIT = None
 TRAIL_STOP = 0.985
 TRAIL_ACTIVATE = 1.02
 RISK_FRACTION = 0.5
-# Position stop based on average-cost position value. A 1% setting means a
-# $5,000 position may lose about $50 before this guard exits it.
+# Dynamic per-position risk cap: use the smaller of 0.5% of current account
+# equity and 1.5% of the position's average-cost value.
 MAX_LOSS_PER_TRADE = None
-MAX_LOSS_PER_POSITION_PCT = 0.01
+MAX_LOSS_ACCOUNT_EQUITY_PCT = 0.005
+MAX_LOSS_PER_POSITION_PCT = 0.015
 PROFIT_TRIGGER_PCT = 0.02  # +2% intraday profit trigger
 
 MAX_POSITION_SIZE_PCT = 0.90

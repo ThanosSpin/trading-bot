@@ -31,6 +31,7 @@ from config import (
     DIP_BUY_MIN_PROB,
     PYRAMID_THRESHOLD,
     MAX_LOSS_PER_TRADE,
+    MAX_LOSS_ACCOUNT_EQUITY_PCT,
     MAX_LOSS_PER_POSITION_PCT,
     AAPL_BUY_THRESHOLD,
     REBUY_THRESHOLD,
@@ -605,7 +606,7 @@ def _force_spy_exit_if_core_buy(
 # ---------------------------------------------------------
 # Helper for daily-loss guard
 # ---------------------------------------------------------
-def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.02):
+def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.015):
     """
     Sell positions immediately when unrealized loss crosses loss_limit_pct.
     Runs every cycle.
@@ -892,20 +893,51 @@ def check_stop_tp(
             risk_exit=risk_exit,
         )
 
-    # Position-value stop: scale the allowed loss with the position's
-    # average-cost basis instead of using the same dollar cap for every size.
+    # Dynamic primary stop: cap risk by both account equity and position cost.
+    # If account equity cannot be read, retain the position-based cap rather
+    # than disabling the risk exit.
+    position_cost = entry_price * shares
+    cap_candidates = []
+    position_cap = None
+    equity_cap = None
+
     if MAX_LOSS_PER_POSITION_PCT is not None:
-        position_cost = entry_price * shares
-        loss_cap = position_cost * float(MAX_LOSS_PER_POSITION_PCT)
+        position_cap = position_cost * float(MAX_LOSS_PER_POSITION_PCT)
+        if position_cap > 0:
+            cap_candidates.append(position_cap)
+
+    if MAX_LOSS_ACCOUNT_EQUITY_PCT is not None:
+        try:
+            account_state = account_cache.get_account() or {}
+            account_equity = float(account_state.get("equity", 0.0) or 0.0)
+        except Exception as exc:
+            account_equity = 0.0
+            print(f"[WARN] {symbol}: could not read equity for risk cap: {exc}")
+
+        equity_cap = account_equity * float(MAX_LOSS_ACCOUNT_EQUITY_PCT)
+        if equity_cap > 0:
+            cap_candidates.append(equity_cap)
+
+    if cap_candidates:
+        loss_cap = min(cap_candidates)
         unrealized_loss = (entry_price - price) * shares
         if unrealized_loss >= loss_cap:
+            cap_details = []
+            if equity_cap and equity_cap > 0:
+                cap_details.append(
+                    f"account={float(MAX_LOSS_ACCOUNT_EQUITY_PCT):.2%} (${equity_cap:.2f})"
+                )
+            if position_cap and position_cap > 0:
+                cap_details.append(
+                    f"position={float(MAX_LOSS_PER_POSITION_PCT):.2%} (${position_cap:.2f})"
+                )
             return _margin_tiered_sell(
                 (
-                    f"{symbol}: POSITION-STOP hit - loss ${unrealized_loss:.2f} "
-                    f">= {float(MAX_LOSS_PER_POSITION_PCT):.2%} of cost "
-                    f"(${loss_cap:.2f})"
+                    f"{symbol}: RISK-STOP hit - loss ${unrealized_loss:.2f} "
+                    f">= effective cap ${loss_cap:.2f} "
+                    f"(min of {', '.join(cap_details)})"
                 ),
-                "position_stop",
+                "dynamic_risk_stop",
             )
 
     # Optional legacy fixed-dollar stop.
