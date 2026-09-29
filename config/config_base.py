@@ -53,6 +53,11 @@ PAPER_TRADE_NOTES = {}
 BUY_THRESHOLD = 0.55
 SELL_THRESHOLD = 0.45
 PYRAMID_THRESHOLD = 0.65
+PYRAMID_COOLDOWN_MINUTES = 60
+MAX_PYRAMID_ADDITIONS = 2
+POST_STOP_REBUY_COOLDOWN_MINUTES = 120
+POST_STOP_REBUY_BUFFER = 0.10
+ORDER_FILL_TIMEOUT_SECONDS = 30
 AAPL_BUY_THRESHOLD = 0.60
 
 USE_ARTIFACT_THRESHOLDS = True
@@ -75,6 +80,9 @@ INTRADAY_WEIGHT = 0.65
 MIN_INTRADAY_BARS_FOR_FEATURES = 25
 RS_MARGIN = 0.05
 USE_MULTICLASS_MODELS = False
+# Train a meaningful-move gate followed by conditional direction. Existing
+# binary and multiclass artifacts remain loadable for champion comparison.
+USE_TWO_STAGE_TARGETS = True
 
 SPY_SYMBOL = "SPY"
 PRICE_WEAK_THRESHOLD = -0.01 
@@ -113,7 +121,11 @@ TAKE_PROFIT = None
 TRAIL_STOP = 0.985
 TRAIL_ACTIVATE = 1.02
 RISK_FRACTION = 0.5
-MAX_LOSS_PER_TRADE = 10.00
+# Dynamic per-position risk cap: use the smaller of 0.5% of current account
+# equity and 1.5% of the position's average-cost value.
+MAX_LOSS_PER_TRADE = None
+MAX_LOSS_ACCOUNT_EQUITY_PCT = 0.005
+MAX_LOSS_PER_POSITION_PCT = 0.015
 PROFIT_TRIGGER_PCT = 0.02  # +2% intraday profit trigger
 
 MAX_POSITION_SIZE_PCT = 0.90

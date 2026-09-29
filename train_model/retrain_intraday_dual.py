@@ -21,11 +21,12 @@ from predictive_model.data_loader import fetch_historical_data
 from predictive_model.features import _clean_columns
 from predictive_model.model_xgb import train_model, MODEL_DIR
 from predictive_model.model_evaluation import promotion_decision
-from config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS
+from config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS, USE_TWO_STAGE_TARGETS
 
 INTRADAY_LOOKBACK_DAYS = 60
 INTRADAY_INTERVAL = "15m"
 USE_MULTICLASS = USE_MULTICLASS_MODELS
+USE_TWO_STAGE = USE_TWO_STAGE_TARGETS
 FORCE_RETRAIN = True
 
 
@@ -130,6 +131,7 @@ def _train_regime_model(df, symbol: str, mode: str, use_multiclass: bool = True)
             symbol=symbol,
             mode=mode,
             use_multiclass=use_multiclass,
+            use_two_stage=USE_TWO_STAGE,
         )
 
         if artifact is None:

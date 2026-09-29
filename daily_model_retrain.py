@@ -53,6 +53,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 MODEL_DIR = Path(config.MODEL_DIR).resolve()
 REPORT_DIR = PROJECT_ROOT / "logs" / "daily_retrain"
 USE_MULTICLASS = bool(config.USE_MULTICLASS_MODELS)
+USE_TWO_STAGE = bool(config.USE_TWO_STAGE_TARGETS)
 
 
 def _symbols(requested: Optional[Iterable[str]] = None) -> List[str]:
@@ -234,6 +235,7 @@ def _train_candidate(symbol: str, run_dir: Path) -> Tuple[dict, Path]:
         symbol=symbol,
         mode="daily",
         use_multiclass=USE_MULTICLASS,
+        use_two_stage=USE_TWO_STAGE,
     )
     validate_artifact(artifact, symbol, "daily")
     accepted, reasons = _candidate_quality(artifact)
@@ -282,6 +284,37 @@ def _promote_candidate(symbol: str, candidate_path: Path, run_id: str) -> Path:
             shutil.copy2(backup, active)
         elif active.exists():
             active.unlink()
+        raise
+
+
+def _promote_batch(candidates: Dict[str, Path], run_id: str) -> Dict[str, Path]:
+    """Promote a requested batch atomically, restoring every champion on failure."""
+    backup_dir = MODEL_DIR / "daily_retrain_backups" / run_id
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backups: Dict[str, Path] = {}
+    active_paths: Dict[str, Path] = {}
+
+    for symbol in candidates:
+        active = _artifact_path(symbol)
+        backup = backup_dir / active.name
+        active_paths[symbol] = active
+        backups[symbol] = backup
+        if active.exists():
+            shutil.copy2(active, backup)
+
+    try:
+        for symbol, candidate_path in candidates.items():
+            active = active_paths[symbol]
+            os.replace(candidate_path, active)
+            validate_artifact(joblib.load(active), symbol, "daily")
+        return backups
+    except Exception:
+        for symbol, active in active_paths.items():
+            backup = backups[symbol]
+            if backup.exists():
+                shutil.copy2(backup, active)
+            elif active.exists():
+                active.unlink()
         raise
 
 
@@ -363,6 +396,7 @@ def main() -> int:
     print(f"[DAILY] Run ID: {run_id}")
     print(f"[DAILY] Prediction logs: {_prediction_logs_dir()}")
     print(f"[DAILY] Model directory: {MODEL_DIR}")
+    pending_candidates: Dict[str, Path] = {}
 
     for symbol in symbols:
         print(f"\n{'=' * 72}\nDAILY MODEL CHECK: {symbol}\n{'=' * 72}")
@@ -409,12 +443,23 @@ def main() -> int:
             trigger = "forced" if args.force else "; ".join(reasons)
             print(f"[RETRAIN] {symbol}: {trigger}")
             candidate, candidate_path = _train_candidate(symbol, run_dir)
-            backup = _promote_candidate(symbol, candidate_path, run_id)
-            report["retrained"].append(symbol)
+            pending_candidates[symbol] = candidate_path
             report.setdefault("candidates", {})[symbol] = _artifact_summary(candidate)
-            print(f"[PROMOTED] {symbol}/daily; backup={backup}")
+            print(f"[STAGED] {symbol}/daily: {candidate_path}")
         except Exception as exc:
             message = f"{symbol}: {type(exc).__name__}: {exc}"
+            report["failures"].append(message)
+            print(f"[FAILED] {message}")
+            traceback.print_exc()
+
+    if not report["failures"] and pending_candidates:
+        try:
+            backups = _promote_batch(pending_candidates, run_id)
+            for symbol in pending_candidates:
+                report["retrained"].append(symbol)
+                print(f"[PROMOTED] {symbol}/daily; backup={backups[symbol]}")
+        except Exception as exc:
+            message = f"batch promotion: {type(exc).__name__}: {exc}"
             report["failures"].append(message)
             print(f"[FAILED] {message}")
             traceback.print_exc()

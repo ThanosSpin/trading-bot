@@ -59,6 +59,9 @@ class ModelEvaluationTests(unittest.TestCase):
         y = pd.Series(signal.astype(int), index=index)
         training_target = y.astype(float).copy()
         training_target.iloc[::3] = np.nan
+        movement_target = pd.Series(
+            np.tile([0, 1, 1], rows // 3), index=index, dtype=int
+        )
         returns = pd.Series(np.where(y == 1, 0.01, -0.01), index=index)
         result = evaluate_walk_forward(
             X,
@@ -79,6 +82,8 @@ class ModelEvaluationTests(unittest.TestCase):
             gap_bars=1,
             cost_bps=10,
             training_target=training_target,
+            movement_target=movement_target,
+            holding_period_bars=4,
         )
         self.assertEqual(result["n_splits"], 3)
         self.assertGreater(len(result["predictions"]), 0)
@@ -90,6 +95,12 @@ class ModelEvaluationTests(unittest.TestCase):
             int(training_target.reindex(record_index).notna().sum()),
         )
         self.assertGreater(result["aggregate"]["trade_count"], 0)
+        self.assertIn("movement_probability", result["predictions"][0])
+        self.assertEqual(result["holding_period_bars"], 4)
+        self.assertTrue(
+            all(fold["test_rows_non_overlapping"] < fold["test_rows_all_market_bars"]
+                for fold in result["folds"])
+        )
         for fold in result["folds"]:
             self.assertEqual(fold["test_start"] - fold["train_end"], 1)
 

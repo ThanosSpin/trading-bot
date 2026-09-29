@@ -8,7 +8,7 @@ from collections import defaultdict
 from broker import get_trading_api
 from pdt.pdt_tracker import add_opened_today, reduce_opened_today
 
-from config import USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS
+from config import USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS, ORDER_FILL_TIMEOUT_SECONDS
 from market import is_market_open, is_trading_day
 from predictive_model.data_loader import fetch_latest_price
 from portfolio import PortfolioManager
@@ -18,6 +18,36 @@ UTC = pytz.UTC
 
 def _api():
     return get_trading_api()
+
+
+def _wait_for_terminal_order(client, order_id, timeout_seconds=None):
+    """Poll an order until terminal state; cancel any remainder on timeout."""
+    timeout = float(timeout_seconds or ORDER_FILL_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + max(timeout, 1.0)
+    terminal = {"filled", "canceled", "cancelled", "rejected", "expired"}
+    result = client.get_order(order_id)
+
+    while str(getattr(result, "status", "")).lower() not in terminal:
+        if time.monotonic() >= deadline:
+            print(
+                f"[LIVE] Order {order_id} did not reach terminal status within "
+                f"{timeout:.0f}s; canceling unfilled remainder."
+            )
+            try:
+                client.cancel_order(order_id)
+            except Exception as exc:
+                print(f"[WARN] Could not cancel timed-out order {order_id}: {exc}")
+            cancel_deadline = time.monotonic() + 5.0
+            while time.monotonic() < cancel_deadline:
+                time.sleep(0.5)
+                result = client.get_order(order_id)
+                if str(getattr(result, "status", "")).lower() in terminal:
+                    break
+            return result
+        time.sleep(1.0)
+        result = client.get_order(order_id)
+
+    return result
 
 
 # =====================================================================
@@ -462,17 +492,21 @@ def execute_trade(action, quantity, symbol, decision=None):
             f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})"
         )
 
-        time.sleep(2)
-        result = client.get_order(order.id)
+        result = _wait_for_terminal_order(client, order.id)
 
         filled_qty = float(getattr(result, "filled_qty", 0) or 0)
         filled_price = float(getattr(result, "filled_avg_price", 0) or 0)
+        final_status = str(getattr(result, "status", "unknown")).lower()
 
         if filled_qty <= 0:
-            print(f"[LIVE] Order for {symU} not filled yet.")
+            print(f"[LIVE] Order for {symU} ended status={final_status} with no fill.")
             return 0.0, None
 
-        print(f"🟢 [LIVE] Filled {filled_qty} {symU} @ {filled_price}")
+        fill_label = "Filled" if filled_qty >= quantity else "Partially filled"
+        print(
+            f"🟢 [LIVE] {fill_label} {filled_qty}/{quantity:g} {symU} "
+            f"@ {filled_price} (status={final_status})"
+        )
 
         # Track shares opened today (PDT tracker)
         if action == "buy":

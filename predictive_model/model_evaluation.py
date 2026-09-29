@@ -12,7 +12,7 @@ from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, log_loss
 from xgboost import XGBClassifier
 
 
-EVALUATION_VERSION = 3
+EVALUATION_VERSION = 4
 DEFAULT_COST_BPS = 10.0
 
 
@@ -182,19 +182,28 @@ def evaluate_walk_forward(
     cost_bps: float = DEFAULT_COST_BPS,
     max_features: Optional[int] = None,
     training_target: Optional[pd.Series] = None,
+    movement_target: Optional[pd.Series] = None,
+    holding_period_bars: int = 1,
 ) -> dict:
     """Fit expanding folds and test every eligible out-of-fold market bar."""
     if training_target is None:
         training_target = y.copy()
+    if movement_target is None:
+        movement_target = pd.Series(1, index=X.index, dtype=int)
     if not (
         len(X) == len(y) == len(forward_returns) == len(training_target)
+        == len(movement_target)
     ):
         raise ValueError("walk-forward inputs must have identical lengths")
 
+    if holding_period_bars < 1:
+        raise ValueError("holding_period_bars must be at least one")
     folds = walk_forward_splits(len(X), n_splits=n_splits, gap_bars=gap_bars)
     records = []
     fold_summaries = []
-    periods_per_year = 252 if mode == "daily" else 252 * 26
+    periods_per_year = (
+        252 if mode == "daily" else max(1, (252 * 26) // holding_period_bars)
+    )
 
     for fold in folds:
         train_end = fold["train_end"]
@@ -210,6 +219,8 @@ def evaluate_walk_forward(
         X_test = X.iloc[fold["test_start"] : fold["test_end"]]
         y_test = y.iloc[fold["test_start"] : fold["test_end"]]
         returns_test = forward_returns.iloc[fold["test_start"] : fold["test_end"]]
+        move_fit = movement_target.iloc[:fit_end].astype(int)
+        move_cal = movement_target.iloc[fit_end + gap_bars : train_end].astype(int)
 
         fit_mask = y_fit.notna()
         calibration_mask = y_cal.notna()
@@ -250,11 +261,57 @@ def evaluate_walk_forward(
         calibrated.fit(X_cal, y_cal)
         cal_probability = calibrated.predict_proba(X_cal)[:, 1]
         threshold = _best_threshold(y_cal, cal_probability)
-        probability = calibrated.predict_proba(X_test)[:, 1]
+        X_scored = X_test.iloc[::holding_period_bars]
+        y_scored = y_test.iloc[::holding_period_bars]
+        returns_scored = returns_test.iloc[::holding_period_bars]
+        probability = calibrated.predict_proba(X_scored)[:, 1]
+
+        movement_threshold = 0.0
+        movement_probability = np.ones(len(X_scored), dtype=float)
+        if movement_target.nunique() >= 2:
+            if move_fit.nunique() < 2 or move_cal.nunique() < 2:
+                raise ValueError(
+                    f"fold {fold['fold']} lacks two movement classes in fit/calibration"
+                )
+            movement_params = dict(model_params)
+            movement_params.pop("scale_pos_weight", None)
+            move_negative = int((move_fit == 0).sum())
+            move_positive = int((move_fit == 1).sum())
+            if move_negative and move_positive:
+                move_weight = move_negative / move_positive
+                if not 0.83 <= move_weight <= 1.2:
+                    movement_params["scale_pos_weight"] = move_weight
+            movement_estimator = XGBClassifier(**movement_params)
+            movement_estimator.fit(
+                X.iloc[:fit_end].loc[:, fold_features],
+                move_fit,
+                eval_set=[
+                    (
+                        X.iloc[fit_end + gap_bars : train_end].loc[:, fold_features],
+                        move_cal,
+                    )
+                ],
+                verbose=False,
+            )
+            movement_calibrated = CalibratedClassifierCV(
+                movement_estimator, method="sigmoid", cv="prefit", n_jobs=1
+            )
+            movement_calibrated.fit(
+                X.iloc[fit_end + gap_bars : train_end].loc[:, fold_features],
+                move_cal,
+            )
+            movement_cal_probability = movement_calibrated.predict_proba(
+                X.iloc[fit_end + gap_bars : train_end].loc[:, fold_features]
+            )[:, 1]
+            movement_threshold = _best_threshold(move_cal, movement_cal_probability)
+            movement_probability = movement_calibrated.predict_proba(X_scored)[:, 1]
+
+        movement_gate = movement_probability >= movement_threshold
+        combined_probability = np.where(movement_gate, probability, 0.5)
         fold_metrics = cost_aware_metrics(
-            y_test.to_numpy(),
-            probability,
-            returns_test.to_numpy(),
+            y_scored.to_numpy(),
+            combined_probability,
+            returns_scored.to_numpy(),
             threshold=threshold,
             cost_bps=cost_bps,
             periods_per_year=periods_per_year,
@@ -265,24 +322,29 @@ def evaluate_walk_forward(
                 "fit_rows": int(len(X_fit)),
                 "calibration_rows": int(len(X_cal)),
                 "test_rows_all_market_bars": int(len(X_test)),
+                "test_rows_non_overlapping": int(len(X_scored)),
                 "feature_count": int(len(fold_features)),
                 "train_end_timestamp": str(X.index[train_end - 1]),
                 "test_start_timestamp": str(X_test.index[0]),
                 "test_end_timestamp": str(X_test.index[-1]),
                 "metrics": fold_metrics,
+                "movement_threshold": float(movement_threshold),
             }
         )
-        for timestamp, target, predicted, realized in zip(
-            X_test.index,
-            y_test.to_numpy(),
-            probability,
-            returns_test.to_numpy(),
+        for timestamp, target, predicted, realized, move_probability in zip(
+            X_scored.index,
+            y_scored.to_numpy(),
+            combined_probability,
+            returns_scored.to_numpy(),
+            movement_probability,
         ):
             records.append(
                 {
                     "timestamp": str(timestamp),
                     "actual": int(target),
                     "probability": float(predicted),
+                    "movement_probability": float(move_probability),
+                    "movement_threshold": float(movement_threshold),
                     "forward_return": float(realized),
                     "threshold": float(threshold),
                     "fold": int(fold["fold"]),
@@ -306,6 +368,7 @@ def evaluate_walk_forward(
         "n_splits": len(fold_summaries),
         "gap_bars": int(gap_bars),
         "cost_bps": float(cost_bps),
+        "holding_period_bars": int(holding_period_bars),
         "fold_local_feature_selection": bool(
             max_features and 0 < max_features < X.shape[1]
         ),
