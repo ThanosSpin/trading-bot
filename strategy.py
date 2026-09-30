@@ -1799,6 +1799,7 @@ def compute_strategy_decisions(
                 preds.get(sym, 0.0),
                 total_symbols=len(core_symbols),
                 concurrent_buys=concurrent_buys,
+                diagnostics=diagnostics,
             )
     else:
 
@@ -1810,7 +1811,13 @@ def compute_strategy_decisions(
         )
 
         nvda_prob = preds.get("NVDA", 0.0)
-        nvda_base = should_trade("NVDA", nvda_prob, len(core_symbols), concurrent_buys)
+        nvda_base = should_trade(
+            "NVDA",
+            nvda_prob,
+            len(core_symbols),
+            concurrent_buys,
+            diagnostics=diagnostics,
+        )
         nvda_action = nvda_base["action"]
 
         # ---- NVDA BUY priority: sell other core positions (funding) + plan big buy
@@ -1827,7 +1834,11 @@ def compute_strategy_decisions(
             # ---------------------------------------------------------
             aapl_prob = preds.get("AAPL", 0.0)
             aapl_sig = should_trade(
-                "AAPL", aapl_prob, len(core_symbols), concurrent_buys
+                "AAPL",
+                aapl_prob,
+                len(core_symbols),
+                concurrent_buys,
+                diagnostics=diagnostics,
             )
             aapl_action = (aapl_sig.get("action") or "hold").lower()
 
@@ -1903,6 +1914,7 @@ def compute_strategy_decisions(
                     preds.get(s, 0.0),
                     total_symbols=len(core_symbols),
                     concurrent_buys=concurrent_buys,
+                    diagnostics=diagnostics,
                 )
                 for s in core_symbols
                 if s != "NVDA"
@@ -1934,6 +1946,7 @@ def compute_strategy_decisions(
                     preds.get(sym, 0.0),
                     total_symbols=len(core_symbols),
                     concurrent_buys=concurrent_buys,
+                    diagnostics=diagnostics,
                 )
 
                 # suppress BUY for the non-selected secondary candidate
