@@ -16,6 +16,7 @@ from strategy import (
     apply_position_limits,
     _effective_buy_threshold,
     _effective_sell_threshold,
+    combine_artifact_decision_thresholds,
     apply_daily_loss_guard,
     apply_daily_profit_guard,
     load_session_state,
@@ -308,6 +309,29 @@ def get_predictions(symbols, debug=True):
 
         predictions[sym] = final_prob
 
+        daily_prediction = sig.get("daily_prediction")
+        intraday_prediction = sig.get("intraday_prediction")
+        daily_threshold = (
+            daily_prediction.get("decision_threshold")
+            if isinstance(daily_prediction, dict)
+            else None
+        )
+        intraday_threshold = (
+            intraday_prediction.get("decision_threshold")
+            if isinstance(intraday_prediction, dict)
+            else None
+        )
+        threshold_info = combine_artifact_decision_thresholds(
+            sym, daily_threshold, intraday_threshold, w
+        )
+        print(
+            f"[THRESHOLD] {sym}: source={threshold_info['threshold_source']} "
+            f"daily={daily_threshold} intraday={intraday_threshold} w={w:.3f} "
+            f"raw={threshold_info['raw_decision_threshold']:.3f} "
+            f"floor={threshold_info['threshold_floor']:.3f} "
+            f"effective={threshold_info['decision_threshold']:.3f}"
+        )
+
         diagnostics[sym] = {
             "daily_prob": sig.get("daily_prob"),
             "intraday_prob": sig.get("intraday_prob"),
@@ -325,6 +349,7 @@ def get_predictions(symbols, debug=True):
             "intraday_volume": sig.get("intraday_volume"),
             "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
             "price": sig.get("price"),
+            **threshold_info,
         }
 
     # ✅ EVALUATE PAST PREDICTIONS (monitoring)

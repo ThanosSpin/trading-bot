@@ -69,6 +69,31 @@ class ExecutionGuardTests(unittest.TestCase):
             strategy._suppress_unselected_secondary_buy("ABBV", "buy", "ABBV")
         )
 
+    def test_artifact_thresholds_blend_with_probability_weight(self):
+        info = strategy.combine_artifact_decision_thresholds(
+            "NVDA", 0.60, 0.64, 0.50
+        )
+        self.assertAlmostEqual(info["raw_decision_threshold"], 0.62)
+        self.assertAlmostEqual(info["decision_threshold"], 0.62)
+        self.assertEqual(info["threshold_source"], "blended")
+
+    def test_artifact_threshold_cannot_lower_conservative_floor(self):
+        nvda = strategy.combine_artifact_decision_thresholds(
+            "NVDA", 0.50, 0.50, 0.50
+        )
+        aapl = strategy.combine_artifact_decision_thresholds(
+            "AAPL", 0.50, 0.50, 0.50
+        )
+        self.assertAlmostEqual(nvda["decision_threshold"], 0.55)
+        self.assertAlmostEqual(aapl["decision_threshold"], 0.60)
+
+    def test_invalid_artifact_threshold_uses_valid_daily_value(self):
+        info = strategy.combine_artifact_decision_thresholds(
+            "NVDA", 0.61, float("nan"), float("nan")
+        )
+        self.assertAlmostEqual(info["decision_threshold"], 0.61)
+        self.assertEqual(info["threshold_source"], "daily")
+
     def test_dynamic_stop_uses_smaller_account_equity_cap(self):
         pm = SimpleNamespace(
             data={"shares": 20, "avg_price": 267.378, "max_price": 267.378},

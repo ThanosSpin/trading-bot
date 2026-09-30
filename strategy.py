@@ -494,6 +494,59 @@ def _artifact_threshold_from_diag(
     return float(ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
 
 
+def combine_artifact_decision_thresholds(
+    sym: str,
+    daily_threshold,
+    intraday_threshold,
+    intraday_weight: float,
+) -> dict:
+    """Blend model thresholds consistently with the blended probability.
+
+    The configured legacy threshold remains a conservative floor. This lets a
+    validated artifact demand a stronger signal without allowing old or
+    incomplete artifacts to silently make entries more aggressive.
+    """
+    sym = str(sym).upper()
+    fallback = float(
+        AAPL_BUY_THRESHOLD
+        if sym == "AAPL"
+        else (ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
+    )
+    daily = _safe_float(daily_threshold, None)
+    intraday = _safe_float(intraday_threshold, None)
+    daily = daily if daily is not None and np.isfinite(daily) else None
+    intraday = intraday if intraday is not None and np.isfinite(intraday) else None
+    raw_weight = _safe_float(intraday_weight, 0.0)
+    weight = (
+        max(0.0, min(raw_weight, 1.0))
+        if raw_weight is not None and np.isfinite(raw_weight)
+        else 0.0
+    )
+
+    if daily is not None and intraday is not None:
+        raw = (1.0 - weight) * daily + weight * intraday
+        source = "blended"
+    elif daily is not None:
+        raw = daily
+        source = "daily"
+    elif intraday is not None:
+        raw = intraday
+        source = "intraday"
+    else:
+        raw = fallback
+        source = "fallback"
+
+    effective = max(fallback, min(0.95, float(raw)))
+    return {
+        "decision_threshold": effective,
+        "raw_decision_threshold": float(raw),
+        "daily_decision_threshold": daily,
+        "intraday_decision_threshold": intraday,
+        "threshold_floor": fallback,
+        "threshold_source": source,
+    }
+
+
 def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
 
