@@ -107,6 +107,27 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertAlmostEqual(info["decision_threshold"], 0.61)
         self.assertEqual(info["threshold_source"], "daily")
 
+    def test_two_stage_no_movement_suppresses_model_trade(self):
+        pm = SimpleNamespace(
+            data={"shares": 0, "cash": 10000.0},
+            refresh_live=lambda: None,
+        )
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "movement_expected": False,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=100.0
+        ):
+            decision = strategy.should_trade(
+                "NVDA", 0.90, diagnostics=diagnostics
+            )
+
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("movement gate expects no meaningful move", decision["explain"])
+
     def test_dynamic_stop_uses_smaller_account_equity_cap(self):
         pm = SimpleNamespace(
             data={"shares": 20, "avg_price": 267.378, "max_price": 267.378},

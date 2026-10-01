@@ -324,12 +324,31 @@ def get_predictions(symbols, debug=True):
         threshold_info = combine_artifact_decision_thresholds(
             sym, daily_threshold, intraday_threshold, w
         )
+
+        active_model_predictions = []
+        if daily_prob is not None:
+            active_model_predictions.append(daily_prediction)
+        if intraday_prob is not None and w > 0.0:
+            active_model_predictions.append(intraday_prediction)
+
+        movement_expected = None
+        if active_model_predictions and all(
+            isinstance(prediction, dict)
+            and "movement_expected" in prediction
+            for prediction in active_model_predictions
+        ):
+            movement_expected = any(
+                bool(prediction.get("movement_expected"))
+                for prediction in active_model_predictions
+            )
+
         print(
             f"[THRESHOLD] {sym}: source={threshold_info['threshold_source']} "
             f"daily={daily_threshold} intraday={intraday_threshold} w={w:.3f} "
             f"raw={threshold_info['raw_decision_threshold']:.3f} "
             f"entry_floor={threshold_info['threshold_floor']:.3f} "
-            f"class_boundary={threshold_info['decision_threshold']:.3f}"
+            f"class_boundary={threshold_info['decision_threshold']:.3f} "
+            f"movement_expected={movement_expected}"
         )
 
         diagnostics[sym] = {
@@ -349,6 +368,17 @@ def get_predictions(symbols, debug=True):
             "intraday_volume": sig.get("intraday_volume"),
             "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
             "price": sig.get("price"),
+            "daily_movement_expected": (
+                daily_prediction.get("movement_expected")
+                if isinstance(daily_prediction, dict)
+                else None
+            ),
+            "intraday_movement_expected": (
+                intraday_prediction.get("movement_expected")
+                if isinstance(intraday_prediction, dict)
+                else None
+            ),
+            "movement_expected": movement_expected,
             **threshold_info,
         }
 

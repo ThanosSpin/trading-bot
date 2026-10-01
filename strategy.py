@@ -1122,6 +1122,16 @@ def should_trade(
     d_diag = (diagnostics or {}).get(symbol.upper(), {}) or {}
     intraday_mom = d_diag.get("intraday_mom")
 
+    # Risk exits are evaluated before should_trade() by the orchestrator. When
+    # both active two-stage models expect no meaningful move, keep the current
+    # position and suppress model-driven entries, pyramids, and exits.
+    if d_diag.get("movement_expected") is False:
+        return make_decision(
+            "hold",
+            0,
+            explain + "HOLD - two-stage movement gate expects no meaningful move.",
+        )
+
     # ---------------------------------------------------------
     # If already in a position, don't pyramid by default
     # ---------------------------------------------------------
@@ -1540,6 +1550,9 @@ def compute_strategy_decisions(
         - NOT blocked by weak volume guard
         """
         threshold = _effective_buy_threshold(sym, diagnostics)
+        if _diag(sym).get("movement_expected") is False:
+            print(f"[DEBUG _is_buy] {sym} BLOCKED: no meaningful move expected")
+            return False
         if preds.get(sym, 0.0) < threshold:
             print(
                 f"[DEBUG _is_buy] {sym} BLOCKED: prob={preds.get(sym,0):.3f} < threshold={threshold}"
@@ -1754,6 +1767,16 @@ def compute_strategy_decisions(
             sh = spy_shares()
             cash = float(pms[spy_sym].data.get("cash", 0.0))
             px = spy_price()
+
+            if px > 0:
+                if (diagnostics.get(spy_sym) or {}).get("movement_expected") is False:
+                    spy_candidate = make_decision(
+                        "hold",
+                        0,
+                        f"{spy_sym}: SPY fallback HOLD - two-stage movement gate "
+                        "expects no meaningful move.",
+                    )
+                    px = 0.0
 
             if px > 0:
                 spy_entry_threshold = _effective_spy_entry_threshold(diagnostics)
