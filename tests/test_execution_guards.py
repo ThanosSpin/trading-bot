@@ -91,13 +91,13 @@ class ExecutionGuardTests(unittest.TestCase):
             strategy._effective_buy_threshold("NVDA", diagnostics), 0.57
         )
         self.assertAlmostEqual(
-            strategy._effective_sell_threshold("NVDA", diagnostics), 0.48
+            strategy._effective_sell_threshold("NVDA", diagnostics), 0.53
         )
         self.assertAlmostEqual(
             strategy._effective_buy_threshold("AAPL", diagnostics), 0.62
         )
         self.assertAlmostEqual(
-            strategy._effective_sell_threshold("AAPL", diagnostics), 0.48
+            strategy._effective_sell_threshold("AAPL", diagnostics), 0.58
         )
 
     def test_invalid_artifact_threshold_uses_valid_daily_value(self):
@@ -127,6 +127,28 @@ class ExecutionGuardTests(unittest.TestCase):
 
         self.assertEqual(decision["action"], "hold")
         self.assertIn("movement gate expects no meaningful move", decision["explain"])
+
+    def test_declining_session_blocks_buy_even_on_high_probability(self):
+        pm = SimpleNamespace(
+            data={"shares": 0, "cash": 10000.0},
+            refresh_live=lambda: None,
+        )
+        diagnostics = {
+            "ABBV": {
+                "decision_threshold": 0.45,
+                "movement_expected": True,
+                "session_return": -0.006,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=260.0
+        ):
+            decision = strategy.should_trade(
+                "ABBV", 0.90, diagnostics=diagnostics
+            )
+
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("entry blocked while session return", decision["explain"])
 
     def test_dynamic_stop_uses_smaller_account_equity_cap(self):
         pm = SimpleNamespace(

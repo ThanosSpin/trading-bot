@@ -342,6 +342,24 @@ def get_predictions(symbols, debug=True):
                 for prediction in active_model_predictions
             )
 
+        session_return = None
+        try:
+            daily_prices = fetch_historical_data(sym, period="2d", interval="1d")
+            if daily_prices is not None and not daily_prices.empty:
+                close = daily_prices["Close"]
+                if isinstance(close, pd.DataFrame):
+                    close = close.iloc[:, 0]
+                previous_close = float(close.iloc[-1])
+                current_price = float(sig.get("price") or 0.0)
+                if previous_close > 0 and current_price > 0:
+                    session_return = (current_price - previous_close) / previous_close
+                    print(
+                        f"[SESSION RETURN] {sym}: prev_close={previous_close:.2f} "
+                        f"price={current_price:.2f} return={session_return:.2%}"
+                    )
+        except Exception as exc:
+            print(f"[SESSION RETURN] {sym}: unavailable ({exc})")
+
         print(
             f"[THRESHOLD] {sym}: source={threshold_info['threshold_source']} "
             f"daily={daily_threshold} intraday={intraday_threshold} w={w:.3f} "
@@ -368,6 +386,7 @@ def get_predictions(symbols, debug=True):
             "intraday_volume": sig.get("intraday_volume"),
             "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
             "price": sig.get("price"),
+            "session_return": session_return,
             "daily_movement_expected": (
                 daily_prediction.get("movement_expected")
                 if isinstance(daily_prediction, dict)

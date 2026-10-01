@@ -43,6 +43,7 @@ from config import (
     MODEL_EXIT_BUFFER,
     MODEL_REBUY_BUFFER,
     MODEL_PYRAMID_BUFFER,
+    BUY_SESSION_RETURN_FLOOR,
     SPY_USE_ARTIFACT_THRESHOLDS,
     SPY_MODEL_ENTRY_BUFFER,
     SPY_MODEL_EXIT_BUFFER,
@@ -591,7 +592,8 @@ def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> 
             AAPL_BUY_THRESHOLD if sym == "AAPL" else (ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
         )
         configured_ceiling = configured_base - float(MODEL_EXIT_BUFFER)
-        return max(0.05, min(configured_ceiling, artifact_exit))
+        # Artifact boundaries may trigger an earlier exit, never a later one.
+        return max(0.05, min(0.95, max(configured_ceiling, artifact_exit)))
     return float(SELL_THRESHOLD)
 
 
@@ -622,7 +624,8 @@ def _effective_spy_exit_threshold(diagnostics: Dict[str, dict] = None) -> float:
         return float(SPY_EXIT_THRESHOLD)
     class_boundary = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
     artifact_exit = class_boundary - float(SPY_MODEL_EXIT_BUFFER)
-    return max(0.02, min(float(SPY_EXIT_THRESHOLD), artifact_exit))
+    # Artifact boundaries may trigger an earlier exit, never a later one.
+    return max(0.02, min(0.98, max(float(SPY_EXIT_THRESHOLD), artifact_exit)))
 
 
 def make_decision(action: str, qty: int, explain: str, **meta):
@@ -1125,12 +1128,29 @@ def should_trade(
     # Risk exits are evaluated before should_trade() by the orchestrator. When
     # both active two-stage models expect no meaningful move, keep the current
     # position and suppress model-driven entries, pyramids, and exits.
-    if d_diag.get("movement_expected") is False:
-        return make_decision(
-            "hold",
-            0,
-            explain + "HOLD - two-stage movement gate expects no meaningful move.",
-        )
+    no_meaningful_move = d_diag.get("movement_expected") is False
+    session_return = _safe_float(d_diag.get("session_return"), None)
+
+    # The movement gate and session-return filter suppress entries and pyramids.
+    # They intentionally do not delay signal exits for an existing position.
+    if prob_up >= effective_buy_threshold:
+        if no_meaningful_move:
+            return make_decision(
+                "hold",
+                0,
+                explain + "HOLD - two-stage movement gate expects no meaningful move.",
+            )
+        if (
+            session_return is not None
+            and session_return <= float(BUY_SESSION_RETURN_FLOOR)
+        ):
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + f"HOLD - entry blocked while session return is "
+                f"{session_return:.2%} <= {float(BUY_SESSION_RETURN_FLOOR):.2%}.",
+            )
 
     # ---------------------------------------------------------
     # If already in a position, don't pyramid by default
@@ -1553,6 +1573,16 @@ def compute_strategy_decisions(
         if _diag(sym).get("movement_expected") is False:
             print(f"[DEBUG _is_buy] {sym} BLOCKED: no meaningful move expected")
             return False
+        session_return = _safe_float(_diag(sym).get("session_return"), None)
+        if (
+            session_return is not None
+            and session_return <= float(BUY_SESSION_RETURN_FLOOR)
+        ):
+            print(
+                f"[DEBUG _is_buy] {sym} BLOCKED: session return "
+                f"{session_return:.2%} <= {float(BUY_SESSION_RETURN_FLOOR):.2%}"
+            )
+            return False
         if preds.get(sym, 0.0) < threshold:
             print(
                 f"[DEBUG _is_buy] {sym} BLOCKED: prob={preds.get(sym,0):.3f} < threshold={threshold}"
@@ -1769,7 +1799,10 @@ def compute_strategy_decisions(
             px = spy_price()
 
             if px > 0:
-                if (diagnostics.get(spy_sym) or {}).get("movement_expected") is False:
+                if (
+                    (diagnostics.get(spy_sym) or {}).get("movement_expected") is False
+                    and sh <= 0
+                ):
                     spy_candidate = make_decision(
                         "hold",
                         0,
