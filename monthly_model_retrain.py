@@ -183,8 +183,9 @@ def _train_to_stage(
     symbols: List[str],
     stage_dir: Path,
     enforce_promotion_gate: bool = True,
-) -> Tuple[dict, List[str]]:
+) -> Tuple[dict, List[str], List[str]]:
     summaries: Dict[str, dict] = {}
+    rejections: List[str] = []
     failures: List[str] = []
 
     for symbol in symbols:
@@ -217,33 +218,40 @@ def _train_to_stage(
                 champion = joblib.load(active_path) if active_path.exists() else None
                 decision = promotion_decision(artifact, champion)
                 artifact["promotion_evaluation"] = decision
-                if enforce_promotion_gate and not decision["accepted"]:
-                    raise ValueError(
-                        "challenger rejected: " + "; ".join(decision["reasons"])
-                    )
-                gate_status = "accepted" if decision["accepted"] else "rejected"
+                accepted = bool(decision["accepted"])
+                gate_status = "accepted" if accepted else "rejected"
                 print(
                     f"[PROMOTION GATE] {label}: {gate_status} "
                     f"({decision['kind']}, overlap={decision['overlap_samples']})"
                 )
-                if not decision["accepted"]:
-                    print("[PROMOTION GATE] " + "; ".join(decision["reasons"]))
+                if not accepted:
+                    reason = "; ".join(decision["reasons"])
+                    print(f"[REJECTED] {label}: {reason}")
+                    rejections.append(f"{label}: {reason}")
 
-                stage_path = stage_dir / f"{symbol}_{mode}_xgb.pkl"
-                joblib.dump(artifact, stage_path)
+                summary = _artifact_summary(artifact)
+                summary["status"] = gate_status
+                summaries[label] = summary
 
-                # Validate the serialized object, not only the in-memory result.
-                reloaded = joblib.load(stage_path)
-                validate_artifact(reloaded, symbol, mode)
-                summaries[label] = _artifact_summary(reloaded)
-                print(f"[STAGED] {label}: {stage_path}")
+                # A normal promotion run stages only accepted challengers. Shadow
+                # runs retain every evaluated artifact for offline inspection.
+                if accepted or not enforce_promotion_gate:
+                    stage_path = stage_dir / f"{symbol}_{mode}_xgb.pkl"
+                    joblib.dump(artifact, stage_path)
+
+                    # Validate the serialized object, not only the in-memory result.
+                    reloaded = joblib.load(stage_path)
+                    validate_artifact(reloaded, symbol, mode)
+                    summaries[label] = _artifact_summary(reloaded)
+                    summaries[label]["status"] = gate_status
+                    print(f"[STAGED] {label}: {stage_path}")
             except Exception as exc:
                 message = f"{label}: {type(exc).__name__}: {exc}"
                 failures.append(message)
                 print(f"[FAILED] {message}")
                 traceback.print_exc()
 
-    return summaries, failures
+    return summaries, rejections, failures
 
 
 def _cleanup_old_backups() -> None:
@@ -307,7 +315,7 @@ def _write_report(report: dict) -> Path:
     return path
 
 
-def _send_email(success: bool, report: dict, report_path: Path) -> None:
+def _send_email(report: dict, report_path: Path) -> None:
     sender = getattr(config, "EMAIL_SENDER", None)
     password = getattr(config, "EMAIL_PASSWORD", None)
     receiver = getattr(config, "EMAIL_RECEIVER", None)
@@ -315,14 +323,26 @@ def _send_email(success: bool, report: dict, report_path: Path) -> None:
         print("[EMAIL] Email configuration incomplete; skipping notification.")
         return
 
-    status = "SUCCESS" if success else "FAILED"
+    report_status = report.get("status")
+    if report_status == "failed":
+        status = "FAILED"
+    elif report_status == "completed_with_rejections":
+        status = "COMPLETED WITH REJECTIONS"
+    else:
+        status = "SUCCESS"
+
     lines = [
         f"Monthly model retrain: {status}",
         f"Run: {report['run_id']}",
         f"Models expected: {report['expected_models']}",
-        f"Models validated: {len(report.get('artifacts', {}))}",
+        f"Models evaluated: {len(report.get('artifacts', {}))}",
+        f"Challengers accepted: {report.get('accepted_count', 0)}",
+        f"Challengers rejected: {report.get('rejected_count', 0)}",
+        f"Models promoted: {report.get('promoted_count', 0)}",
         f"Report: {report_path}",
     ]
+    if report.get("rejections"):
+        lines.extend(["", "Expected gate rejections:", *report["rejections"]])
     if report.get("failures"):
         lines.extend(["", "Failures:", *report["failures"]])
 
@@ -399,35 +419,55 @@ def main() -> int:
 
     if args.validate_only:
         summaries, failures = _validate_existing(symbols)
+        rejections = []
     else:
-        summaries, failures = _train_to_stage(
+        summaries, rejections, failures = _train_to_stage(
             symbols,
             stage_dir,
             enforce_promotion_gate=not args.shadow,
         )
 
+    accepted_count = sum(
+        1
+        for summary in summaries.values()
+        if (summary.get("promotion") or {}).get("accepted") is True
+    )
+    rejected_count = len(rejections)
+
+    if not failures and len(summaries) != expected_models:
+        failures.append(
+            f"expected {expected_models} evaluated artifacts, got {len(summaries)}"
+        )
+
+    if failures:
+        status = "failed"
+    elif rejections:
+        status = "completed_with_rejections"
+    else:
+        status = "success"
+
     report = {
         "run_id": run_id,
-        "status": "failed" if failures else "success",
+        "status": status,
         "validate_only": args.validate_only,
         "shadow": args.shadow,
         "symbols": symbols,
         "modes": list(MODES),
         "expected_models": expected_models,
+        "evaluated_count": len(summaries),
+        "accepted_count": accepted_count,
+        "rejected_count": rejected_count,
+        "promoted_count": 0,
         "artifacts": summaries,
+        "rejections": rejections,
         "failures": failures,
     }
 
-    if not failures and len(summaries) != expected_models:
-        failures.append(
-            f"expected {expected_models} validated artifacts, got {len(summaries)}"
-        )
-        report["status"] = "failed"
-
-    if not failures and not args.validate_only and not args.shadow:
+    if not failures and not rejections and not args.validate_only and not args.shadow:
         try:
             _promote_batch(stage_dir, symbols)
             report["promoted"] = True
+            report["promoted_count"] = expected_models
         except Exception as exc:
             failures.append(f"promotion: {type(exc).__name__}: {exc}")
             report["status"] = "failed"
@@ -440,13 +480,21 @@ def main() -> int:
     print(f"[MONTHLY] Report: {report_path}")
 
     if not args.no_email:
-        _send_email(not failures, report, report_path)
+        _send_email(report, report_path)
 
     if failures:
         print("[MONTHLY] FAILED - active models were not intentionally replaced.")
         for failure in failures:
             print(f"  - {failure}")
         return 1
+
+    if rejections:
+        print(
+            f"[MONTHLY] COMPLETED - {len(summaries)} models evaluated; "
+            f"{accepted_count} accepted, {rejected_count} rejected; "
+            "active models unchanged."
+        )
+        return 0
 
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
