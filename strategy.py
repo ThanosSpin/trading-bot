@@ -502,9 +502,10 @@ def combine_artifact_decision_thresholds(
 ) -> dict:
     """Blend model thresholds consistently with the blended probability.
 
-    The configured legacy threshold remains a conservative floor. This lets a
-    validated artifact demand a stronger signal without allowing old or
-    incomplete artifacts to silently make entries more aggressive.
+    The returned boundary separates model classes 0 and 1. Entry and exit
+    helpers apply their own buffers around this boundary. Absolute entry floors
+    remain in place so a low classification threshold cannot make buying more
+    aggressive than the configured strategy minimum.
     """
     sym = str(sym).upper()
     fallback = float(
@@ -536,7 +537,7 @@ def combine_artifact_decision_thresholds(
         raw = fallback
         source = "fallback"
 
-    effective = max(fallback, min(0.95, float(raw)))
+    effective = max(0.05, min(0.95, float(raw)))
     return {
         "decision_threshold": effective,
         "raw_decision_threshold": float(raw),
@@ -549,14 +550,15 @@ def combine_artifact_decision_thresholds(
 
 def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
+    configured_base = float(AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD)
 
-    # 1) Existing base threshold logic
     if USE_ARTIFACT_THRESHOLDS:
-        base = _artifact_threshold_from_diag(sym, diagnostics)
+        class_boundary = _artifact_threshold_from_diag(sym, diagnostics)
+        artifact_entry = class_boundary + float(MODEL_ENTRY_BUFFER)
+        configured_floor = configured_base + float(MODEL_ENTRY_BUFFER)
+        thr = min(0.95, max(configured_floor, artifact_entry))
     else:
-        base = float(AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD)
-
-    thr = min(0.95, base + float(MODEL_ENTRY_BUFFER))
+        thr = min(0.95, configured_base + float(MODEL_ENTRY_BUFFER))
 
     # 2) Time-of-day adjustment: stricter in last hour before close
     now_ny = _dt.now(NY_TZ)
@@ -583,8 +585,13 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
 def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
     if USE_ARTIFACT_THRESHOLDS:
-        base = _artifact_threshold_from_diag(sym, diagnostics)
-        return max(0.05, base - float(MODEL_EXIT_BUFFER))
+        class_boundary = _artifact_threshold_from_diag(sym, diagnostics)
+        artifact_exit = class_boundary - float(MODEL_EXIT_BUFFER)
+        configured_base = float(
+            AAPL_BUY_THRESHOLD if sym == "AAPL" else (ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
+        )
+        configured_ceiling = configured_base - float(MODEL_EXIT_BUFFER)
+        return max(0.05, min(configured_ceiling, artifact_exit))
     return float(SELL_THRESHOLD)
 
 
@@ -605,15 +612,17 @@ def _effective_pyramid_threshold(
 def _effective_spy_entry_threshold(diagnostics: Dict[str, dict] = None) -> float:
     if not SPY_USE_ARTIFACT_THRESHOLDS:
         return float(SPY_ENTRY_THRESHOLD)
-    base = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
-    return min(0.98, base + float(SPY_MODEL_ENTRY_BUFFER))
+    class_boundary = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
+    artifact_entry = class_boundary + float(SPY_MODEL_ENTRY_BUFFER)
+    return min(0.98, max(float(SPY_ENTRY_THRESHOLD), artifact_entry))
 
 
 def _effective_spy_exit_threshold(diagnostics: Dict[str, dict] = None) -> float:
     if not SPY_USE_ARTIFACT_THRESHOLDS:
         return float(SPY_EXIT_THRESHOLD)
-    base = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
-    return max(0.02, base - float(SPY_MODEL_EXIT_BUFFER))
+    class_boundary = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
+    artifact_exit = class_boundary - float(SPY_MODEL_EXIT_BUFFER)
+    return max(0.02, min(float(SPY_EXIT_THRESHOLD), artifact_exit))
 
 
 def make_decision(action: str, qty: int, explain: str, **meta):

@@ -77,15 +77,28 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertAlmostEqual(info["decision_threshold"], 0.62)
         self.assertEqual(info["threshold_source"], "blended")
 
-    def test_artifact_threshold_cannot_lower_conservative_floor(self):
+    def test_artifact_boundary_uses_buffers_and_conservative_buy_floor(self):
         nvda = strategy.combine_artifact_decision_thresholds(
             "NVDA", 0.50, 0.50, 0.50
         )
         aapl = strategy.combine_artifact_decision_thresholds(
             "AAPL", 0.50, 0.50, 0.50
         )
-        self.assertAlmostEqual(nvda["decision_threshold"], 0.55)
-        self.assertAlmostEqual(aapl["decision_threshold"], 0.60)
+        self.assertAlmostEqual(nvda["decision_threshold"], 0.50)
+        self.assertAlmostEqual(aapl["decision_threshold"], 0.50)
+        diagnostics = {"NVDA": nvda, "AAPL": aapl}
+        self.assertAlmostEqual(
+            strategy._effective_buy_threshold("NVDA", diagnostics), 0.57
+        )
+        self.assertAlmostEqual(
+            strategy._effective_sell_threshold("NVDA", diagnostics), 0.48
+        )
+        self.assertAlmostEqual(
+            strategy._effective_buy_threshold("AAPL", diagnostics), 0.62
+        )
+        self.assertAlmostEqual(
+            strategy._effective_sell_threshold("AAPL", diagnostics), 0.48
+        )
 
     def test_invalid_artifact_threshold_uses_valid_daily_value(self):
         info = strategy.combine_artifact_decision_thresholds(

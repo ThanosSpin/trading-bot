@@ -328,8 +328,8 @@ def get_predictions(symbols, debug=True):
             f"[THRESHOLD] {sym}: source={threshold_info['threshold_source']} "
             f"daily={daily_threshold} intraday={intraday_threshold} w={w:.3f} "
             f"raw={threshold_info['raw_decision_threshold']:.3f} "
-            f"floor={threshold_info['threshold_floor']:.3f} "
-            f"effective={threshold_info['decision_threshold']:.3f}"
+            f"entry_floor={threshold_info['threshold_floor']:.3f} "
+            f"class_boundary={threshold_info['decision_threshold']:.3f}"
         )
 
         diagnostics[sym] = {
