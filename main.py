@@ -342,6 +342,12 @@ def get_predictions(symbols, debug=True):
                 for prediction in active_model_predictions
             )
 
+        cost_aware_threshold = bool(active_model_predictions) and all(
+            isinstance(prediction, dict)
+            and str(prediction.get("threshold_metric", "")).startswith("cost_aware_")
+            for prediction in active_model_predictions
+        )
+
         session_return = None
         try:
             daily_prices = fetch_historical_data(sym, period="2d", interval="1d")
@@ -366,6 +372,7 @@ def get_predictions(symbols, debug=True):
             f"raw={threshold_info['raw_decision_threshold']:.3f} "
             f"entry_floor={threshold_info['threshold_floor']:.3f} "
             f"class_boundary={threshold_info['decision_threshold']:.3f} "
+            f"cost_aware={cost_aware_threshold} "
             f"movement_expected={movement_expected}"
         )
 
@@ -398,6 +405,7 @@ def get_predictions(symbols, debug=True):
                 else None
             ),
             "movement_expected": movement_expected,
+            "cost_aware_threshold": cost_aware_threshold,
             **threshold_info,
         }
 

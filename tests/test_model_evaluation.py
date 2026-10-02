@@ -7,12 +7,31 @@ from predictive_model.model_evaluation import (
     EVALUATION_VERSION,
     cost_aware_metrics,
     evaluate_walk_forward,
+    optimize_cost_aware_threshold,
     promotion_decision,
     walk_forward_splits,
 )
 
 
 class ModelEvaluationTests(unittest.TestCase):
+    def test_cost_aware_threshold_prefers_profitable_signal_boundary(self):
+        actual = np.array([0, 0, 1, 1, 0, 1, 1, 0] * 5)
+        probability = np.array([0.40, 0.45, 0.56, 0.70, 0.52, 0.62, 0.80, 0.48] * 5)
+        returns = np.array([-0.01, -0.01, 0.01, 0.012, -0.012, 0.01, 0.015, -0.008] * 5)
+        result = optimize_cost_aware_threshold(
+            actual,
+            probability,
+            returns,
+            cost_bps=10,
+            minimum_trades=5,
+        )
+        self.assertTrue(result["eligible"])
+        self.assertGreaterEqual(result["best_threshold"], 0.53)
+        self.assertEqual(
+            result["metric"], "cost_aware_net_return_with_drawdown_penalty"
+        )
+        self.assertGreater(len(result["grid"]), 1)
+
     def test_walk_forward_splits_have_embargo_and_expand(self):
         folds = walk_forward_splits(240, n_splits=4, gap_bars=2)
         self.assertEqual(len(folds), 4)
@@ -95,6 +114,18 @@ class ModelEvaluationTests(unittest.TestCase):
             int(training_target.reindex(record_index).notna().sum()),
         )
         self.assertGreater(result["aggregate"]["trade_count"], 0)
+        self.assertIn("threshold_optimization", result)
+        self.assertAlmostEqual(
+            result["decision_threshold"],
+            result["threshold_optimization"]["best_threshold"],
+        )
+        self.assertEqual(
+            result["threshold_optimization"]["metric"],
+            "cost_aware_fold_calibration_median",
+        )
+        self.assertTrue(
+            all("threshold" in record for record in result["predictions"])
+        )
         self.assertIn("movement_probability", result["predictions"][0])
         self.assertEqual(result["holding_period_bars"], 4)
         self.assertTrue(

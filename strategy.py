@@ -43,6 +43,8 @@ from config import (
     MODEL_EXIT_BUFFER,
     MODEL_REBUY_BUFFER,
     MODEL_PYRAMID_BUFFER,
+    MODEL_MIN_CLASS_BOUNDARY,
+    AAPL_MODEL_MIN_CLASS_BOUNDARY,
     BUY_SESSION_RETURN_FLOOR,
     SPY_USE_ARTIFACT_THRESHOLDS,
     SPY_MODEL_ENTRY_BUFFER,
@@ -556,8 +558,25 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
     if USE_ARTIFACT_THRESHOLDS:
         class_boundary = _artifact_threshold_from_diag(sym, diagnostics)
         artifact_entry = class_boundary + float(MODEL_ENTRY_BUFFER)
-        configured_floor = configured_base + float(MODEL_ENTRY_BUFFER)
-        thr = min(0.95, max(configured_floor, artifact_entry))
+        model_floor = float(
+            AAPL_MODEL_MIN_CLASS_BOUNDARY
+            if sym == "AAPL"
+            else MODEL_MIN_CLASS_BOUNDARY
+        )
+        symbol_diagnostics = ((diagnostics or {}).get(sym, {}) or {})
+        threshold_source = symbol_diagnostics.get("threshold_source")
+        cost_aware_threshold = bool(
+            symbol_diagnostics.get("cost_aware_threshold", False)
+        )
+        # Missing/legacy threshold metadata keeps the conservative configured
+        # fallback. Trained artifacts may use their cost-aware boundary down to
+        # the explicit neutral-probability safety floor.
+        floor = (
+            model_floor
+            if threshold_source != "fallback" and cost_aware_threshold
+            else configured_base
+        )
+        thr = min(0.95, max(floor + float(MODEL_ENTRY_BUFFER), artifact_entry))
     else:
         thr = min(0.95, configured_base + float(MODEL_ENTRY_BUFFER))
 

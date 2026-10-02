@@ -12,7 +12,7 @@ from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, log_loss
 from xgboost import XGBClassifier
 
 
-EVALUATION_VERSION = 4
+EVALUATION_VERSION = 5
 DEFAULT_COST_BPS = 10.0
 
 
@@ -171,6 +171,72 @@ def _best_threshold(actual: pd.Series, probability: np.ndarray) -> float:
     return best_threshold
 
 
+def optimize_cost_aware_threshold(
+    actual: np.ndarray,
+    probability: np.ndarray,
+    forward_returns: np.ndarray,
+    *,
+    cost_bps: float = DEFAULT_COST_BPS,
+    periods_per_year: int = 252,
+    group_ids: Optional[np.ndarray] = None,
+    minimum_trades: int = 8,
+    min_threshold: float = 0.35,
+    max_threshold: float = 0.65,
+    step: float = 0.01,
+) -> dict:
+    """Select an economically useful threshold from out-of-fold returns."""
+    grid = []
+    for raw_threshold in np.arange(
+        min_threshold, max_threshold + 1e-9, step
+    ):
+        threshold = float(round(raw_threshold, 10))
+        metrics = cost_aware_metrics(
+            actual,
+            probability,
+            forward_returns,
+            threshold=threshold,
+            cost_bps=cost_bps,
+            periods_per_year=periods_per_year,
+            group_ids=group_ids,
+        )
+        eligible = (
+            metrics["trade_count"] >= int(minimum_trades)
+            and metrics["net_return"] > 0.0
+            and metrics["profit_factor"] >= 1.0
+            and metrics["max_drawdown"] >= -0.20
+        )
+        # Net return is primary; this penalty rejects small gains bought with
+        # materially larger drawdowns.
+        score = float(metrics["net_return"] + 0.25 * metrics["max_drawdown"])
+        grid.append(
+            {
+                "threshold": threshold,
+                "score": score,
+                "eligible": bool(eligible),
+                **metrics,
+            }
+        )
+
+    eligible_rows = [row for row in grid if row["eligible"]]
+    pool = eligible_rows or grid
+    # Prefer the more conservative threshold when scores tie.
+    best = max(pool, key=lambda row: (row["score"], row["threshold"]))
+    return {
+        "best_threshold": float(best["threshold"]),
+        "best_score": float(best["score"]),
+        "metric": "cost_aware_net_return_with_drawdown_penalty",
+        "eligible": bool(best["eligible"]),
+        "minimum_trades": int(minimum_trades),
+        "cost_bps": float(cost_bps),
+        "grid": grid,
+        "selected_metrics": {
+            key: value
+            for key, value in best.items()
+            if key not in {"eligible", "score"}
+        },
+    }
+
+
 def evaluate_walk_forward(
     X: pd.DataFrame,
     y: pd.Series,
@@ -201,6 +267,7 @@ def evaluate_walk_forward(
     folds = walk_forward_splits(len(X), n_splits=n_splits, gap_bars=gap_bars)
     records = []
     fold_summaries = []
+    fold_threshold_optimizations = []
     periods_per_year = (
         252 if mode == "daily" else max(1, (252 * 26) // holding_period_bars)
     )
@@ -259,8 +326,6 @@ def evaluate_walk_forward(
             n_jobs=1,
         )
         calibrated.fit(X_cal, y_cal)
-        cal_probability = calibrated.predict_proba(X_cal)[:, 1]
-        threshold = _best_threshold(y_cal, cal_probability)
         X_scored = X_test.iloc[::holding_period_bars]
         y_scored = y_test.iloc[::holding_period_bars]
         returns_scored = returns_test.iloc[::holding_period_bars]
@@ -268,6 +333,13 @@ def evaluate_walk_forward(
 
         movement_threshold = 0.0
         movement_probability = np.ones(len(X_scored), dtype=float)
+        calibration_X_all = X.iloc[fit_end + gap_bars : train_end].loc[
+            :, fold_features
+        ]
+        calibration_probability = calibrated.predict_proba(calibration_X_all)[:, 1]
+        calibration_movement_probability = np.ones(
+            len(calibration_X_all), dtype=float
+        )
         if movement_target.nunique() >= 2:
             if move_fit.nunique() < 2 or move_cal.nunique() < 2:
                 raise ValueError(
@@ -305,9 +377,34 @@ def evaluate_walk_forward(
             )[:, 1]
             movement_threshold = _best_threshold(move_cal, movement_cal_probability)
             movement_probability = movement_calibrated.predict_proba(X_scored)[:, 1]
+            calibration_movement_probability = movement_cal_probability
+
+        calibration_movement_gate = (
+            calibration_movement_probability >= movement_threshold
+        )
+        calibration_combined_probability = np.where(
+            calibration_movement_gate, calibration_probability, 0.0
+        )
+        threshold_optimization = optimize_cost_aware_threshold(
+            y.iloc[fit_end + gap_bars : train_end].to_numpy(),
+            calibration_combined_probability,
+            forward_returns.iloc[fit_end + gap_bars : train_end].to_numpy(),
+            cost_bps=cost_bps,
+            periods_per_year=periods_per_year,
+            minimum_trades=(3 if mode == "daily" else 5),
+        )
+        threshold = float(threshold_optimization["best_threshold"])
+        fold_threshold_optimizations.append(
+            {
+                "fold": int(fold["fold"]),
+                **threshold_optimization,
+            }
+        )
 
         movement_gate = movement_probability >= movement_threshold
-        combined_probability = np.where(movement_gate, probability, 0.5)
+        # Match live execution: a failed meaningful-move gate suppresses the
+        # entry at every possible direction threshold.
+        combined_probability = np.where(movement_gate, probability, 0.0)
         fold_metrics = cost_aware_metrics(
             y_scored.to_numpy(),
             combined_probability,
@@ -329,6 +426,8 @@ def evaluate_walk_forward(
                 "test_end_timestamp": str(X_test.index[-1]),
                 "metrics": fold_metrics,
                 "movement_threshold": float(movement_threshold),
+                "decision_threshold": threshold,
+                "threshold_eligible": bool(threshold_optimization["eligible"]),
             }
         )
         for timestamp, target, predicted, realized, move_probability in zip(
@@ -352,7 +451,29 @@ def evaluate_walk_forward(
             )
 
     frame = pd.DataFrame(records)
-    # Aggregate using each fold's independently selected threshold.
+    # Each fold's threshold was selected only from its preceding calibration
+    # window. This preserves a clean out-of-fold performance estimate. The
+    # median fold threshold becomes the stable live artifact boundary.
+    selected_threshold = float(
+        np.median(
+            [item["best_threshold"] for item in fold_threshold_optimizations]
+        )
+    )
+    threshold_optimization = {
+        "best_threshold": selected_threshold,
+        "best_score": float(
+            np.median(
+                [item["best_score"] for item in fold_threshold_optimizations]
+            )
+        ),
+        "metric": "cost_aware_fold_calibration_median",
+        "eligible": bool(
+            any(item["eligible"] for item in fold_threshold_optimizations)
+        ),
+        "cost_bps": float(cost_bps),
+        "grid": [],
+        "folds": fold_threshold_optimizations,
+    }
     signals = frame["probability"].to_numpy() >= frame["threshold"].to_numpy()
     aggregate = _metrics_from_signals(
         frame,
@@ -375,6 +496,8 @@ def evaluate_walk_forward(
         "max_features": int(max_features) if max_features else None,
         "folds": fold_summaries,
         "aggregate": aggregate,
+        "decision_threshold": selected_threshold,
+        "threshold_optimization": threshold_optimization,
         "predictions": records,
     }
 
