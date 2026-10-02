@@ -69,6 +69,87 @@ class ExecutionGuardTests(unittest.TestCase):
             strategy._suppress_unselected_secondary_buy("ABBV", "buy", "ABBV")
         )
 
+    def test_artifact_thresholds_blend_with_probability_weight(self):
+        info = strategy.combine_artifact_decision_thresholds(
+            "NVDA", 0.60, 0.64, 0.50
+        )
+        self.assertAlmostEqual(info["raw_decision_threshold"], 0.62)
+        self.assertAlmostEqual(info["decision_threshold"], 0.62)
+        self.assertEqual(info["threshold_source"], "blended")
+
+    def test_artifact_boundary_uses_buffers_and_conservative_buy_floor(self):
+        nvda = strategy.combine_artifact_decision_thresholds(
+            "NVDA", 0.50, 0.50, 0.50
+        )
+        aapl = strategy.combine_artifact_decision_thresholds(
+            "AAPL", 0.50, 0.50, 0.50
+        )
+        self.assertAlmostEqual(nvda["decision_threshold"], 0.50)
+        self.assertAlmostEqual(aapl["decision_threshold"], 0.50)
+        diagnostics = {"NVDA": nvda, "AAPL": aapl}
+        self.assertAlmostEqual(
+            strategy._effective_buy_threshold("NVDA", diagnostics), 0.57
+        )
+        self.assertAlmostEqual(
+            strategy._effective_sell_threshold("NVDA", diagnostics), 0.53
+        )
+        self.assertAlmostEqual(
+            strategy._effective_buy_threshold("AAPL", diagnostics), 0.62
+        )
+        self.assertAlmostEqual(
+            strategy._effective_sell_threshold("AAPL", diagnostics), 0.58
+        )
+
+    def test_invalid_artifact_threshold_uses_valid_daily_value(self):
+        info = strategy.combine_artifact_decision_thresholds(
+            "NVDA", 0.61, float("nan"), float("nan")
+        )
+        self.assertAlmostEqual(info["decision_threshold"], 0.61)
+        self.assertEqual(info["threshold_source"], "daily")
+
+    def test_two_stage_no_movement_suppresses_model_trade(self):
+        pm = SimpleNamespace(
+            data={"shares": 0, "cash": 10000.0},
+            refresh_live=lambda: None,
+        )
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "movement_expected": False,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=100.0
+        ):
+            decision = strategy.should_trade(
+                "NVDA", 0.90, diagnostics=diagnostics
+            )
+
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("movement gate expects no meaningful move", decision["explain"])
+
+    def test_declining_session_blocks_buy_even_on_high_probability(self):
+        pm = SimpleNamespace(
+            data={"shares": 0, "cash": 10000.0},
+            refresh_live=lambda: None,
+        )
+        diagnostics = {
+            "ABBV": {
+                "decision_threshold": 0.45,
+                "movement_expected": True,
+                "session_return": -0.006,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=260.0
+        ):
+            decision = strategy.should_trade(
+                "ABBV", 0.90, diagnostics=diagnostics
+            )
+
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("entry blocked while session return", decision["explain"])
+
     def test_dynamic_stop_uses_smaller_account_equity_cap(self):
         pm = SimpleNamespace(
             data={"shares": 20, "avg_price": 267.378, "max_price": 267.378},

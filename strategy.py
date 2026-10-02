@@ -43,6 +43,7 @@ from config import (
     MODEL_EXIT_BUFFER,
     MODEL_REBUY_BUFFER,
     MODEL_PYRAMID_BUFFER,
+    BUY_SESSION_RETURN_FLOOR,
     SPY_USE_ARTIFACT_THRESHOLDS,
     SPY_MODEL_ENTRY_BUFFER,
     SPY_MODEL_EXIT_BUFFER,
@@ -494,16 +495,71 @@ def _artifact_threshold_from_diag(
     return float(ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
 
 
+def combine_artifact_decision_thresholds(
+    sym: str,
+    daily_threshold,
+    intraday_threshold,
+    intraday_weight: float,
+) -> dict:
+    """Blend model thresholds consistently with the blended probability.
+
+    The returned boundary separates model classes 0 and 1. Entry and exit
+    helpers apply their own buffers around this boundary. Absolute entry floors
+    remain in place so a low classification threshold cannot make buying more
+    aggressive than the configured strategy minimum.
+    """
+    sym = str(sym).upper()
+    fallback = float(
+        AAPL_BUY_THRESHOLD
+        if sym == "AAPL"
+        else (ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
+    )
+    daily = _safe_float(daily_threshold, None)
+    intraday = _safe_float(intraday_threshold, None)
+    daily = daily if daily is not None and np.isfinite(daily) else None
+    intraday = intraday if intraday is not None and np.isfinite(intraday) else None
+    raw_weight = _safe_float(intraday_weight, 0.0)
+    weight = (
+        max(0.0, min(raw_weight, 1.0))
+        if raw_weight is not None and np.isfinite(raw_weight)
+        else 0.0
+    )
+
+    if daily is not None and intraday is not None:
+        raw = (1.0 - weight) * daily + weight * intraday
+        source = "blended"
+    elif daily is not None:
+        raw = daily
+        source = "daily"
+    elif intraday is not None:
+        raw = intraday
+        source = "intraday"
+    else:
+        raw = fallback
+        source = "fallback"
+
+    effective = max(0.05, min(0.95, float(raw)))
+    return {
+        "decision_threshold": effective,
+        "raw_decision_threshold": float(raw),
+        "daily_decision_threshold": daily,
+        "intraday_decision_threshold": intraday,
+        "threshold_floor": fallback,
+        "threshold_source": source,
+    }
+
+
 def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
+    configured_base = float(AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD)
 
-    # 1) Existing base threshold logic
     if USE_ARTIFACT_THRESHOLDS:
-        base = _artifact_threshold_from_diag(sym, diagnostics)
+        class_boundary = _artifact_threshold_from_diag(sym, diagnostics)
+        artifact_entry = class_boundary + float(MODEL_ENTRY_BUFFER)
+        configured_floor = configured_base + float(MODEL_ENTRY_BUFFER)
+        thr = min(0.95, max(configured_floor, artifact_entry))
     else:
-        base = float(AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD)
-
-    thr = min(0.95, base + float(MODEL_ENTRY_BUFFER))
+        thr = min(0.95, configured_base + float(MODEL_ENTRY_BUFFER))
 
     # 2) Time-of-day adjustment: stricter in last hour before close
     now_ny = _dt.now(NY_TZ)
@@ -530,8 +586,14 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
 def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
     if USE_ARTIFACT_THRESHOLDS:
-        base = _artifact_threshold_from_diag(sym, diagnostics)
-        return max(0.05, base - float(MODEL_EXIT_BUFFER))
+        class_boundary = _artifact_threshold_from_diag(sym, diagnostics)
+        artifact_exit = class_boundary - float(MODEL_EXIT_BUFFER)
+        configured_base = float(
+            AAPL_BUY_THRESHOLD if sym == "AAPL" else (ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
+        )
+        configured_ceiling = configured_base - float(MODEL_EXIT_BUFFER)
+        # Artifact boundaries may trigger an earlier exit, never a later one.
+        return max(0.05, min(0.95, max(configured_ceiling, artifact_exit)))
     return float(SELL_THRESHOLD)
 
 
@@ -552,15 +614,18 @@ def _effective_pyramid_threshold(
 def _effective_spy_entry_threshold(diagnostics: Dict[str, dict] = None) -> float:
     if not SPY_USE_ARTIFACT_THRESHOLDS:
         return float(SPY_ENTRY_THRESHOLD)
-    base = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
-    return min(0.98, base + float(SPY_MODEL_ENTRY_BUFFER))
+    class_boundary = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
+    artifact_entry = class_boundary + float(SPY_MODEL_ENTRY_BUFFER)
+    return min(0.98, max(float(SPY_ENTRY_THRESHOLD), artifact_entry))
 
 
 def _effective_spy_exit_threshold(diagnostics: Dict[str, dict] = None) -> float:
     if not SPY_USE_ARTIFACT_THRESHOLDS:
         return float(SPY_EXIT_THRESHOLD)
-    base = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
-    return max(0.02, base - float(SPY_MODEL_EXIT_BUFFER))
+    class_boundary = _artifact_threshold_from_diag(SPY_SYMBOL, diagnostics)
+    artifact_exit = class_boundary - float(SPY_MODEL_EXIT_BUFFER)
+    # Artifact boundaries may trigger an earlier exit, never a later one.
+    return max(0.02, min(0.98, max(float(SPY_EXIT_THRESHOLD), artifact_exit)))
 
 
 def make_decision(action: str, qty: int, explain: str, **meta):
@@ -1060,6 +1125,33 @@ def should_trade(
     d_diag = (diagnostics or {}).get(symbol.upper(), {}) or {}
     intraday_mom = d_diag.get("intraday_mom")
 
+    # Risk exits are evaluated before should_trade() by the orchestrator. When
+    # both active two-stage models expect no meaningful move, keep the current
+    # position and suppress model-driven entries, pyramids, and exits.
+    no_meaningful_move = d_diag.get("movement_expected") is False
+    session_return = _safe_float(d_diag.get("session_return"), None)
+
+    # The movement gate and session-return filter suppress entries and pyramids.
+    # They intentionally do not delay signal exits for an existing position.
+    if prob_up >= effective_buy_threshold:
+        if no_meaningful_move:
+            return make_decision(
+                "hold",
+                0,
+                explain + "HOLD - two-stage movement gate expects no meaningful move.",
+            )
+        if (
+            session_return is not None
+            and session_return <= float(BUY_SESSION_RETURN_FLOOR)
+        ):
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + f"HOLD - entry blocked while session return is "
+                f"{session_return:.2%} <= {float(BUY_SESSION_RETURN_FLOOR):.2%}.",
+            )
+
     # ---------------------------------------------------------
     # If already in a position, don't pyramid by default
     # ---------------------------------------------------------
@@ -1478,6 +1570,19 @@ def compute_strategy_decisions(
         - NOT blocked by weak volume guard
         """
         threshold = _effective_buy_threshold(sym, diagnostics)
+        if _diag(sym).get("movement_expected") is False:
+            print(f"[DEBUG _is_buy] {sym} BLOCKED: no meaningful move expected")
+            return False
+        session_return = _safe_float(_diag(sym).get("session_return"), None)
+        if (
+            session_return is not None
+            and session_return <= float(BUY_SESSION_RETURN_FLOOR)
+        ):
+            print(
+                f"[DEBUG _is_buy] {sym} BLOCKED: session return "
+                f"{session_return:.2%} <= {float(BUY_SESSION_RETURN_FLOOR):.2%}"
+            )
+            return False
         if preds.get(sym, 0.0) < threshold:
             print(
                 f"[DEBUG _is_buy] {sym} BLOCKED: prob={preds.get(sym,0):.3f} < threshold={threshold}"
@@ -1694,6 +1799,19 @@ def compute_strategy_decisions(
             px = spy_price()
 
             if px > 0:
+                if (
+                    (diagnostics.get(spy_sym) or {}).get("movement_expected") is False
+                    and sh <= 0
+                ):
+                    spy_candidate = make_decision(
+                        "hold",
+                        0,
+                        f"{spy_sym}: SPY fallback HOLD - two-stage movement gate "
+                        "expects no meaningful move.",
+                    )
+                    px = 0.0
+
+            if px > 0:
                 spy_entry_threshold = _effective_spy_entry_threshold(diagnostics)
                 spy_exit_threshold = _effective_spy_exit_threshold(diagnostics)
                 if spy_prob >= spy_entry_threshold:
@@ -1746,6 +1864,7 @@ def compute_strategy_decisions(
                 preds.get(sym, 0.0),
                 total_symbols=len(core_symbols),
                 concurrent_buys=concurrent_buys,
+                diagnostics=diagnostics,
             )
     else:
 
@@ -1757,7 +1876,13 @@ def compute_strategy_decisions(
         )
 
         nvda_prob = preds.get("NVDA", 0.0)
-        nvda_base = should_trade("NVDA", nvda_prob, len(core_symbols), concurrent_buys)
+        nvda_base = should_trade(
+            "NVDA",
+            nvda_prob,
+            len(core_symbols),
+            concurrent_buys,
+            diagnostics=diagnostics,
+        )
         nvda_action = nvda_base["action"]
 
         # ---- NVDA BUY priority: sell other core positions (funding) + plan big buy
@@ -1774,7 +1899,11 @@ def compute_strategy_decisions(
             # ---------------------------------------------------------
             aapl_prob = preds.get("AAPL", 0.0)
             aapl_sig = should_trade(
-                "AAPL", aapl_prob, len(core_symbols), concurrent_buys
+                "AAPL",
+                aapl_prob,
+                len(core_symbols),
+                concurrent_buys,
+                diagnostics=diagnostics,
             )
             aapl_action = (aapl_sig.get("action") or "hold").lower()
 
@@ -1850,6 +1979,7 @@ def compute_strategy_decisions(
                     preds.get(s, 0.0),
                     total_symbols=len(core_symbols),
                     concurrent_buys=concurrent_buys,
+                    diagnostics=diagnostics,
                 )
                 for s in core_symbols
                 if s != "NVDA"
@@ -1881,6 +2011,7 @@ def compute_strategy_decisions(
                     preds.get(sym, 0.0),
                     total_symbols=len(core_symbols),
                     concurrent_buys=concurrent_buys,
+                    diagnostics=diagnostics,
                 )
 
                 # suppress BUY for the non-selected secondary candidate

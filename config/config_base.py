@@ -67,6 +67,9 @@ MODEL_ENTRY_BUFFER = 0.02
 MODEL_EXIT_BUFFER = 0.02
 MODEL_REBUY_BUFFER = 0.04
 MODEL_PYRAMID_BUFFER = 0.08
+# Do not enter, re-enter, or pyramid a symbol that is down at least 0.5%
+# from the previous close. This prevents buying a brief bounce in a weak day.
+BUY_SESSION_RETURN_FLOOR = -0.005
 
 SPY_USE_ARTIFACT_THRESHOLDS = True
 SPY_MODEL_ENTRY_BUFFER = 0.03

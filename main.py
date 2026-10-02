@@ -16,6 +16,7 @@ from strategy import (
     apply_position_limits,
     _effective_buy_threshold,
     _effective_sell_threshold,
+    combine_artifact_decision_thresholds,
     apply_daily_loss_guard,
     apply_daily_profit_guard,
     load_session_state,
@@ -308,6 +309,66 @@ def get_predictions(symbols, debug=True):
 
         predictions[sym] = final_prob
 
+        daily_prediction = sig.get("daily_prediction")
+        intraday_prediction = sig.get("intraday_prediction")
+        daily_threshold = (
+            daily_prediction.get("decision_threshold")
+            if isinstance(daily_prediction, dict)
+            else None
+        )
+        intraday_threshold = (
+            intraday_prediction.get("decision_threshold")
+            if isinstance(intraday_prediction, dict)
+            else None
+        )
+        threshold_info = combine_artifact_decision_thresholds(
+            sym, daily_threshold, intraday_threshold, w
+        )
+
+        active_model_predictions = []
+        if daily_prob is not None:
+            active_model_predictions.append(daily_prediction)
+        if intraday_prob is not None and w > 0.0:
+            active_model_predictions.append(intraday_prediction)
+
+        movement_expected = None
+        if active_model_predictions and all(
+            isinstance(prediction, dict)
+            and "movement_expected" in prediction
+            for prediction in active_model_predictions
+        ):
+            movement_expected = any(
+                bool(prediction.get("movement_expected"))
+                for prediction in active_model_predictions
+            )
+
+        session_return = None
+        try:
+            daily_prices = fetch_historical_data(sym, period="2d", interval="1d")
+            if daily_prices is not None and not daily_prices.empty:
+                close = daily_prices["Close"]
+                if isinstance(close, pd.DataFrame):
+                    close = close.iloc[:, 0]
+                previous_close = float(close.iloc[-1])
+                current_price = float(sig.get("price") or 0.0)
+                if previous_close > 0 and current_price > 0:
+                    session_return = (current_price - previous_close) / previous_close
+                    print(
+                        f"[SESSION RETURN] {sym}: prev_close={previous_close:.2f} "
+                        f"price={current_price:.2f} return={session_return:.2%}"
+                    )
+        except Exception as exc:
+            print(f"[SESSION RETURN] {sym}: unavailable ({exc})")
+
+        print(
+            f"[THRESHOLD] {sym}: source={threshold_info['threshold_source']} "
+            f"daily={daily_threshold} intraday={intraday_threshold} w={w:.3f} "
+            f"raw={threshold_info['raw_decision_threshold']:.3f} "
+            f"entry_floor={threshold_info['threshold_floor']:.3f} "
+            f"class_boundary={threshold_info['decision_threshold']:.3f} "
+            f"movement_expected={movement_expected}"
+        )
+
         diagnostics[sym] = {
             "daily_prob": sig.get("daily_prob"),
             "intraday_prob": sig.get("intraday_prob"),
@@ -325,6 +386,19 @@ def get_predictions(symbols, debug=True):
             "intraday_volume": sig.get("intraday_volume"),
             "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
             "price": sig.get("price"),
+            "session_return": session_return,
+            "daily_movement_expected": (
+                daily_prediction.get("movement_expected")
+                if isinstance(daily_prediction, dict)
+                else None
+            ),
+            "intraday_movement_expected": (
+                intraday_prediction.get("movement_expected")
+                if isinstance(intraday_prediction, dict)
+                else None
+            ),
+            "movement_expected": movement_expected,
+            **threshold_info,
         }
 
     # ✅ EVALUATE PAST PREDICTIONS (monitoring)
