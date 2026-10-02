@@ -142,6 +142,7 @@ def _artifact_summary(artifact: dict) -> dict:
     regime = artifact.get("regime_config") or {}
     walk_forward = artifact.get("walk_forward_evaluation") or {}
     wf_metrics = walk_forward.get("aggregate") or {}
+    threshold_optimization = artifact.get("threshold_optimization") or {}
     promotion = artifact.get("promotion_evaluation") or {}
     return {
         "trained_at": artifact.get("trained_at"),
@@ -155,6 +156,8 @@ def _artifact_summary(artifact: dict) -> dict:
         "calibration_samples": split.get("calibration_samples"),
         "test_samples": split.get("test_samples"),
         "decision_threshold": artifact.get("decision_threshold"),
+        "threshold_metric": threshold_optimization.get("metric"),
+        "threshold_eligible": threshold_optimization.get("eligible"),
         "accuracy": metrics.get("accuracy"),
         "logloss": metrics.get("logloss"),
         "brier_score": metrics.get("brier_score"),
