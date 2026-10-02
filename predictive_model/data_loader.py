@@ -117,6 +117,51 @@ def fetch_historical_data(
     return None
 
 
+def previous_completed_close(
+    daily_data: pd.DataFrame,
+    as_of=None,
+) -> Optional[float]:
+    """Return the close from the last completed New York trading session.
+
+    Yahoo includes an in-progress row for the current session in daily data.
+    Excluding today's New York date also makes cached intraday snapshots safe.
+    """
+    if daily_data is None or daily_data.empty or "Close" not in daily_data:
+        return None
+
+    close = daily_data["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = pd.to_numeric(close, errors="coerce").dropna()
+    if close.empty:
+        return None
+
+    ny_tz = pytz.timezone("America/New_York")
+    if as_of is None:
+        as_of_date = datetime.now(ny_tz).date()
+    elif isinstance(as_of, datetime):
+        if as_of.tzinfo is None:
+            as_of = ny_tz.localize(as_of)
+        as_of_date = as_of.astimezone(ny_tz).date()
+    else:
+        as_of_date = as_of
+
+    index = pd.to_datetime(close.index)
+    if getattr(index, "tz", None) is not None:
+        index = index.tz_convert(ny_tz)
+    session_dates = pd.Index(index.date)
+    completed = close[session_dates < as_of_date]
+    if completed.empty:
+        return None
+    return float(completed.iloc[-1])
+
+
+def fetch_previous_close(symbol: str) -> Optional[float]:
+    """Fetch enough daily history to locate the prior completed close."""
+    daily_data = fetch_historical_data(symbol, period="5d", interval="1d")
+    return previous_completed_close(daily_data)
+
+
 # ============================================================
 # LATEST PRICE
 # ============================================================
