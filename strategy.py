@@ -2429,46 +2429,51 @@ def compute_strategy_decisions(
                     )
 
     # ============================================================
-    # IP-BUY OVERRIDE
+    # DIP-BUY OVERRIDE
     # ============================================================
     if DIP_BUY_ENABLED:
         for sym, decision in decisions.items():
-            if decision.get("action") == "buy":
-                prob = preds.get(sym, 0.0)
+            # Dip-buy may resize an existing BUY decision. It must never run
+            # rebuy checks for HOLD/SELL decisions or reuse another symbol's
+            # probability from a previous loop iteration.
+            if decision.get("action") != "buy":
+                continue
+
+            prob = float(preds.get(sym, 0.0) or 0.0)
 
             # Session rebuy guard on dip-buy override
             if sym.upper() in _session_state["buys"]:
-                allowed, rb_reason = _rebuy_allowed(sym, prob)
+                allowed, rb_reason = _rebuy_allowed(sym, prob, diagnostics)
                 if not allowed:
                     print(f"[DIP-BUY] {sym} blocked by session lock: {rb_reason}")
                     continue
 
-                if prob >= DIP_BUY_MIN_PROB:
-                    if detect_afterhours_dip(sym, threshold=DIP_BUY_THRESHOLD):
+            if prob >= DIP_BUY_MIN_PROB:
+                if detect_afterhours_dip(sym, threshold=DIP_BUY_THRESHOLD):
 
-                        print(
-                            f"ðŸš€ [DIP-BUY] {sym} prob={prob:.2f} + dip - > 100% capital override!"
+                    print(
+                        f"ðŸš€ [DIP-BUY] {sym} prob={prob:.2f} + dip - > 100% capital override!"
+                    )
+
+                    try:
+                        price = (
+                            prices.get(sym, 0.0) or fetch_latest_price(sym) or 0.0
                         )
+                        if price > 0:
+                            pm = pms.get(sym)
+                            if pm:
+                                cash = float(pm.data.get("cash", 0.0))
+                                new_qty = int(cash * 0.98 / price)
 
-                        try:
-                            price = (
-                                prices.get(sym, 0.0) or fetch_latest_price(sym) or 0.0
-                            )
-                            if price > 0:
-                                pm = pms.get(sym)
-                                if pm:
-                                    cash = float(pm.data.get("cash", 0.0))
-                                    new_qty = int(cash * 0.98 / price)
-
-                                    if new_qty > decision.get("qty", 0):
-                                        old_qty = decision.get("qty", 0)
-                                        decision["qty"] = new_qty
-                                        decision["explain"] = (
-                                            f"{decision.get('explain', '')} [DIP-BUY 100%]"
-                                        )
-                                        print(f"   - > {old_qty} - > {new_qty} shares")
-                        except Exception as e:
-                            print(f"[ERROR] Dip-buy: {e}")
+                                if new_qty > decision.get("qty", 0):
+                                    old_qty = decision.get("qty", 0)
+                                    decision["qty"] = new_qty
+                                    decision["explain"] = (
+                                        f"{decision.get('explain', '')} [DIP-BUY 100%]"
+                                    )
+                                    print(f"   - > {old_qty} - > {new_qty} shares")
+                    except Exception as e:
+                        print(f"[ERROR] Dip-buy: {e}")
 
     # ---------------------------------------------------------
     # WEAK-MARKET BUY BLOCKER (core symbols only)
