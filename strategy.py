@@ -55,7 +55,7 @@ from config import (
     POST_STOP_REBUY_BUFFER,
 )
 from portfolio import PortfolioManager
-from predictive_model.data_loader import fetch_latest_price, fetch_historical_data
+from predictive_model.data_loader import fetch_latest_price, fetch_previous_close
 from account_cache import account_cache
 
 NY_TZ = pytz.timezone("America/New_York")
@@ -833,17 +833,10 @@ def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
 
     for sym in universe:
         try:
-            # Get last daily close (previous trading day)
-            df = fetch_historical_data(sym, period="2d", interval="1d")
-            if df is None or len(df) < 1:
+            prev_close = fetch_previous_close(sym)
+            if prev_close is None:
                 print(f"[WEAK-MARKET PRICE] {sym}: no historical data, skipping.")
                 continue
-
-            close = df["Close"]
-            # handle DataFrame/Series issues
-            if isinstance(close, pd.DataFrame):
-                close = close.iloc[:, 0]
-            prev_close = float(close.iloc[-1])
 
             last_price = float(fetch_latest_price(sym) or 0.0)
 

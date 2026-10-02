@@ -2,7 +2,11 @@
 #!/usr/bin/env python
 import time
 
-from predictive_model.data_loader import fetch_historical_data, fetch_latest_price
+from predictive_model.data_loader import (
+    fetch_historical_data,
+    fetch_latest_price,
+    fetch_previous_close,
+)
 from market import is_market_open, debug_market, is_trading_day
 from predictive_model.model_xgb import compute_signals
 from strategy import (
@@ -344,12 +348,8 @@ def get_predictions(symbols, debug=True):
 
         session_return = None
         try:
-            daily_prices = fetch_historical_data(sym, period="2d", interval="1d")
-            if daily_prices is not None and not daily_prices.empty:
-                close = daily_prices["Close"]
-                if isinstance(close, pd.DataFrame):
-                    close = close.iloc[:, 0]
-                previous_close = float(close.iloc[-1])
+            previous_close = fetch_previous_close(sym)
+            if previous_close is not None:
                 current_price = float(sig.get("price") or 0.0)
                 if previous_close > 0 and current_price > 0:
                     session_return = (current_price - previous_close) / previous_close
