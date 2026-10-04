@@ -59,6 +59,7 @@ def fetch_historical_data(
     years: Optional[int] = None,
     period: Optional[str] = None,
     interval: str = "1d",
+    use_cache: bool = True,
 ) -> Optional[pd.DataFrame]:
     """
     Yahoo daily/intraday fetch with disk cache (parquet) and retry with exponential backoff.
@@ -72,12 +73,14 @@ def fetch_historical_data(
     ttl_sec = 6 * 60 * 60 if interval == "1d" else 5 * 60
     cpath = _cache_path(symbol, period, years, interval)
 
-    # Try cache first
-    cached = _read_cache(cpath, ttl_sec)
-    if cached is not None:
-        if isinstance(cached.columns, pd.MultiIndex):
-            cached.columns = cached.columns.get_level_values(0)
-        return cached
+    # Outcome resolution needs a fresh completed-session close. Other callers
+    # retain the existing cached behavior by default.
+    if use_cache:
+        cached = _read_cache(cpath, ttl_sec)
+        if cached is not None:
+            if isinstance(cached.columns, pd.MultiIndex):
+                cached.columns = cached.columns.get_level_values(0)
+            return cached
 
     # Fetch with retries/backoff
     last_err = None

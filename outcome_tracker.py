@@ -16,7 +16,7 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 import argparse
 
 print("[DEBUG] Running outcome_tracker from:", __file__)
@@ -64,22 +64,45 @@ def calculate_return(start_price: float, end_price: float) -> float:
     return (end_price - start_price) / start_price
 
 
-def get_next_day_close(symbol: str, pred_time: pd.Timestamp) -> float:
+def _as_utc_timestamp(value) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _daily_session_dates(index: pd.DatetimeIndex):
+    """Return exchange-session dates without shifting naïve daily labels."""
+    index = pd.DatetimeIndex(pd.to_datetime(index, errors="coerce"))
+    if index.tz is None:
+        return index.date
+    return index.tz_convert("America/New_York").date
+
+
+def get_next_day_close(
+    symbol: str,
+    pred_time: pd.Timestamp,
+    now_utc: pd.Timestamp = None,
+) -> float:
     """
     Get next trading day's close price relative to the prediction date (NY time).
     Works with tz-naive pred_time by treating it as UTC.
     """
     try:
-        # If pred_time is tz-naive, assume UTC; if already tz-aware, leave as is
-        if pred_time.tzinfo is None or pred_time.tzinfo.utcoffset(pred_time) is None:
-            pred_time = pred_time.tz_localize("UTC")
-
-        # Convert prediction time to America/New_York to get the trading date
+        pred_time = _as_utc_timestamp(pred_time)
+        if now_utc is None:
+            now_utc = pd.Timestamp.now(tz="UTC")
+        now_utc = _as_utc_timestamp(now_utc)
         pred_time_ny = pred_time.tz_convert("America/New_York")
         pred_date = pred_time_ny.date()
 
         # Fetch recent daily data (use a larger window, e.g. 60d)
-        df = fetch_historical_data(symbol, period="60d", interval="1d")
+        df = fetch_historical_data(
+            symbol,
+            period="60d",
+            interval="1d",
+            use_cache=False,
+        )
         if df is None or len(df) == 0:
             return None
 
@@ -90,29 +113,25 @@ def get_next_day_close(symbol: str, pred_time: pd.Timestamp) -> float:
 
         df = df.sort_index()
 
-        # Here df.index is typically tz-naive daily dates; treat as UTC first
-        if df.index.tz is None:
-            idx_utc = df.index.tz_localize("UTC")
-        else:
-            idx_utc = df.index
-
-        # Map index to dates in NY time
-        idx_ny = idx_utc.tz_convert("America/New_York")
-        dates = sorted(set(idx_ny.date))
-
-        if pred_date not in dates:
-            # Prediction older than our daily window or date mismatch
-            return None
-
-        i = dates.index(pred_date)
-        if i + 1 >= len(dates):
+        session_dates = _daily_session_dates(df.index)
+        dates = sorted({date for date in session_dates if pd.notna(date)})
+        later_dates = [date for date in dates if date > pred_date]
+        if not later_dates:
             # No next trading day yet in the data
             return None
 
-        next_date = dates[i + 1]
+        next_date = later_dates[0]
+
+        # Yahoo can expose today's still-forming daily candle. Do not resolve it
+        # until the regular session has completed and the close has settled.
+        now_ny = now_utc.tz_convert("America/New_York")
+        if next_date > now_ny.date():
+            return None
+        if next_date == now_ny.date() and now_ny.time() < dtime(16, 15):
+            return None
 
         # Select row(s) where NY date == next_date
-        mask = (idx_ny.date == next_date)
+        mask = session_dates == next_date
         row_next = df.loc[mask]
 
         if isinstance(row_next, pd.DataFrame):
@@ -131,24 +150,24 @@ def get_intraday_horizon_close(
     symbol: str,
     pred_time: pd.Timestamp,
     horizon_minutes: int = 15,
+    now_utc: pd.Timestamp = None,
 ) -> float:
     """Return the first completed intraday close at the prediction horizon."""
     try:
-        pred_time = pd.Timestamp(pred_time)
-        if pred_time.tzinfo is None:
-            pred_time = pred_time.tz_localize("UTC")
-        else:
-            pred_time = pred_time.tz_convert("UTC")
+        pred_time = _as_utc_timestamp(pred_time)
+        if now_utc is None:
+            now_utc = pd.Timestamp.now(tz="UTC")
+        now_utc = _as_utc_timestamp(now_utc)
 
         age_minutes = max(
             horizon_minutes * 4,
-            int((pd.Timestamp.now(tz="UTC") - pred_time).total_seconds() / 60)
+            int((now_utc - pred_time).total_seconds() / 60)
             + horizon_minutes * 4,
         )
         df = fetch_intraday_history(
             symbol,
             lookback_minutes=age_minutes,
-            interval=f"{horizon_minutes}min",
+            interval="15min",
         )
         if df is None or df.empty:
             return None
@@ -159,11 +178,19 @@ def get_intraday_horizon_close(
         df = df.loc[valid]
         df.index = index[valid]
         target_time = pred_time + pd.Timedelta(minutes=horizon_minutes)
-        future = df.loc[df.index >= target_time]
-        if future.empty:
+        bar_end = df.index + pd.Timedelta(minutes=15)
+        pred_session = pred_time.tz_convert("America/New_York").date()
+        bar_sessions = df.index.tz_convert("America/New_York").date
+        eligible = (
+            (bar_end >= target_time)
+            & (bar_end <= now_utc)
+            & (bar_sessions == pred_session)
+        )
+        completed = df.loc[eligible]
+        if completed.empty:
             return None
 
-        close = future["Close"]
+        close = completed["Close"]
         if isinstance(close, pd.DataFrame):
             close = close.iloc[:, 0]
         return float(close.iloc[0])
@@ -266,9 +293,9 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
             else:
                 actual_price = get_next_day_close(symbol, pred_time)
                 min_move = 0.002
-                outcome_horizon = "next_trading_day"
+                outcome_horizon = "next_trading_session"
             if actual_price is None:
-                print(f"[DEBUG] {symbol} row {idx}: no next-day close found, skipping")
+                print(f"[DEBUG] {symbol} row {idx}: no completed horizon close found, skipping")
                 continue
 
             ret = calculate_return(start_price, actual_price)
