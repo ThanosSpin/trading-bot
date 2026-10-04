@@ -71,6 +71,16 @@ def _as_utc_timestamp(value) -> pd.Timestamp:
     return timestamp.tz_convert("UTC")
 
 
+def _parse_prediction_timestamps(values, utc: bool = False):
+    """Parse legacy space-separated and newer ISO prediction timestamps."""
+    try:
+        return pd.to_datetime(values, errors="coerce", format="mixed", utc=utc)
+    except TypeError:
+        # pandas versions before format="mixed" support already parse these
+        # values element by element.
+        return pd.to_datetime(values, errors="coerce", utc=utc)
+
+
 def _daily_session_dates(index: pd.DatetimeIndex):
     """Return exchange-session dates without shifting naïve daily labels."""
     index = pd.DatetimeIndex(pd.to_datetime(index, errors="coerce"))
@@ -228,10 +238,7 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
                 raise ValueError(f"Missing required column '{col}' in {log_file}")
 
         # Parse timestamp with timezone, then drop tz => datetime64[ns]
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            errors="coerce",
-        )
+        df["timestamp"] = _parse_prediction_timestamps(df["timestamp"])
 
         # Preserve outcomes already resolved by earlier runs.
         for column in (
@@ -248,7 +255,9 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
         df_update = df.copy()
         if lookback_hours is not None:
             cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
-            timestamp_utc = pd.to_datetime(df_update["timestamp"], utc=True, errors="coerce")
+            timestamp_utc = _parse_prediction_timestamps(
+                df_update["timestamp"], utc=True
+            )
             df_update = df_update.loc[timestamp_utc >= cutoff]
 
         # Only consider rows with missing outcomes

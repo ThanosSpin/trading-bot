@@ -7,6 +7,19 @@ import outcome_tracker
 
 
 class OutcomeTrackerCloseTests(unittest.TestCase):
+    def test_mixed_legacy_and_iso_prediction_timestamps_are_retained(self):
+        values = pd.Series(
+            [
+                "2026-09-17 11:36:41.830837",
+                "2026-10-02T15:42:08.264912",
+            ]
+        )
+
+        parsed = outcome_tracker._parse_prediction_timestamps(values, utc=True)
+
+        self.assertEqual(parsed.notna().sum(), 2)
+        self.assertEqual(str(parsed.dt.tz), "UTC")
+
     def test_daily_naive_index_keeps_exchange_session_date_and_bypasses_cache(self):
         daily = pd.DataFrame(
             {"Close": [100.0, 105.0]},
