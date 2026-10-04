@@ -237,8 +237,10 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
             if col not in df.columns:
                 raise ValueError(f"Missing required column '{col}' in {log_file}")
 
-        # Parse timestamp with timezone, then drop tz => datetime64[ns]
-        df["timestamp"] = _parse_prediction_timestamps(df["timestamp"])
+        # Keep the serialized timestamp column byte-for-byte intact. Parsing is
+        # performed in a temporary column so an unrecognized legacy value can
+        # never be rewritten as an empty field when the CSV is saved.
+        parsed_timestamps = _parse_prediction_timestamps(df["timestamp"], utc=True)
 
         # Preserve outcomes already resolved by earlier runs.
         for column in (
@@ -253,12 +255,10 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
                 df[column] = np.nan
 
         df_update = df.copy()
+        df_update["_parsed_timestamp"] = parsed_timestamps
         if lookback_hours is not None:
             cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_hours)
-            timestamp_utc = _parse_prediction_timestamps(
-                df_update["timestamp"], utc=True
-            )
-            df_update = df_update.loc[timestamp_utc >= cutoff]
+            df_update = df_update.loc[df_update["_parsed_timestamp"] >= cutoff]
 
         # Only consider rows with missing outcomes
         df_pending = df_update[df_update["actual_outcome"].isna()].copy()
@@ -277,7 +277,7 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
 
         updated_count = 0
         for idx, row in df_pending.iterrows():
-            pred_time = row["timestamp"]
+            pred_time = row["_parsed_timestamp"]
             pred_price = row.get("price", None)
 
             if pd.isna(pred_time):

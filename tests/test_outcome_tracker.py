@@ -1,5 +1,7 @@
 import unittest
 from unittest.mock import patch
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 import pandas as pd
 
@@ -19,6 +21,29 @@ class OutcomeTrackerCloseTests(unittest.TestCase):
 
         self.assertEqual(parsed.notna().sum(), 2)
         self.assertEqual(str(parsed.dt.tz), "UTC")
+
+    def test_unparseable_timestamp_is_not_erased_when_csv_is_saved(self):
+        with TemporaryDirectory() as directory:
+            log_file = Path(directory) / "predictions_TEST.csv"
+            original_timestamp = "legacy-value-that-cannot-be-parsed"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": original_timestamp,
+                        "symbol": "TEST",
+                        "mode": "daily",
+                        "predicted_prob": 0.6,
+                        "price": 100.0,
+                    }
+                ]
+            ).to_csv(log_file, index=False)
+
+            with patch.object(outcome_tracker, "LOGS_DIR", directory):
+                updated = outcome_tracker.update_outcomes_for_symbol("TEST")
+
+            saved = pd.read_csv(log_file)
+            self.assertEqual(updated, 0)
+            self.assertEqual(saved.loc[0, "timestamp"], original_timestamp)
 
     def test_daily_naive_index_keeps_exchange_session_date_and_bypasses_cache(self):
         daily = pd.DataFrame(
