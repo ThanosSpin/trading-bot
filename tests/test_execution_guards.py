@@ -91,13 +91,13 @@ class ExecutionGuardTests(unittest.TestCase):
             "AAPL": {**aapl, "cost_aware_threshold": True},
         }
         self.assertAlmostEqual(
-            strategy._effective_buy_threshold("NVDA", diagnostics), 0.52
+            strategy._effective_buy_threshold("NVDA", diagnostics), 0.55
         )
         self.assertAlmostEqual(
             strategy._effective_sell_threshold("NVDA", diagnostics), 0.53
         )
         self.assertAlmostEqual(
-            strategy._effective_buy_threshold("AAPL", diagnostics), 0.57
+            strategy._effective_buy_threshold("AAPL", diagnostics), 0.60
         )
         self.assertAlmostEqual(
             strategy._effective_sell_threshold("AAPL", diagnostics), 0.58

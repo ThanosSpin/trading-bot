@@ -580,6 +580,15 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
     else:
         thr = min(0.95, configured_base + float(MODEL_ENTRY_BUFFER))
 
+    # Preserve a no-trade band between entry and exit. A cost-aware artifact
+    # may lower the class boundary, but it must never make BUY overlap SELL.
+    # Reuse the configured entry buffer as the minimum hysteresis width.
+    effective_sell = _effective_sell_threshold(sym, diagnostics)
+    thr = min(
+        0.95,
+        max(thr, effective_sell + float(MODEL_ENTRY_BUFFER)),
+    )
+
     # 2) Time-of-day adjustment: stricter in last hour before close
     now_ny = _dt.now(NY_TZ)
     minutes_since_open = (now_ny.hour * 60 + now_ny.minute) - (9 * 60 + 30)
