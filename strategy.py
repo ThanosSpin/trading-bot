@@ -41,6 +41,9 @@ from config import (
     ARTIFACT_THRESHOLD_FALLBACK,
     MODEL_ENTRY_BUFFER,
     MODEL_EXIT_BUFFER,
+    COST_AWARE_BUY_FLOOR,
+    COST_AWARE_SELL_CEILING,
+    COST_AWARE_MIN_HYSTERESIS,
     MODEL_REBUY_BUFFER,
     MODEL_PYRAMID_BUFFER,
     MODEL_MIN_CLASS_BOUNDARY,
@@ -554,6 +557,8 @@ def combine_artifact_decision_thresholds(
 def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
     configured_base = float(AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD)
+    threshold_source = "fallback"
+    cost_aware_threshold = False
 
     if USE_ARTIFACT_THRESHOLDS:
         class_boundary = _artifact_threshold_from_diag(sym, diagnostics)
@@ -584,9 +589,18 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
     # may lower the class boundary, but it must never make BUY overlap SELL.
     # Reuse the configured entry buffer as the minimum hysteresis width.
     effective_sell = _effective_sell_threshold(sym, diagnostics)
+    if cost_aware_threshold and threshold_source != "fallback":
+        if sym == "AAPL":
+            # Preserve AAPL's established stricter entry policy.
+            thr = max(thr, configured_base + float(MODEL_ENTRY_BUFFER))
+        else:
+            thr = max(thr, float(COST_AWARE_BUY_FLOOR))
+        hysteresis = float(COST_AWARE_MIN_HYSTERESIS)
+    else:
+        hysteresis = float(MODEL_ENTRY_BUFFER)
     thr = min(
         0.95,
-        max(thr, effective_sell + float(MODEL_ENTRY_BUFFER)),
+        max(thr, effective_sell + hysteresis),
     )
 
     # 2) Time-of-day adjustment: stricter in last hour before close
@@ -621,7 +635,15 @@ def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> 
         )
         configured_ceiling = configured_base - float(MODEL_EXIT_BUFFER)
         # Artifact boundaries may trigger an earlier exit, never a later one.
-        return max(0.05, min(0.95, max(configured_ceiling, artifact_exit)))
+        threshold = max(0.05, min(0.95, max(configured_ceiling, artifact_exit)))
+        symbol_diagnostics = ((diagnostics or {}).get(sym, {}) or {})
+        if (
+            sym != "AAPL"
+            and symbol_diagnostics.get("threshold_source") != "fallback"
+            and bool(symbol_diagnostics.get("cost_aware_threshold", False))
+        ):
+            threshold = min(threshold, float(COST_AWARE_SELL_CEILING))
+        return threshold
     return float(SELL_THRESHOLD)
 
 

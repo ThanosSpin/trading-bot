@@ -65,6 +65,11 @@ ARTIFACT_THRESHOLD_FALLBACK = 0.55
 
 MODEL_ENTRY_BUFFER = 0.02
 MODEL_EXIT_BUFFER = 0.02
+# Cost-aware thresholds may relax the legacy entry floor, but keep a wider
+# neutral band to limit churn between six-minute decision cycles.
+COST_AWARE_BUY_FLOOR = 0.56
+COST_AWARE_SELL_CEILING = 0.52
+COST_AWARE_MIN_HYSTERESIS = 0.04
 MODEL_REBUY_BUFFER = 0.04
 MODEL_PYRAMID_BUFFER = 0.08
 # A trained, cost-aware artifact may lower the legacy entry floor, but never
