@@ -637,6 +637,7 @@ def train_model(
             "[WALK-FORWARD] "
             f"folds={walk_forward_evaluation['n_splits']} "
             f"trades={wf_metrics['trade_count']} "
+            f"threshold={walk_forward_evaluation['decision_threshold']:.3f} "
             f"net_return={wf_metrics['net_return']:.2%} "
             f"profit_factor={wf_metrics['profit_factor']:.3f} "
             f"max_drawdown={wf_metrics['max_drawdown']:.2%} "
@@ -727,13 +728,16 @@ def train_model(
     try:
         if num_classes == 2:
             cal_pred_proba = final_model.predict_proba(X_cal)[:, 1]
-            threshold_opt = optimize_binary_decision_threshold(
-                y_cal,
-                cal_pred_proba,
-                metric="f1",
-                min_threshold=0.35,
-                max_threshold=0.65,
-                step=0.01,
+            threshold_opt = (
+                (walk_forward_evaluation or {}).get("threshold_optimization")
+                or optimize_binary_decision_threshold(
+                    y_cal,
+                    cal_pred_proba,
+                    metric="f1",
+                    min_threshold=0.35,
+                    max_threshold=0.65,
+                    step=0.01,
+                )
             )
             best_threshold = float(threshold_opt["best_threshold"])
             y_pred_proba = final_model.predict_proba(X_test)[:, 1]
@@ -750,6 +754,10 @@ def train_model(
             metrics["threshold_metric"] = threshold_opt["metric"]
             metrics["threshold_score"] = float(threshold_opt["best_score"])
             metrics["threshold_grid"] = threshold_opt["grid"]
+            metrics["threshold_eligible"] = threshold_opt.get("eligible")
+            metrics["threshold_selected_metrics"] = threshold_opt.get(
+                "selected_metrics"
+            )
 
             if len(np.unique(y_test)) >= 2:
                 metrics["brier_score"] = float(brier_score_loss(y_test, y_pred_proba))
@@ -869,11 +877,15 @@ def train_model(
         "metrics": metrics,
         "walk_forward_evaluation": walk_forward_evaluation,
         "decision_threshold": metrics.get("decision_threshold", 0.5),
-        "threshold_optimization": {
-            "metric": metrics.get("threshold_metric"),
-            "score": metrics.get("threshold_score"),
-            "grid": metrics.get("threshold_grid", []),
-        },
+        "threshold_optimization": (
+            (walk_forward_evaluation or {}).get("threshold_optimization")
+            or {
+                "best_threshold": metrics.get("decision_threshold", 0.5),
+                "metric": metrics.get("threshold_metric"),
+                "best_score": metrics.get("threshold_score"),
+                "grid": metrics.get("threshold_grid", []),
+            }
+        ),
         "feature_importance": feature_importance,
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
@@ -954,6 +966,9 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
             flat_probability = 1.0 - movement_probability
             final_probability = direction_probability if movement_expected else 0.5
             decision_threshold = float(model_dict.get("decision_threshold", 0.5))
+            threshold_metric = (
+                (model_dict.get("threshold_optimization") or {}).get("metric")
+            )
             return {
                 "final_prob": final_probability,
                 "direction_prob": direction_probability,
@@ -964,6 +979,7 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
                 "bearish_prob": bearish_probability,
                 "flat_prob": flat_probability,
                 "decision_threshold": decision_threshold,
+                "threshold_metric": threshold_metric,
                 "position_size": probability_to_position_size(
                     final_probability, decision_threshold=decision_threshold
                 ),
@@ -977,12 +993,16 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         if num_classes == 2 or target_type == "binary":
             prob = float(proba[1])
             decision_threshold = float(model_dict.get("decision_threshold", 0.5))
+            threshold_metric = (
+                (model_dict.get("threshold_optimization") or {}).get("metric")
+            )
 
             # The saved artifact owns calibration. Applying a second external
             # calibrator here would distort an already calibrated probability.
             return {
                 "final_prob": prob,
                 "decision_threshold": decision_threshold,
+                "threshold_metric": threshold_metric,
                 "position_size": probability_to_position_size(prob, decision_threshold=decision_threshold),
                 "top_features": model_dict.get("feature_importance", {}).get("top_features", [])[:5],
                 "model_type": "binary",

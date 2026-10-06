@@ -99,7 +99,7 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertAlmostEqual(info["decision_threshold"], 0.62)
         self.assertEqual(info["threshold_source"], "blended")
 
-    def test_artifact_boundary_uses_buffers_and_conservative_buy_floor(self):
+    def test_artifact_boundary_uses_buffers_and_model_safety_floor(self):
         nvda = strategy.combine_artifact_decision_thresholds(
             "NVDA", 0.50, 0.50, 0.50
         )
@@ -108,18 +108,35 @@ class ExecutionGuardTests(unittest.TestCase):
         )
         self.assertAlmostEqual(nvda["decision_threshold"], 0.50)
         self.assertAlmostEqual(aapl["decision_threshold"], 0.50)
-        diagnostics = {"NVDA": nvda, "AAPL": aapl}
+        diagnostics = {
+            "NVDA": {**nvda, "cost_aware_threshold": True},
+            "AAPL": {**aapl, "cost_aware_threshold": True},
+        }
         self.assertAlmostEqual(
-            strategy._effective_buy_threshold("NVDA", diagnostics), 0.57
+            strategy._effective_buy_threshold("NVDA", diagnostics), 0.56
         )
         self.assertAlmostEqual(
-            strategy._effective_sell_threshold("NVDA", diagnostics), 0.53
+            strategy._effective_sell_threshold("NVDA", diagnostics), 0.52
+        )
+        self.assertGreaterEqual(
+            strategy._effective_buy_threshold("NVDA", diagnostics)
+            - strategy._effective_sell_threshold("NVDA", diagnostics),
+            0.04,
         )
         self.assertAlmostEqual(
             strategy._effective_buy_threshold("AAPL", diagnostics), 0.62
         )
         self.assertAlmostEqual(
             strategy._effective_sell_threshold("AAPL", diagnostics), 0.58
+        )
+
+    def test_legacy_artifact_keeps_configured_entry_floor(self):
+        info = strategy.combine_artifact_decision_thresholds(
+            "NVDA", 0.40, 0.45, 0.50
+        )
+        diagnostics = {"NVDA": {**info, "cost_aware_threshold": False}}
+        self.assertAlmostEqual(
+            strategy._effective_buy_threshold("NVDA", diagnostics), 0.57
         )
 
     def test_invalid_artifact_threshold_uses_valid_daily_value(self):
