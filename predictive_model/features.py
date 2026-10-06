@@ -91,6 +91,89 @@ def _fix_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_intraday_vwap_volume_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add causal regular-session VWAP and time-of-day volume features."""
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Intraday features require a DatetimeIndex")
+    if df.index.tz is None:
+        raise ValueError("Intraday features require a timezone-aware DatetimeIndex")
+
+    out = df.copy()
+    ny_index = out.index.tz_convert("America/New_York")
+    clock_minute = pd.Series(
+        ny_index.hour * 60 + ny_index.minute,
+        index=out.index,
+        dtype="int64",
+    )
+    regular_session = clock_minute.between(9 * 60 + 30, 16 * 60 - 1)
+    session_key = pd.Series(ny_index.date, index=out.index)
+
+    close = pd.to_numeric(out["Close"], errors="coerce")
+    high = pd.to_numeric(out["High"], errors="coerce")
+    low = pd.to_numeric(out["Low"], errors="coerce")
+    volume = pd.to_numeric(out["Volume"], errors="coerce").clip(lower=0.0)
+    regular_volume = volume.where(regular_session)
+
+    typical_price = (high + low + close) / 3.0
+    cumulative_volume = regular_volume.groupby(session_key).cumsum()
+    cumulative_price_volume = (
+        (typical_price * regular_volume).groupby(session_key).cumsum()
+    )
+    session_vwap = cumulative_price_volume / cumulative_volume.replace(0.0, np.nan)
+    vwap_distance = close / session_vwap.replace(0.0, np.nan) - 1.0
+    above_vwap = (vwap_distance > 0.0).astype(float)
+    previous_above = above_vwap.groupby(session_key).shift(1)
+
+    out["vwap_distance"] = vwap_distance.where(regular_session, 0.0).fillna(0.0)
+    out["vwap_slope_4"] = (
+        session_vwap.groupby(session_key)
+        .pct_change(periods=4, fill_method=None)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+    out["above_vwap"] = above_vwap.where(regular_session, 0.0).fillna(0.0)
+    out["vwap_cross_up"] = (
+        ((above_vwap == 1.0) & (previous_above == 0.0))
+        .astype(float)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+    out["vwap_cross_down"] = (
+        ((above_vwap == 0.0) & (previous_above == 1.0))
+        .astype(float)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+
+    # The baseline for a clock slot uses earlier sessions only. The shifted
+    # rolling fallback provides a neutral causal baseline during session one.
+    expected_slot_volume = regular_volume.groupby(clock_minute).transform(
+        lambda values: values.shift(1).expanding(min_periods=1).mean()
+    )
+    fallback_volume = regular_volume.shift(1).rolling(20, min_periods=1).mean()
+    expected_volume = expected_slot_volume.fillna(fallback_volume)
+    volume_time_ratio = (volume / expected_volume.replace(0.0, np.nan)).clip(
+        lower=0.05, upper=20.0
+    )
+    out["volume_time_ratio"] = (
+        volume_time_ratio.where(regular_session, 1.0).fillna(1.0)
+    )
+    out["volume_time_log_ratio"] = np.log(out["volume_time_ratio"])
+
+    expected_cumulative_volume = (
+        expected_volume.where(regular_session).groupby(session_key).cumsum()
+    )
+    session_volume_pace = cumulative_volume / expected_cumulative_volume.replace(
+        0.0, np.nan
+    )
+    out["session_volume_pace"] = (
+        session_volume_pace.clip(lower=0.05, upper=20.0)
+        .where(regular_session, 1.0)
+        .fillna(1.0)
+    )
+    return out
+
+
 # ============================================================================
 # CLEAN INVALID COLUMNS
 # ============================================================================
@@ -287,6 +370,7 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
 
     if mode == "intraday" and isinstance(df.index, pd.DatetimeIndex):
         df = canonical_add_time_features(df)
+        df = add_intraday_vwap_volume_features(df)
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
@@ -372,7 +456,11 @@ def get_feature_schema(df: pd.DataFrame) -> dict:
         "trend": [c for c in columns if c.startswith(("ema_", "sma_", "momentum_", "breakout_", "trend_consistency_"))],
         "oscillators": [c for c in columns if c.startswith(("rsi_", "macd", "stoch_", "bb_"))],
         "volatility": [c for c in columns if c.startswith(("atr", "vol_"))],
-        "volume": [c for c in columns if c.startswith(("volume_roc", "obv", "vol_momentum_"))],
+        "volume": [c for c in columns if c.startswith(("volume_roc", "volume_time_", "obv", "vol_momentum_"))],
+        "microstructure": [
+            c for c in columns
+            if c.startswith("vwap_") or c in {"above_vwap", "session_volume_pace"}
+        ],
         "lags": [c for c in columns if c.startswith("lag_ret_")],
         "time": [c for c in columns if c.startswith(("time_", "minutes_", "is_", "clock_"))],
         "market_regime": [c for c in columns if c.startswith("spy_")],
