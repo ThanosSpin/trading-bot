@@ -23,6 +23,28 @@ class ExecutionGuardTests(unittest.TestCase):
     def setUp(self):
         strategy.reset_session_state()
 
+    def test_momentum_breakout_can_fetch_daily_history(self):
+        import pandas as pd
+
+        history = pd.DataFrame({"Close": [100.0] * 60})
+        diagnostics = {
+            "NVDA": {
+                "intraday_mom": 0.01,
+                "intraday_vol": 0.013,
+                "price": 103.0,
+            }
+        }
+        with patch.object(
+            strategy, "fetch_historical_data", return_value=history
+        ) as fetch:
+            force_buy, reason = strategy.check_momentum_breakout(
+                "NVDA", diagnostics, {"NVDA": 0.60}
+            )
+
+        self.assertTrue(force_buy)
+        self.assertIn("MOMENTUM BREAKOUT", reason)
+        fetch.assert_called_once_with("NVDA", period="3mo", interval="1d")
+
     def test_pyramid_cooldown_and_cap_reset_when_position_closes(self):
         allowed, _ = strategy._pyramid_allowed("ABBV")
         self.assertTrue(allowed)

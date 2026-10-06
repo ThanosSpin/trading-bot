@@ -55,7 +55,11 @@ from config import (
     POST_STOP_REBUY_BUFFER,
 )
 from portfolio import PortfolioManager
-from predictive_model.data_loader import fetch_latest_price, fetch_previous_close
+from predictive_model.data_loader import (
+    fetch_historical_data,
+    fetch_latest_price,
+    fetch_previous_close,
+)
 from account_cache import account_cache
 
 NY_TZ = pytz.timezone("America/New_York")
