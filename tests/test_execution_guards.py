@@ -1,4 +1,7 @@
 import unittest
+import json
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -69,6 +72,27 @@ class ExecutionGuardTests(unittest.TestCase):
         allowed, reason = strategy._rebuy_allowed("ABBV", 0.99)
         self.assertFalse(allowed)
         self.assertIn("post-stop rebuy blocked", reason)
+
+    def test_loading_legacy_state_resets_at_new_ny_trading_date(self):
+        legacy_state = {
+            "buys": ["NVDA"],
+            "sells": ["NVDA"],
+            "buy_times": {},
+            "sell_times": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "session_state_live.json"
+            state_path.write_text(json.dumps(legacy_state))
+            with patch.object(strategy, "SESSION_STATE_PATH", str(state_path)):
+                strategy.load_session_state()
+                saved = json.loads(state_path.read_text())
+
+        self.assertNotIn("NVDA", strategy._session_state["buys"])
+        self.assertNotIn("NVDA", strategy._session_state["sells"])
+        self.assertEqual(
+            saved["session_date"],
+            strategy._dt.now(strategy.NY_TZ).date().isoformat(),
+        )
 
     def test_rotation_uses_guarded_buy_and_requires_flat_target(self):
         decisions = {
