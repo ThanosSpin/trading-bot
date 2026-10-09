@@ -74,6 +74,7 @@ NY_TZ = pytz.timezone("America/New_York")
 # main.py calls reset_session_state() at bot startup each day.
 # ---------------------------------------------------------
 _session_state: dict = {
+    "session_date": None,  # New York trading date (YYYY-MM-DD)
     "buys": set(),  # symbols bought at least once today
     "sells": set(),  # symbols sold at least once today
     "flattened": set(),  # symbols force-flattened near close today
@@ -99,6 +100,7 @@ SESSION_STATE_PATH = os.path.join(
 
 def reset_session_state():
     """Call once at bot startup each trading day."""
+    _session_state["session_date"] = _dt.now(NY_TZ).date().isoformat()
     _session_state["buys"].clear()
     _session_state["sells"].clear()
     _session_state["flattened"].clear()
@@ -118,6 +120,20 @@ def load_session_state():
         if os.path.exists(SESSION_STATE_PATH):
             with open(SESSION_STATE_PATH, "r") as f:
                 data = json.load(f)
+
+            current_session_date = _dt.now(NY_TZ).date().isoformat()
+            saved_session_date = data.get("session_date")
+            if saved_session_date != current_session_date:
+                print(
+                    "[SESSION] New NY trading date detected: "
+                    f"saved={saved_session_date or 'legacy/unknown'} "
+                    f"current={current_session_date}. Resetting session state."
+                )
+                reset_session_state()
+                save_session_state()
+                return
+
+            _session_state["session_date"] = current_session_date
 
             _session_state["buys"] = set(data.get("buys", []))
             _session_state["sells"] = set(data.get("sells", []))
@@ -151,6 +167,10 @@ def load_session_state():
 def save_session_state():
     try:
         data = {
+            "session_date": (
+                _session_state.get("session_date")
+                or _dt.now(NY_TZ).date().isoformat()
+            ),
             "buys": list(_session_state["buys"]),
             "sells": list(_session_state["sells"]),
             "flattened": list(_session_state["flattened"]),
