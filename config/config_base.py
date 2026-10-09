@@ -128,6 +128,12 @@ MODEL_EVAL_TRANSACTION_COST_BPS = 10.0
 # so one worker avoids CPU saturation and calibration process duplication.
 MODEL_TRAIN_N_JOBS = 1
 
+# Experimental guarded entry path. Keep disabled unless explicitly enabled in
+# the isolated paper worktree with RELATIVE_MOMENTUM_ENTRY_ENABLED=true.
+RELATIVE_MOMENTUM_ENTRY_ENABLED = os.getenv(
+    "RELATIVE_MOMENTUM_ENTRY_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
 STOP_LOSS = 0.97
 TAKE_PROFIT = None
 TRAIL_STOP = 0.985

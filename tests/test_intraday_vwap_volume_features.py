@@ -3,7 +3,10 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from predictive_model.features import add_intraday_vwap_volume_features
+from predictive_model.features import (
+    add_intraday_relative_market_features,
+    add_intraday_vwap_volume_features,
+)
 
 
 class IntradayVwapVolumeFeatureTests(unittest.TestCase):
@@ -70,6 +73,45 @@ class IntradayVwapVolumeFeatureTests(unittest.TestCase):
         frame.index = frame.index.tz_localize(None)
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
             add_intraday_vwap_volume_features(frame)
+
+    def test_relative_returns_use_matching_benchmark_bars(self):
+        frame = add_intraday_vwap_volume_features(self._frame())
+        benchmark = self._frame().copy()
+        benchmark["Close"] = np.array(
+            [100, 100.5, 101, 101.5, 102, 102.5, 200, 201, 202, 203, 204, 205],
+            dtype=float,
+        )
+        benchmark["Open"] = benchmark["Close"]
+        benchmark["High"] = benchmark["Close"] + 1.0
+        benchmark["Low"] = benchmark["Close"] - 1.0
+
+        result = add_intraday_relative_market_features(frame, benchmark)
+        row = frame.index[-1]
+        expected = frame["Close"].pct_change(4).loc[row] - benchmark["Close"].pct_change(4).loc[row]
+        self.assertAlmostEqual(result.loc[row, "relative_return_4"], expected)
+        self.assertEqual(result.loc[row, "relative_market_available"], 1.0)
+
+    def test_relative_alignment_never_uses_future_benchmark_bar(self):
+        frame = add_intraday_vwap_volume_features(self._frame().iloc[:6])
+        benchmark = self._frame().iloc[:6].copy()
+        benchmark.index = benchmark.index + pd.Timedelta(minutes=1)
+
+        result = add_intraday_relative_market_features(frame, benchmark)
+
+        self.assertEqual(result.iloc[0]["relative_market_available"], 0.0)
+        self.assertEqual(result.iloc[1]["relative_market_available"], 1.0)
+        # At 09:45, alignment may use 09:31 but never the future 09:46 bar.
+        self.assertAlmostEqual(result.iloc[1]["spy_return_1"], 0.0)
+        self.assertAlmostEqual(
+            result.iloc[2]["spy_return_1"],
+            benchmark["Close"].iloc[1] / benchmark["Close"].iloc[0] - 1.0,
+        )
+
+    def test_missing_benchmark_is_explicit_and_neutral(self):
+        frame = add_intraday_vwap_volume_features(self._frame())
+        result = add_intraday_relative_market_features(frame, None)
+        self.assertTrue((result["relative_market_available"] == 0.0).all())
+        self.assertTrue((result["relative_return_4"] == 0.0).all())
 
 
 if __name__ == "__main__":

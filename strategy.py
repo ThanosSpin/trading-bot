@@ -58,6 +58,7 @@ from config import (
     MAX_PYRAMID_ADDITIONS,
     POST_STOP_REBUY_COOLDOWN_MINUTES,
     POST_STOP_REBUY_BUFFER,
+    RELATIVE_MOMENTUM_ENTRY_ENABLED,
 )
 from portfolio import PortfolioManager
 from predictive_model.data_loader import (
@@ -1447,6 +1448,72 @@ def check_momentum_breakout(sym: str, diagnostics: dict, preds: dict) -> tuple:
     return False, ""
 
 
+def check_relative_momentum_entry(
+    sym: str,
+    diagnostics: dict,
+    preds: dict,
+    now_ny=None,
+) -> tuple:
+    """Return a guarded early relative-strength entry score and explanation."""
+    d = (diagnostics or {}).get(sym, {}) or {}
+    if float(d.get("relative_market_available", 0.0) or 0.0) < 1.0:
+        return False, 0.0, ""
+    if d.get("movement_expected") is False:
+        return False, 0.0, ""
+
+    values = {}
+    for name in (
+        "session_return",
+        "relative_session_return",
+        "relative_return_4",
+        "relative_strength_accel",
+        "vwap_distance",
+        "vwap_slope_4",
+        "volume_time_ratio",
+        "intraday_mom",
+    ):
+        try:
+            values[name] = float(d.get(name))
+        except (TypeError, ValueError):
+            return False, 0.0, ""
+
+    probability = float((preds or {}).get(sym, 0.0) or 0.0)
+    now_ny = now_ny or _dt.now(NY_TZ)
+    minute = now_ny.hour * 60 + now_ny.minute
+    if not (9 * 60 + 45 <= minute < 15 * 60):
+        return False, 0.0, ""
+
+    qualifies = (
+        0.005 <= values["session_return"] <= 0.020
+        and values["relative_session_return"] >= 0.005
+        and values["relative_return_4"] >= 0.002
+        and values["relative_strength_accel"] >= -0.001
+        and values["vwap_distance"] > 0.0
+        and values["vwap_slope_4"] > 0.0
+        and values["volume_time_ratio"] >= 0.80
+        and 0.0 < values["intraday_mom"] <= 0.010
+        and probability >= 0.50
+    )
+    if not qualifies:
+        return False, 0.0, ""
+
+    score = (
+        probability
+        + 2.0 * values["relative_session_return"]
+        + values["relative_return_4"]
+        + 0.5 * max(0.0, values["relative_strength_accel"])
+    )
+    reason = (
+        f"[RELATIVE MOMENTUM] {sym}: session={values['session_return']:.2%}, "
+        f"vs_SPY={values['relative_session_return']:.2%}, "
+        f"rel_60m={values['relative_return_4']:.2%}, "
+        f"VWAP={values['vwap_distance']:.2%}, "
+        f"volume_time={values['volume_time_ratio']:.2f}, "
+        f"model={probability:.3f}"
+    )
+    return True, float(score), reason
+
+
 # ---------------------------------------------------------
 # NVDA-priority coordinator
 # ---------------------------------------------------------
@@ -2401,6 +2468,69 @@ def compute_strategy_decisions(
             decisions[spy_sym] = make_decision(
                 "hold", 0, f"{spy_sym}: Mutual-exclusive - > skipping SPY this cycle."
             )
+
+    # ============================================================
+    # GUARDED RELATIVE-MOMENTUM ENTRY
+    # ============================================================
+    relative_candidates = []
+    for sym in core_symbols if RELATIVE_MOMENTUM_ENTRY_ENABLED else []:
+        qualifies, score, reason = check_relative_momentum_entry(
+            sym, diagnostics, preds
+        )
+        if not qualifies:
+            continue
+        if float(pms[sym].data.get("shares", 0.0) or 0.0) > 0:
+            continue
+        if (
+            _block_buy_on_pullback(sym)
+            or _block_buy_on_weak_volume(sym)
+            or _block_buy_overbought(sym)
+        ):
+            print(f"[RELATIVE MOMENTUM] {sym} blocked by existing entry guard")
+            continue
+        allowed, cooldown_reason = _rebuy_allowed(
+            sym, preds.get(sym, 0.0), diagnostics
+        )
+        if not allowed:
+            print(
+                f"[RELATIVE MOMENTUM] {sym} blocked by session lock: "
+                f"{cooldown_reason}"
+            )
+            continue
+        relative_candidates.append((score, sym, reason))
+
+    if relative_candidates:
+        _score, relative_symbol, relative_reason = max(relative_candidates)
+        cash = float(account_state.get("cash", 0.0) or 0.0)
+        price = float(prices.get(relative_symbol, 0.0) or 0.0)
+        buy_qty = int((cash * float(RISK_FRACTION)) // price) if price > 0 else 0
+        buy_qty = apply_position_limits(
+            buy_qty, price, cash, relative_symbol
+        )
+        if buy_qty > 0:
+            # Prefer the strongest confirmed relative-momentum candidate over
+            # simultaneous unconfirmed model-only entries.
+            for sym in core_symbols:
+                existing = decisions.get(sym) or {}
+                if (
+                    sym != relative_symbol
+                    and existing.get("action") == "buy"
+                    and float(pms[sym].data.get("shares", 0.0) or 0.0) <= 0
+                ):
+                    decisions[sym] = make_decision(
+                        "hold",
+                        0,
+                        f"{sym}: BUY suppressed; stronger relative momentum in "
+                        f"{relative_symbol}.",
+                    )
+            decisions[relative_symbol] = make_decision(
+                "buy",
+                buy_qty,
+                relative_reason,
+                relative_momentum=True,
+                priority_rank=1,
+            )
+            print(f"{relative_reason} -> BUY {buy_qty} shares")
 
     # ============================================================
     # MOMENTUM BREAKOUT OVERRIDE (before dip-buy)

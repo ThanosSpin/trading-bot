@@ -392,6 +392,18 @@ def get_predictions(symbols, debug=True):
             "allow_intraday": sig.get("allow_intraday"),
             "intraday_volume": sig.get("intraday_volume"),
             "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
+            "vwap_distance": sig.get("vwap_distance"),
+            "vwap_slope_4": sig.get("vwap_slope_4"),
+            "above_vwap": sig.get("above_vwap"),
+            "volume_time_ratio": sig.get("volume_time_ratio"),
+            "session_volume_pace": sig.get("session_volume_pace"),
+            "relative_return_1": sig.get("relative_return_1"),
+            "relative_return_2": sig.get("relative_return_2"),
+            "relative_return_4": sig.get("relative_return_4"),
+            "relative_strength_accel": sig.get("relative_strength_accel"),
+            "relative_session_return": sig.get("relative_session_return"),
+            "relative_vwap_strength": sig.get("relative_vwap_strength"),
+            "relative_market_available": sig.get("relative_market_available"),
             "price": sig.get("price"),
             "session_return": session_return,
             "daily_movement_expected": (
@@ -542,6 +554,16 @@ def print_signal_diagnostics(decisions, diagnostics):
             f"| q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} "
             f"| regime={sig.get('intraday_regime')} | model={model_used} | {action}"
         )
+        if sig.get("relative_market_available"):
+            print(
+                f"    [RELATIVE] {sym}: "
+                f"session_vs_SPY={fmt(sig.get('relative_session_return'), 4)} "
+                f"rel_60m={fmt(sig.get('relative_return_4'), 4)} "
+                f"accel={fmt(sig.get('relative_strength_accel'), 4)} "
+                f"VWAP={fmt(sig.get('vwap_distance'), 4)} "
+                f"VWAP_slope={fmt(sig.get('vwap_slope_4'), 4)} "
+                f"volume_time={fmt(sig.get('volume_time_ratio'), 2)}"
+            )
 
 
 # ===============================================================

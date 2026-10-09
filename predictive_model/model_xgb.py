@@ -341,6 +341,7 @@ def train_model(
     mode: str = "daily",
     use_multiclass: bool = False,
     use_two_stage: Optional[bool] = None,
+    benchmark_df: Optional[pd.DataFrame] = None,
 ):
     """
     Train XGB model with chronological train/calibration/test split.
@@ -363,7 +364,13 @@ def train_model(
     if mode == "daily":
         df_feat = build_daily_features(df)
     elif mode in ("intraday", "intraday_mr", "intraday_mom"):
-        df_feat = build_intraday_features(df)
+        if benchmark_df is None:
+            benchmark_df = (
+                df
+                if symbol.upper() == "SPY"
+                else fetch_historical_data("SPY", period="60d", interval="15m")
+            )
+        df_feat = build_intraday_features(df, benchmark_df=benchmark_df)
         if mode in ("intraday_mr", "intraday_mom"):
             df_feat, regime_config = _filter_intraday_rows_by_mode(df_feat, mode=mode)
         for c in ["ret_12", "mom_12_abs", "mom_4_abs", "vol_12"]:
@@ -1446,12 +1453,43 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                 results["intraday_prob"] = None
                 results["intraday_quality_score"] = 0.0
             else:
-                df_feat_intra = build_intraday_features(df_intra_resampled)
+                if symU == "SPY":
+                    benchmark_intra = df_intra_resampled
+                else:
+                    benchmark_intra = fetch_intraday_history(
+                        "SPY",
+                        lookback_minutes=best_lb,
+                        interval=resample_to,
+                    )
+                df_feat_intra = build_intraday_features(
+                    df_intra_resampled,
+                    benchmark_df=benchmark_intra,
+                )
                 if df_feat_intra is None or df_feat_intra.empty:
                     results["allow_intraday"] = False
                     results["intraday_prob"] = None
                     results["intraday_quality_score"] = 0.0
                 else:
+                    latest_context = df_feat_intra.iloc[-1]
+                    for context_name in (
+                        "vwap_distance",
+                        "vwap_slope_4",
+                        "above_vwap",
+                        "volume_time_ratio",
+                        "session_volume_pace",
+                        "relative_return_1",
+                        "relative_return_2",
+                        "relative_return_4",
+                        "relative_strength_accel",
+                        "relative_session_return",
+                        "relative_vwap_strength",
+                        "relative_market_available",
+                    ):
+                        if context_name in latest_context.index:
+                            value = latest_context.get(context_name)
+                            results[context_name] = (
+                                float(value) if pd.notna(value) else None
+                            )
                     intraday_prediction = None
                     model_used = None
 

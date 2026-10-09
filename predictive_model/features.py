@@ -1,6 +1,7 @@
 # patched_features.py
 import pandas as pd
 import numpy as np
+from typing import Optional
 
 from predictive_model.data_loader import fetch_historical_data
 from predictive_model.time_features import add_time_features as canonical_add_time_features
@@ -171,6 +172,93 @@ def add_intraday_vwap_volume_features(df: pd.DataFrame) -> pd.DataFrame:
         .where(regular_session, 1.0)
         .fillna(1.0)
     )
+    return out
+
+
+def add_intraday_relative_market_features(
+    df: pd.DataFrame,
+    benchmark_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    """Add causal returns relative to a timestamp-aligned market benchmark.
+
+    Benchmark observations are joined backward with a one-bar tolerance, so a
+    symbol bar can never see a later SPY bar. Missing benchmark data produces
+    neutral values, keeping old-model inference safe while making the missing
+    context explicit through ``relative_market_available``.
+    """
+    out = df.copy()
+    feature_names = [
+        "spy_return_1",
+        "spy_return_2",
+        "spy_return_4",
+        "relative_return_1",
+        "relative_return_2",
+        "relative_return_4",
+        "relative_strength_accel",
+        "relative_session_return",
+        "relative_vwap_strength",
+    ]
+    for name in feature_names:
+        out[name] = 0.0
+    out["relative_market_available"] = 0.0
+
+    if benchmark_df is None or benchmark_df.empty:
+        return out
+    if not isinstance(out.index, pd.DatetimeIndex) or out.index.tz is None:
+        raise ValueError("Relative intraday features require a timezone-aware index")
+    if not isinstance(benchmark_df.index, pd.DatetimeIndex):
+        raise ValueError("Benchmark data requires a DatetimeIndex")
+
+    benchmark = _fix_ohlcv(benchmark_df).sort_index()
+    benchmark_index = benchmark.index
+    if benchmark_index.tz is None:
+        benchmark_index = benchmark_index.tz_localize("UTC")
+    else:
+        benchmark_index = benchmark_index.tz_convert("UTC")
+    benchmark_close = pd.Series(
+        pd.to_numeric(benchmark["Close"], errors="coerce").to_numpy(),
+        index=benchmark_index,
+    ).dropna()
+
+    target_index = out.index.tz_convert("UTC")
+    target_times = pd.DataFrame({"timestamp": target_index}).sort_values("timestamp")
+    benchmark_times = pd.DataFrame(
+        {"timestamp": benchmark_close.index, "benchmark_close": benchmark_close.to_numpy()}
+    ).sort_values("timestamp")
+    aligned = pd.merge_asof(
+        target_times,
+        benchmark_times,
+        on="timestamp",
+        direction="backward",
+        tolerance=pd.Timedelta(minutes=16),
+    )
+    spy_close = pd.Series(aligned["benchmark_close"].to_numpy(), index=out.index)
+    available = spy_close.notna()
+    if not available.any():
+        return out
+
+    asset_close = pd.to_numeric(out["Close"], errors="coerce")
+    for bars in (1, 2, 4):
+        spy_return = spy_close.pct_change(bars, fill_method=None)
+        asset_return = asset_close.pct_change(bars, fill_method=None)
+        out[f"spy_return_{bars}"] = spy_return.fillna(0.0)
+        out[f"relative_return_{bars}"] = (asset_return - spy_return).fillna(0.0)
+
+    out["relative_strength_accel"] = (
+        out["relative_return_4"] - out["relative_return_4"].shift(2)
+    ).fillna(0.0)
+
+    ny_index = out.index.tz_convert("America/New_York")
+    session_key = pd.Series(ny_index.date, index=out.index)
+    asset_session_return = asset_close / asset_close.groupby(session_key).transform("first") - 1.0
+    spy_session_return = spy_close / spy_close.groupby(session_key).transform("first") - 1.0
+    out["relative_session_return"] = (
+        asset_session_return - spy_session_return
+    ).fillna(0.0)
+    out["relative_vwap_strength"] = (
+        out.get("vwap_distance", 0.0) + out["relative_return_4"]
+    ).fillna(0.0)
+    out["relative_market_available"] = available.astype(float)
     return out
 
 
@@ -463,7 +551,11 @@ def get_feature_schema(df: pd.DataFrame) -> dict:
         ],
         "lags": [c for c in columns if c.startswith("lag_ret_")],
         "time": [c for c in columns if c.startswith(("time_", "minutes_", "is_", "clock_"))],
-        "market_regime": [c for c in columns if c.startswith("spy_")],
+        "market_regime": [
+            c for c in columns
+            if c.startswith("spy_")
+            or c.startswith("relative_")
+        ],
     }
     return {
         "feature_count": len(columns),
@@ -493,8 +585,12 @@ def build_daily_features(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
+def build_intraday_features(
+    df: pd.DataFrame,
+    benchmark_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
     result = _build_base_features(df, mode="intraday")
+    result = add_intraday_relative_market_features(result, benchmark_df)
     result = add_spy_regime_features(result)
     result = _remove_unnamed_columns(result)
     result.attrs["feature_schema"] = get_feature_schema(result)
