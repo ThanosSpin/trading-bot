@@ -1477,9 +1477,9 @@ def check_relative_momentum_entry(
     """Return a guarded early relative-strength entry score and explanation."""
     d = (diagnostics or {}).get(sym, {}) or {}
     if float(d.get("relative_market_available", 0.0) or 0.0) < 1.0:
-        return False, 0.0, ""
+        return False, 0.0, f"[RELATIVE REJECT] {sym}: benchmark unavailable"
     if d.get("movement_expected") is False:
-        return False, 0.0, ""
+        return False, 0.0, f"[RELATIVE REJECT] {sym}: movement_expected=False"
 
     values = {}
     for name in (
@@ -1488,34 +1488,42 @@ def check_relative_momentum_entry(
         "relative_return_4",
         "relative_strength_accel",
         "vwap_distance",
-        "vwap_slope_4",
+        "vwap_slope_2",
         "volume_time_ratio",
         "intraday_mom",
     ):
         try:
             values[name] = float(d.get(name))
         except (TypeError, ValueError):
-            return False, 0.0, ""
+            return False, 0.0, f"[RELATIVE REJECT] {sym}: missing {name}"
 
     probability = float((preds or {}).get(sym, 0.0) or 0.0)
     now_ny = now_ny or _dt.now(NY_TZ)
     minute = now_ny.hour * 60 + now_ny.minute
     if not (9 * 60 + 45 <= minute < 15 * 60):
-        return False, 0.0, ""
+        return False, 0.0, f"[RELATIVE REJECT] {sym}: outside entry window"
 
-    qualifies = (
-        0.005 <= values["session_return"] <= 0.020
-        and values["relative_session_return"] >= 0.005
-        and values["relative_return_4"] >= 0.002
-        and values["relative_strength_accel"] >= -0.001
-        and values["vwap_distance"] > 0.0
-        and values["vwap_slope_4"] > 0.0
-        and values["volume_time_ratio"] >= 0.80
-        and 0.0 < values["intraday_mom"] <= 0.010
-        and probability >= 0.50
-    )
-    if not qualifies:
-        return False, 0.0, ""
+    failures = []
+    if not 0.005 <= values["session_return"] <= 0.020:
+        failures.append(f"session={values['session_return']:.2%} outside +0.50%..+2.00%")
+    if values["relative_session_return"] < 0.005:
+        failures.append(f"vs_SPY={values['relative_session_return']:.2%} < +0.50%")
+    if values["relative_return_4"] < 0.002:
+        failures.append(f"rel_60m={values['relative_return_4']:.2%} < +0.20%")
+    if values["relative_strength_accel"] < -0.001:
+        failures.append(f"accel={values['relative_strength_accel']:.2%} < -0.10%")
+    if values["vwap_distance"] <= 0.0:
+        failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
+    if values["vwap_slope_2"] <= 0.0:
+        failures.append(f"VWAP_slope_30m={values['vwap_slope_2']:.2%} <= 0")
+    if values["volume_time_ratio"] < 0.80:
+        failures.append(f"volume_time={values['volume_time_ratio']:.2f} < 0.80")
+    if not 0.0 < values["intraday_mom"] <= 0.010:
+        failures.append(f"momentum={values['intraday_mom']:.2%} outside 0..+1.00%")
+    if probability < 0.50:
+        failures.append(f"model={probability:.3f} < 0.500")
+    if failures:
+        return False, 0.0, f"[RELATIVE REJECT] {sym}: " + "; ".join(failures)
 
     score = (
         probability
@@ -2498,6 +2506,12 @@ def compute_strategy_decisions(
             sym, diagnostics, preds
         )
         if not qualifies:
+            d = (diagnostics or {}).get(sym, {}) or {}
+            if reason and (
+                float(d.get("session_return", 0.0) or 0.0) >= 0.005
+                or float(d.get("relative_session_return", 0.0) or 0.0) >= 0.005
+            ):
+                print(reason)
             continue
         if float(pms[sym].data.get("shares", 0.0) or 0.0) > 0:
             continue

@@ -16,6 +16,7 @@ class RelativeMomentumEntryTests(unittest.TestCase):
             "relative_return_4": 0.004,
             "relative_strength_accel": 0.001,
             "vwap_distance": 0.003,
+            "vwap_slope_2": 0.001,
             "vwap_slope_4": 0.001,
             "volume_time_ratio": 1.15,
             "intraday_mom": 0.006,
@@ -52,7 +53,7 @@ class RelativeMomentumEntryTests(unittest.TestCase):
     def test_rejects_weak_vwap_or_bearish_model(self):
         weak_vwap, _, _ = check_relative_momentum_entry(
             "PLTR",
-            self._diagnostics(vwap_slope_4=-0.001),
+            self._diagnostics(vwap_slope_2=-0.001),
             {"PLTR": 0.60},
             now_ny=self._market_time(),
         )
@@ -64,6 +65,17 @@ class RelativeMomentumEntryTests(unittest.TestCase):
         )
         self.assertFalse(weak_vwap)
         self.assertFalse(bearish)
+
+    def test_rejection_explains_failed_conditions(self):
+        qualifies, _, reason = check_relative_momentum_entry(
+            "PLTR",
+            self._diagnostics(volume_time_ratio=0.50),
+            {"PLTR": 0.49},
+            now_ny=self._market_time(),
+        )
+        self.assertFalse(qualifies)
+        self.assertIn("volume_time=0.50", reason)
+        self.assertIn("model=0.490", reason)
 
     def test_rejects_late_entry(self):
         qualifies, _, _ = check_relative_momentum_entry(

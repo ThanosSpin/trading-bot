@@ -1473,6 +1473,7 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                     latest_context = df_feat_intra.iloc[-1]
                     for context_name in (
                         "vwap_distance",
+                        "vwap_slope_2",
                         "vwap_slope_4",
                         "above_vwap",
                         "volume_time_ratio",

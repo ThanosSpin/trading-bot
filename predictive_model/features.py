@@ -126,6 +126,12 @@ def add_intraday_vwap_volume_features(df: pd.DataFrame) -> pd.DataFrame:
     previous_above = above_vwap.groupby(session_key).shift(1)
 
     out["vwap_distance"] = vwap_distance.where(regular_session, 0.0).fillna(0.0)
+    out["vwap_slope_2"] = (
+        session_vwap.groupby(session_key)
+        .pct_change(periods=2, fill_method=None)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
     out["vwap_slope_4"] = (
         session_vwap.groupby(session_key)
         .pct_change(periods=4, fill_method=None)

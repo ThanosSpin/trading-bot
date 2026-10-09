@@ -44,6 +44,7 @@ class IntradayVwapVolumeFeatureTests(unittest.TestCase):
         second_open = frame.index[6]
 
         self.assertAlmostEqual(result.loc[second_open, "vwap_distance"], 0.0)
+        self.assertAlmostEqual(result.loc[second_open, "vwap_slope_2"], 0.0)
         self.assertAlmostEqual(result.loc[second_open, "vwap_slope_4"], 0.0)
         self.assertEqual(result.loc[second_open, "vwap_cross_up"], 0.0)
         self.assertEqual(result.loc[second_open, "vwap_cross_down"], 0.0)

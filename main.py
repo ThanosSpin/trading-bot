@@ -393,6 +393,7 @@ def get_predictions(symbols, debug=True):
             "intraday_volume": sig.get("intraday_volume"),
             "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
             "vwap_distance": sig.get("vwap_distance"),
+            "vwap_slope_2": sig.get("vwap_slope_2"),
             "vwap_slope_4": sig.get("vwap_slope_4"),
             "above_vwap": sig.get("above_vwap"),
             "volume_time_ratio": sig.get("volume_time_ratio"),
@@ -561,6 +562,7 @@ def print_signal_diagnostics(decisions, diagnostics):
                 f"rel_60m={fmt(sig.get('relative_return_4'), 4)} "
                 f"accel={fmt(sig.get('relative_strength_accel'), 4)} "
                 f"VWAP={fmt(sig.get('vwap_distance'), 4)} "
+                f"VWAP_slope_2={fmt(sig.get('vwap_slope_2'), 4)} "
                 f"VWAP_slope={fmt(sig.get('vwap_slope_4'), 4)} "
                 f"volume_time={fmt(sig.get('volume_time_ratio'), 2)}"
             )
