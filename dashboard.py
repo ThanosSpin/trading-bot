@@ -9,6 +9,7 @@ from portfolio import (
     get_daily_portfolio_file,
     get_live_portfolio,
 )
+from trade_attribution import attribution_summary, build_trade_cycles
 from pathlib import Path
 from config import (
     BOT_ENV,
@@ -1437,6 +1438,115 @@ for sym in symbols:
             if SHOW_DEBUG_BLOCKS:
                 with st.expander("🔍 Closed-trade cycle PnLs (debug)"):
                     st.dataframe(pd.DataFrame({"cycle_pnl": s}))
+
+
+# -------------------------------------------------
+# Closed-position attribution
+# -------------------------------------------------
+st.header("🧭 Closed-Position Attribution")
+
+cycle_frames = []
+for attribution_symbol in symbols:
+    attribution_path = get_trade_log_file(attribution_symbol)
+    if not os.path.exists(attribution_path):
+        continue
+    try:
+        attribution_trades = pd.read_csv(attribution_path)
+        symbol_cycles = build_trade_cycles(
+            attribution_trades,
+            symbol=attribution_symbol,
+        )
+        if not symbol_cycles.empty:
+            cycle_frames.append(symbol_cycles)
+    except Exception as error:
+        st.warning(f"Could not attribute {attribution_symbol} trades: {error}")
+
+if not cycle_frames:
+    st.info("No completed flat-to-flat position cycles are available.")
+else:
+    attributed_cycles = pd.concat(cycle_frames, ignore_index=True)
+    period_label = st.selectbox(
+        "Attribution period",
+        ["3 months", "6 months", "12 months", "All history"],
+        index=2,
+        key="attribution_period",
+    )
+    period_months = {
+        "3 months": 3,
+        "6 months": 6,
+        "12 months": 12,
+    }.get(period_label)
+    if period_months is not None:
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.DateOffset(months=period_months)
+        attributed_cycles = attributed_cycles[
+            attributed_cycles["exit_time"] >= cutoff
+        ].copy()
+
+    filter_columns = ["symbol", "model_used", "regime", "entry_reason", "exit_reason"]
+    filter_labels = {
+        "symbol": "Symbols",
+        "model_used": "Models",
+        "regime": "Regimes",
+        "entry_reason": "Entry reasons",
+        "exit_reason": "Exit reasons",
+    }
+    filter_boxes = st.columns(len(filter_columns))
+    for box, column in zip(filter_boxes, filter_columns):
+        options = sorted(attributed_cycles[column].dropna().astype(str).unique())
+        selected = box.multiselect(
+            filter_labels[column],
+            options,
+            default=options,
+            key=f"attribution_filter_{column}",
+        )
+        attributed_cycles = attributed_cycles[
+            attributed_cycles[column].astype(str).isin(selected)
+        ]
+
+    if attributed_cycles.empty:
+        st.info("No completed cycles match the selected attribution filters.")
+    else:
+        summary = attribution_summary(attributed_cycles)
+        display_summary = summary.rename(
+            columns={
+                "symbol": "Symbol",
+                "model_used": "Model",
+                "regime": "Regime",
+                "entry_reason": "Entry reason",
+                "exit_reason": "Exit reason",
+                "cycles": "Cycles",
+                "win_rate_pct": "Win rate %",
+                "pnl_dollars": "PnL $",
+                "avg_pnl_dollars": "Avg PnL $",
+                "avg_return_pct": "Avg return %",
+                "dollar_profit_factor": "Dollar PF",
+                "return_profit_factor": "Return PF",
+            }
+        )
+        numeric_formats = {
+            "Win rate %": "{:.1f}",
+            "PnL $": "${:,.2f}",
+            "Avg PnL $": "${:,.2f}",
+            "Avg return %": "{:.3f}%",
+            "Dollar PF": "{:.2f}",
+            "Return PF": "{:.2f}",
+        }
+        st.dataframe(
+            display_summary.style.format(numeric_formats),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.expander("Completed cycle details"):
+            cycle_display = attributed_cycles.copy()
+            cycle_display["entry_time"] = cycle_display["entry_time"].dt.tz_convert(tz)
+            cycle_display["exit_time"] = cycle_display["exit_time"].dt.tz_convert(tz)
+            cycle_display["return_pct"] *= 100.0
+            st.dataframe(
+                cycle_display,
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 # -------------------------------------------------

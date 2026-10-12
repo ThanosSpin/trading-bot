@@ -800,6 +800,7 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.015):
                 ),
                 "priority_rank": 0,
                 "risk_exit": "daily_loss_guard",
+                "exit_reason": "daily_loss_guard",
             }
             any_triggered = True
             print(
@@ -864,6 +865,7 @@ def apply_daily_profit_guard(decisions, diagnostics=None):
                     f"(trigger {PROFIT_TRIGGER_PCT:.2%}), 50% position trimmed."
                 ),
                 "priority_rank": 0,
+                "exit_reason": "daily_profit_guard",
             }
             any_triggered = True
 

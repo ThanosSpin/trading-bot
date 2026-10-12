@@ -690,6 +690,9 @@ def apply_close_time_derisk(
             "qty": qty,
             "explain": reason,
             "priority_rank": 0,
+            "exit_reason": (
+                "close_time_loss" if hit_daily_loss else "close_time_gain_trim"
+            ),
         }
         if hit_daily_loss:
             decisions[sym]["risk_exit"] = "close_time_loss"
@@ -816,6 +819,53 @@ def execute_decisions(decisions, diagnostics=None):
     """
     diagnostics = diagnostics or {}
 
+    def _entry_reason(decision):
+        explain = str(decision.get("explain", "")).lower()
+        if decision.get("relative_momentum"):
+            return "relative_momentum"
+        if decision.get("pyramid"):
+            return "pyramid"
+        if decision.get("recalc_all_in") or decision.get("recalc_after_sells"):
+            return "rotation"
+        if "rebuy" in explain or "same-day" in explain:
+            return "rebuy"
+        if "dip-buy" in explain:
+            return "dip_buy"
+        return "ordinary"
+
+    def _exit_reason(decision):
+        if decision.get("exit_reason"):
+            return str(decision["exit_reason"])
+        if decision.get("risk_exit"):
+            return str(decision["risk_exit"])
+        explain = str(decision.get("explain", "")).lower()
+        if "rotation" in explain or "rotate" in explain or "sold to fund" in explain:
+            return "rotation"
+        if "profit" in explain or "gain trim" in explain:
+            return "profit_trim"
+        if "close-time" in explain:
+            return "close_time_derisk"
+        if "stop" in explain:
+            return "stop"
+        return "model_exit"
+
+    def _attribution(sym, decision, action, shares_before, price):
+        diag = diagnostics.get(sym, {}) or {}
+        enriched = dict(decision)
+        enriched.update(
+            {
+                "model_used": diag.get("intraday_model_used") or diag.get("model") or "daily",
+                "regime": diag.get("intraday_regime") or "daily",
+                "entry_reason": _entry_reason(decision) if action == "buy" else "",
+                "exit_reason": _exit_reason(decision) if action == "sell" else "",
+                "decision_probability": diag.get("final_prob"),
+                "buy_threshold": _effective_buy_threshold(sym, diagnostics),
+                "sell_threshold": _effective_sell_threshold(sym, diagnostics),
+                "position_value_before": float(shares_before or 0.0) * float(price or 0.0),
+            }
+        )
+        return enriched
+
     def _get_live_account_cash(proxy_symbol: str = "NVDA") -> float:
         # cash is account-level; any symbol PM works, proxy_symbol is just a handle
         try:
@@ -903,6 +953,10 @@ def execute_decisions(decisions, diagnostics=None):
             sell_failed.add(sym)
             continue
 
+        # Snapshot the broker position before submission so the execution log
+        # records the actual pre-fill position rather than a post-fill refresh.
+        pm.refresh_live()
+        shares_before = float(pm.data.get("shares", 0.0) or 0.0)
         filled_qty, filled_price = execute_trade("sell", qty, sym, decision=decision)
 
         if not filled_qty:
@@ -911,9 +965,16 @@ def execute_decisions(decisions, diagnostics=None):
             continue
 
         any_sell_filled = True
-        pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
-        pm._apply("sell", filled_price, filled_qty, account_cash=account_cash)
+        pm._apply(
+            "sell",
+            filled_price,
+            filled_qty,
+            account_cash=account_cash,
+            decision=_attribution(
+                sym, decision, "sell", shares_before, filled_price
+            ),
+        )
         mark_session_sell(sym)
         if decision.get("risk_exit"):
             mark_session_stop(sym, decision["risk_exit"])
@@ -999,15 +1060,26 @@ def execute_decisions(decisions, diagnostics=None):
             continue
 
         pm = PortfolioManager(sym)
-        filled_qty, filled_price = execute_trade("buy", qty, sym)
+        # Capture the position immediately before the order. Refreshing after
+        # the fill and then applying the fill would count the execution twice.
+        pm.refresh_live()
+        shares_before = float(pm.data.get("shares", 0.0) or 0.0)
+        filled_qty, filled_price = execute_trade("buy", qty, sym, decision=decision)
 
         if not filled_qty:
             print(f"[WARN] {sym} BUY not filled.")
             continue
 
-        pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
-        pm._apply("buy", filled_price, filled_qty, account_cash=account_cash)
+        pm._apply(
+            "buy",
+            filled_price,
+            filled_qty,
+            account_cash=account_cash,
+            decision=_attribution(
+                sym, decision, "buy", shares_before, filled_price
+            ),
+        )
         mark_session_buy(sym, is_pyramid=bool(decision.get("pyramid", False)))
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
@@ -1139,6 +1211,7 @@ def process_all_symbols(symbols):
                 f"{MARGIN_EMERGENCY_PROB_THRESH:.3f}"
             ),
             "priority_rank": 0,
+            "exit_reason": "emergency_signal_exit",
         }
 
         print(
