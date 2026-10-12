@@ -9,6 +9,7 @@ from broker import get_trading_api
 from pdt.pdt_tracker import add_opened_today, reduce_opened_today
 
 from config import USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS, ORDER_FILL_TIMEOUT_SECONDS
+from entry_policy import is_new_entry_allowed
 from market import is_market_open, is_trading_day
 from predictive_model.data_loader import fetch_latest_price
 from portfolio import PortfolioManager
@@ -349,6 +350,22 @@ def execute_trade(action, quantity, symbol, decision=None):
     # If this symbol is in PAPER_TRADE_SYMBOLS, force paper mode
     # even if USE_LIVE_TRADING=True
     is_paper_symbol = symU in [s.upper() for s in PAPER_TRADE_SYMBOLS]
+
+    # Backstop for callers outside the main strategy orchestrator. A symbol
+    # explicitly routed to paper remains eligible for research.
+    if action == "buy" and not is_paper_symbol and not is_new_entry_allowed(symU):
+        decision = decision if isinstance(decision, dict) else {}
+        risk_reducing_buy = bool(
+            decision.get("buy_to_cover") or decision.get("position_reducing")
+        )
+        if not risk_reducing_buy:
+            try:
+                risk_reducing_buy = float(_api().get_position(symU).qty) < 0.0
+            except Exception:
+                risk_reducing_buy = False
+        if not risk_reducing_buy:
+            print(f"[ENTRY POLICY] {symU}: LIVE BUY blocked by entry allowlist.")
+            return 0.0, None
 
     # -------------------------------------------------------
     # SIMULATED/PAPER TRADING
