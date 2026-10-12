@@ -16,6 +16,8 @@ from config import (
     WEAK_PROB_THRESHOLD,
     WEAK_RATIO_THRESHOLD,
     PRICE_WEAK_RATIO_THRESHOLD,
+    LAST_HOUR_BUY_BUFFER,
+    FINAL_15_MIN_BUY_BUFFER,
     TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD,
     SPY_EXIT_THRESHOLD,
@@ -634,16 +636,21 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
     minutes_since_open = (now_ny.hour * 60 + now_ny.minute) - (9 * 60 + 30)
     minutes_to_close = (16 * 60) - (now_ny.hour * 60 + now_ny.minute)
 
-    # Last 60 minutes (15:00–16:00 NY)
+    # Require moderately stronger signals late in the session, with an extra
+    # increment during the final 15 minutes when execution risk is highest.
     if 0 <= minutes_to_close <= 60:
-        # Example: add +0.02 buffer in last hour
-        last_hour_buffer = 0.1
-        adjusted = min(0.95, thr + last_hour_buffer)
+        late_session_buffer = (
+            float(FINAL_15_MIN_BUY_BUFFER)
+            if minutes_to_close <= 15
+            else float(LAST_HOUR_BUY_BUFFER)
+        )
+        window = "final 15 minutes" if minutes_to_close <= 15 else "last hour"
+        adjusted = min(0.95, thr + late_session_buffer)
 
         print(
-            f"[TIME-AWARE BUY THR] {sym}: last hour before close "
+            f"[TIME-AWARE BUY THR] {sym}: {window} before close "
             f"(minutes_to_close={minutes_to_close}), "
-            f"base={thr:.3f} + buffer={last_hour_buffer:.3f} -> {adjusted:.3f}"
+            f"base={thr:.3f} + buffer={late_session_buffer:.3f} -> {adjusted:.3f}"
         )
         return adjusted
 
