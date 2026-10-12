@@ -50,6 +50,12 @@ SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]
 PAPER_TRADE_SYMBOLS = []
 PAPER_TRADE_NOTES = {}
 
+# Keep the complete universe monitored while limiting which symbols may open
+# new positions in each environment. SELL and risk-exit eligibility is not
+# controlled by these lists.
+LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL", "SPY"]
+PAPER_ENTRY_SYMBOLS = list(SYMBOL) + ["SPY"]
+
 BUY_THRESHOLD = 0.55
 SELL_THRESHOLD = 0.45
 PYRAMID_THRESHOLD = 0.65

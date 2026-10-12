@@ -1,5 +1,7 @@
 from typing import Dict, List, Optional
 import pandas as pd
+
+from entry_policy import is_new_entry_allowed
 import numpy as np
 import pytz
 import json, os
@@ -273,7 +275,8 @@ def _eligible_rotation_targets(symbols, decisions, position_shares):
     return [
         sym
         for sym in symbols
-        if (decisions.get(sym) or {}).get("action") == "buy"
+        if is_new_entry_allowed(sym)
+        and (decisions.get(sym) or {}).get("action") == "buy"
         and float(position_shares.get(sym, 0.0) or 0.0) <= 0
     ]
 
@@ -726,13 +729,18 @@ def _core_buy_intent(
     return [
         s
         for s in core_symbols
-        if preds.get(s, 0.0) >= _effective_buy_threshold(s, diagnostics)
+        if is_new_entry_allowed(s)
+        and preds.get(s, 0.0) >= _effective_buy_threshold(s, diagnostics)
     ]
 
 
 def _any_core_buy(decisions: Dict[str, dict], core_symbols: List[str]) -> bool:
     """True if any core symbol has a BUY decision."""
-    return any((decisions.get(s) or {}).get("action") == "buy" for s in core_symbols)
+    return any(
+        is_new_entry_allowed(s)
+        and (decisions.get(s) or {}).get("action") == "buy"
+        for s in core_symbols
+    )
 
 
 def _force_spy_exit_if_core_buy(
@@ -1789,7 +1797,7 @@ def compute_strategy_decisions(
         candidates = {}
 
         for sym in ["AAPL", "ABBV", "PLTR"]:
-            if sym in core_symbols:
+            if sym in core_symbols and is_new_entry_allowed(sym):
                 prob = preds.get(sym)
                 if prob is not None and _is_buy(sym):  # âœ… Now visible!
                     candidates[sym] = prob
@@ -2581,6 +2589,8 @@ def compute_strategy_decisions(
     # MOMENTUM BREAKOUT OVERRIDE (before dip-buy)
     # ============================================================
     for sym in core_symbols:
+        if not is_new_entry_allowed(sym):
+            continue
         force_buy, reason = check_momentum_breakout(sym, diagnostics, preds)
 
         if force_buy:
@@ -2659,6 +2669,8 @@ def compute_strategy_decisions(
             # rebuy checks for HOLD/SELL decisions or reuse another symbol's
             # probability from a previous loop iteration.
             if decision.get("action") != "buy":
+                continue
+            if not is_new_entry_allowed(sym):
                 continue
 
             prob = float(preds.get(sym, 0.0) or 0.0)
