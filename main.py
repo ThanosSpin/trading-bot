@@ -29,6 +29,7 @@ from strategy import (
 )
 from portfolio import PortfolioManager
 from trader import execute_trade, get_margin_status, get_recent_filled_sells
+from entry_policy import apply_entry_symbol_guard
 from predictive_model.model_monitor import (
     get_monitor,
     evaluate_predictions,
@@ -1059,6 +1060,10 @@ def process_all_symbols(symbols):
             "compute_strategy_decisions() must return a decisions dictionary; "
             f"received {type(decisions).__name__}"
         )
+
+    # Predictions and risk management continue for every symbol, while new
+    # live entries are limited by the environment-specific entry allowlist.
+    decisions = apply_entry_symbol_guard(decisions)
 
     # ✅ NEW: portfolio-level weak guard
     decisions = apply_portfolio_weak_guard(
