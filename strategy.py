@@ -15,6 +15,7 @@ from config import (
     PRICE_WEAK_THRESHOLD,
     WEAK_PROB_THRESHOLD,
     WEAK_RATIO_THRESHOLD,
+    PRICE_WEAK_RATIO_THRESHOLD,
     TRAIL_ACTIVATE,
     SPY_ENTRY_THRESHOLD,
     SPY_EXIT_THRESHOLD,
@@ -937,14 +938,15 @@ def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
     price_ratio = len(weak_price) / max(len(universe), 1)
 
     is_weak = (prob_ratio >= WEAK_RATIO_THRESHOLD) or (
-        price_ratio >= WEAK_RATIO_THRESHOLD
+        price_ratio >= PRICE_WEAK_RATIO_THRESHOLD
     )
 
     print(
         f"[WEAK-MARKET DEBUG] universe={universe} "
         f"weak_prob={weak_prob} (prob_ratio={prob_ratio:.2f}) "
         f"weak_price={weak_price} (price_ratio={price_ratio:.2f}) "
-        f"ratio_threshold={WEAK_RATIO_THRESHOLD:.2f} "
+        f"prob_ratio_threshold={WEAK_RATIO_THRESHOLD:.2f} "
+        f"price_ratio_threshold={PRICE_WEAK_RATIO_THRESHOLD:.2f} "
         f"is_weak={is_weak}"
     )
 
@@ -2697,7 +2699,8 @@ def compute_strategy_decisions(
         print(
             f"WEAK-MARKET BLOCK: Blocking new core BUYs "
             f"(prob_threshold={WEAK_PROB_THRESHOLD:.2f}, "
-            f"ratio_threshold={WEAK_RATIO_THRESHOLD:.2f})"
+            f"prob_ratio_threshold={WEAK_RATIO_THRESHOLD:.2f}, "
+            f"price_ratio_threshold={PRICE_WEAK_RATIO_THRESHOLD:.2f})"
         )
         for sym in core_symbols:
             d = decisions.get(sym) or {}
