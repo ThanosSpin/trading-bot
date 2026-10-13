@@ -39,6 +39,11 @@ from config import (
     MAX_LOSS_ACCOUNT_EQUITY_PCT,
     MAX_LOSS_PER_POSITION_PCT,
     AAPL_BUY_THRESHOLD,
+    AAPL_MOMENTUM_INTRADAY_MIN_PROB,
+    AAPL_MOMENTUM_MIN_RELATIVE_SESSION,
+    AAPL_MOMENTUM_MIN_RELATIVE_60M,
+    AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO,
+    AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER,
     REBUY_THRESHOLD,
     REBUY_COOLDOWN_MINUTES,
     ALLOW_SAME_DAY_REBUY,
@@ -1495,6 +1500,18 @@ def check_relative_momentum_entry(
 ) -> tuple:
     """Return a guarded early relative-strength entry score and explanation."""
     d = (diagnostics or {}).get(sym, {}) or {}
+
+    # AAPL's ordinary entry threshold remains deliberately conservative. In a
+    # confirmed momentum regime, allow the intraday model to identify an early
+    # continuation even when a weak daily probability drags down the blend.
+    # Low time-adjusted volume is handled through smaller sizing by the caller.
+    if sym.upper() == "AAPL":
+        aapl_result = _check_aapl_guarded_momentum_entry(
+            sym, diagnostics, now_ny=now_ny
+        )
+        if aapl_result[0]:
+            return aapl_result
+
     if float(d.get("relative_market_available", 0.0) or 0.0) < 1.0:
         return False, 0.0, f"[RELATIVE REJECT] {sym}: benchmark unavailable"
     if d.get("movement_expected") is False:
@@ -1557,6 +1574,93 @@ def check_relative_momentum_entry(
         f"VWAP={values['vwap_distance']:.2%}, "
         f"volume_time={values['volume_time_ratio']:.2f}, "
         f"model={probability:.3f}"
+    )
+    return True, float(score), reason
+
+
+def _check_aapl_guarded_momentum_entry(
+    sym: str,
+    diagnostics: dict,
+    now_ny=None,
+) -> tuple:
+    """Allow a confirmed AAPL intraday-momentum entry below its blend floor."""
+    d = (diagnostics or {}).get(sym, {}) or {}
+    if float(d.get("relative_market_available", 0.0) or 0.0) < 1.0:
+        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: benchmark unavailable"
+    if d.get("movement_expected") is False:
+        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: movement_expected=False"
+    if d.get("intraday_model_used") != "intraday_mom":
+        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: momentum model inactive"
+
+    values = {}
+    for name in (
+        "intraday_prob",
+        "session_return",
+        "relative_session_return",
+        "relative_return_4",
+        "vwap_distance",
+        "vwap_slope_2",
+        "volume_time_ratio",
+        "intraday_mom",
+    ):
+        try:
+            values[name] = float(d.get(name))
+        except (TypeError, ValueError):
+            return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: missing {name}"
+
+    now_ny = now_ny or _dt.now(NY_TZ)
+    minute = now_ny.hour * 60 + now_ny.minute
+    if not (9 * 60 + 45 <= minute < 15 * 60):
+        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: outside entry window"
+
+    failures = []
+    if values["intraday_prob"] < float(AAPL_MOMENTUM_INTRADAY_MIN_PROB):
+        failures.append(
+            f"intraday_prob={values['intraday_prob']:.3f} < "
+            f"{float(AAPL_MOMENTUM_INTRADAY_MIN_PROB):.3f}"
+        )
+    if values["session_return"] <= 0.0:
+        failures.append(f"session={values['session_return']:.2%} <= 0")
+    if values["relative_session_return"] < float(
+        AAPL_MOMENTUM_MIN_RELATIVE_SESSION
+    ):
+        failures.append(
+            f"vs_SPY={values['relative_session_return']:.2%} < "
+            f"{float(AAPL_MOMENTUM_MIN_RELATIVE_SESSION):.2%}"
+        )
+    if values["relative_return_4"] < float(AAPL_MOMENTUM_MIN_RELATIVE_60M):
+        failures.append(
+            f"rel_60m={values['relative_return_4']:.2%} < "
+            f"{float(AAPL_MOMENTUM_MIN_RELATIVE_60M):.2%}"
+        )
+    if values["vwap_distance"] <= 0.0:
+        failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
+    if values["vwap_slope_2"] < 0.0:
+        failures.append(f"VWAP_slope_30m={values['vwap_slope_2']:.2%} < 0")
+    if values["intraday_mom"] <= 0.0:
+        failures.append(f"momentum={values['intraday_mom']:.2%} <= 0")
+    if failures:
+        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: " + "; ".join(failures)
+
+    score = (
+        values["intraday_prob"]
+        + 2.0 * values["relative_session_return"]
+        + values["relative_return_4"]
+    )
+    size_multiplier = (
+        float(AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER)
+        if values["volume_time_ratio"]
+        < float(AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO)
+        else 1.0
+    )
+    reason = (
+        f"[AAPL GUARDED MOMENTUM] {sym}: intraday_prob={values['intraday_prob']:.3f}, "
+        f"session={values['session_return']:.2%}, "
+        f"vs_SPY={values['relative_session_return']:.2%}, "
+        f"rel_60m={values['relative_return_4']:.2%}, "
+        f"VWAP={values['vwap_distance']:.2%}, "
+        f"volume_time={values['volume_time_ratio']:.2f}, "
+        f"size={size_multiplier:.0%}"
     )
     return True, float(score), reason
 
@@ -2534,9 +2638,10 @@ def compute_strategy_decisions(
             continue
         if float(pms[sym].data.get("shares", 0.0) or 0.0) > 0:
             continue
+        aapl_guarded_momentum = reason.startswith("[AAPL GUARDED MOMENTUM]")
         if (
             _block_buy_on_pullback(sym)
-            or _block_buy_on_weak_volume(sym)
+            or (not aapl_guarded_momentum and _block_buy_on_weak_volume(sym))
             or _block_buy_overbought(sym)
         ):
             print(f"[RELATIVE MOMENTUM] {sym} blocked by existing entry guard")
@@ -2550,13 +2655,26 @@ def compute_strategy_decisions(
                 f"{cooldown_reason}"
             )
             continue
-        relative_candidates.append((score, sym, reason))
+        size_multiplier = 1.0
+        if aapl_guarded_momentum:
+            volume_time_ratio = _safe_float(
+                _diag(sym).get("volume_time_ratio"), 0.0
+            )
+            if volume_time_ratio < float(AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO):
+                size_multiplier = float(AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER)
+        relative_candidates.append((score, sym, reason, size_multiplier))
 
     if relative_candidates:
-        _score, relative_symbol, relative_reason = max(relative_candidates)
+        _score, relative_symbol, relative_reason, size_multiplier = max(
+            relative_candidates
+        )
         cash = float(account_state.get("cash", 0.0) or 0.0)
         price = float(prices.get(relative_symbol, 0.0) or 0.0)
-        buy_qty = int((cash * float(RISK_FRACTION)) // price) if price > 0 else 0
+        buy_qty = (
+            int((cash * float(RISK_FRACTION) * size_multiplier) // price)
+            if price > 0
+            else 0
+        )
         buy_qty = apply_position_limits(
             buy_qty, price, cash, relative_symbol
         )
@@ -2581,6 +2699,7 @@ def compute_strategy_decisions(
                 buy_qty,
                 relative_reason,
                 relative_momentum=True,
+                size_multiplier=size_multiplier,
                 priority_rank=1,
             )
             print(f"{relative_reason} -> BUY {buy_qty} shares")
