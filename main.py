@@ -398,7 +398,15 @@ def get_predictions(symbols, debug=True):
             "vwap_slope_4": sig.get("vwap_slope_4"),
             "above_vwap": sig.get("above_vwap"),
             "volume_time_ratio": sig.get("volume_time_ratio"),
+            "volume_time_zscore": sig.get("volume_time_zscore"),
+            "volume_surge": sig.get("volume_surge"),
+            "volume_dry_up": sig.get("volume_dry_up"),
             "session_volume_pace": sig.get("session_volume_pace"),
+            "session_volume_pace_change_2": sig.get(
+                "session_volume_pace_change_2"
+            ),
+            "volume_surprise_change_2": sig.get("volume_surprise_change_2"),
+            "volume_price_confirmation": sig.get("volume_price_confirmation"),
             "relative_return_1": sig.get("relative_return_1"),
             "relative_return_2": sig.get("relative_return_2"),
             "relative_return_4": sig.get("relative_return_4"),
@@ -566,6 +574,18 @@ def print_signal_diagnostics(decisions, diagnostics):
                 f"VWAP_slope_2={fmt(sig.get('vwap_slope_2'), 4)} "
                 f"VWAP_slope={fmt(sig.get('vwap_slope_4'), 4)} "
                 f"volume_time={fmt(sig.get('volume_time_ratio'), 2)}"
+            )
+        if sig.get("volume_time_ratio") is not None:
+            print(
+                f"    [VOLUME SEASONALITY] {sym}: "
+                f"slot_ratio={fmt(sig.get('volume_time_ratio'), 2)} "
+                f"slot_z={fmt(sig.get('volume_time_zscore'), 2)} "
+                f"pace={fmt(sig.get('session_volume_pace'), 2)} "
+                f"pace_change_30m={fmt(sig.get('session_volume_pace_change_2'), 3)} "
+                f"surprise_change_30m={fmt(sig.get('volume_surprise_change_2'), 3)} "
+                f"price_confirmation={fmt(sig.get('volume_price_confirmation'), 5)} "
+                f"surge={bool(sig.get('volume_surge'))} "
+                f"dry_up={bool(sig.get('volume_dry_up'))}"
             )
 
 

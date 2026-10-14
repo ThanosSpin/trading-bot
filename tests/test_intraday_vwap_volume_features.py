@@ -69,6 +69,70 @@ class IntradayVwapVolumeFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(baseline.iloc[-1]["volume_time_ratio"], 2.0)
         self.assertAlmostEqual(result.iloc[-1]["volume_time_ratio"], 20.0)
 
+    def test_volume_seasonality_features_are_finite_and_causal(self):
+        frame = self._frame()
+        baseline = add_intraday_vwap_volume_features(frame)
+        changed = frame.copy()
+        changed.loc[changed.index[-1], "Volume"] = 12000.0
+        result = add_intraday_vwap_volume_features(changed)
+
+        feature_names = [
+            "volume_time_zscore",
+            "volume_surge",
+            "volume_dry_up",
+            "session_volume_pace_change_2",
+            "volume_surprise_change_2",
+            "volume_price_confirmation",
+        ]
+        self.assertTrue(np.isfinite(result[feature_names].to_numpy()).all())
+        pd.testing.assert_frame_equal(
+            baseline.iloc[:-1][feature_names],
+            result.iloc[:-1][feature_names],
+        )
+        self.assertEqual(result.iloc[-1]["volume_surge"], 1.0)
+        self.assertEqual(result.iloc[-1]["volume_dry_up"], 0.0)
+
+    def test_slot_baseline_is_bounded_to_recent_sessions(self):
+        sessions = []
+        for day in range(25):
+            index = pd.date_range(
+                pd.Timestamp("2026-08-03 09:30", tz="America/New_York")
+                + pd.Timedelta(days=day),
+                periods=1,
+                freq="15min",
+            )
+            volume = 100.0 if day < 4 else 200.0
+            sessions.append(
+                pd.DataFrame(
+                    {
+                        "Open": [100.0],
+                        "High": [101.0],
+                        "Low": [99.0],
+                        "Close": [100.0],
+                        "Volume": [volume],
+                    },
+                    index=index,
+                )
+            )
+        frame = pd.concat(sessions)
+        result = add_intraday_vwap_volume_features(
+            frame, volume_seasonality_sessions=20
+        )
+
+        # The final bar compares with the most recent 20 same-slot sessions,
+        # whose robust median is 200 rather than the full-history average.
+        self.assertAlmostEqual(result.iloc[-1]["volume_time_ratio"], 1.0)
+
+    def test_volume_feature_schema_includes_seasonality_group(self):
+        from predictive_model.features import get_feature_schema
+
+        result = add_intraday_vwap_volume_features(self._frame())
+        volume_features = get_feature_schema(result)["groups"]["volume"]
+
+        self.assertIn("volume_time_zscore", volume_features)
+        self.assertIn("session_volume_pace_change_2", volume_features)
+        self.assertIn("volume_price_confirmation", volume_features)
+
     def test_timezone_is_required(self):
         frame = self._frame()
         frame.index = frame.index.tz_localize(None)

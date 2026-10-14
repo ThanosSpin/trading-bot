@@ -92,8 +92,17 @@ def _fix_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_intraday_vwap_volume_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add causal regular-session VWAP and time-of-day volume features."""
+def add_intraday_vwap_volume_features(
+    df: pd.DataFrame,
+    volume_seasonality_sessions: int = 20,
+) -> pd.DataFrame:
+    """Add causal regular-session VWAP and volume-seasonality features.
+
+    A bar is compared with the same clock slot from prior sessions only. The
+    bounded median baseline is robust to one-off event volume and adapts as old
+    sessions leave the window. No current or future slot volume contributes to
+    its own expectation.
+    """
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("Intraday features require a DatetimeIndex")
     if df.index.tz is None:
@@ -152,13 +161,34 @@ def add_intraday_vwap_volume_features(df: pd.DataFrame) -> pd.DataFrame:
         .fillna(0.0)
     )
 
-    # The baseline for a clock slot uses earlier sessions only. The shifted
-    # rolling fallback provides a neutral causal baseline during session one.
+    seasonality_window = max(int(volume_seasonality_sessions), 2)
+
+    # Same-clock-slot statistics use prior sessions only. Median volume is less
+    # sensitive than a mean to earnings and index-rebalance volume spikes.
     expected_slot_volume = regular_volume.groupby(clock_minute).transform(
-        lambda values: values.shift(1).expanding(min_periods=1).mean()
+        lambda values: values.shift(1).rolling(
+            seasonality_window, min_periods=1
+        ).median()
     )
+    mean_slot_volume = regular_volume.groupby(clock_minute).transform(
+        lambda values: values.shift(1).rolling(
+            seasonality_window, min_periods=2
+        ).mean()
+    )
+    std_slot_volume = regular_volume.groupby(clock_minute).transform(
+        lambda values: values.shift(1).rolling(
+            seasonality_window, min_periods=3
+        ).std(ddof=0)
+    )
+
+    # A causal recent-bar fallback keeps early-history rows usable until a
+    # same-slot history exists. It never includes the current bar.
     fallback_volume = regular_volume.shift(1).rolling(20, min_periods=1).mean()
     expected_volume = expected_slot_volume.fillna(fallback_volume)
+    expected_mean = mean_slot_volume.fillna(fallback_volume)
+    fallback_std = regular_volume.shift(1).rolling(20, min_periods=3).std(ddof=0)
+    expected_std = std_slot_volume.fillna(fallback_std)
+
     volume_time_ratio = (volume / expected_volume.replace(0.0, np.nan)).clip(
         lower=0.05, upper=20.0
     )
@@ -166,6 +196,22 @@ def add_intraday_vwap_volume_features(df: pd.DataFrame) -> pd.DataFrame:
         volume_time_ratio.where(regular_session, 1.0).fillna(1.0)
     )
     out["volume_time_log_ratio"] = np.log(out["volume_time_ratio"])
+    volume_time_zscore = (
+        (volume - expected_mean) / expected_std.replace(0.0, np.nan)
+    ).clip(lower=-8.0, upper=8.0)
+    out["volume_time_zscore"] = (
+        volume_time_zscore.where(regular_session, 0.0).fillna(0.0)
+    )
+    out["volume_surge"] = (
+        (out["volume_time_ratio"] >= 1.5).astype(float)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+    out["volume_dry_up"] = (
+        (out["volume_time_ratio"] <= 0.6).astype(float)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
 
     expected_cumulative_volume = (
         expected_volume.where(regular_session).groupby(session_key).cumsum()
@@ -177,6 +223,28 @@ def add_intraday_vwap_volume_features(df: pd.DataFrame) -> pd.DataFrame:
         session_volume_pace.clip(lower=0.05, upper=20.0)
         .where(regular_session, 1.0)
         .fillna(1.0)
+    )
+    out["session_volume_pace_change_2"] = (
+        out["session_volume_pace"]
+        .groupby(session_key)
+        .pct_change(periods=2, fill_method=None)
+        .clip(lower=-5.0, upper=5.0)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+    out["volume_surprise_change_2"] = (
+        out["volume_time_log_ratio"]
+        .groupby(session_key)
+        .diff(periods=2)
+        .clip(lower=-5.0, upper=5.0)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+    intraday_return = close.groupby(session_key).pct_change(fill_method=None)
+    out["volume_price_confirmation"] = (
+        (intraday_return * out["volume_time_log_ratio"])
+        .where(regular_session, 0.0)
+        .fillna(0.0)
     )
     return out
 
@@ -550,7 +618,22 @@ def get_feature_schema(df: pd.DataFrame) -> dict:
         "trend": [c for c in columns if c.startswith(("ema_", "sma_", "momentum_", "breakout_", "trend_consistency_"))],
         "oscillators": [c for c in columns if c.startswith(("rsi_", "macd", "stoch_", "bb_"))],
         "volatility": [c for c in columns if c.startswith(("atr", "vol_"))],
-        "volume": [c for c in columns if c.startswith(("volume_roc", "volume_time_", "obv", "vol_momentum_"))],
+        "volume": [
+            c for c in columns
+            if c.startswith(
+                (
+                    "volume_roc",
+                    "volume_time_",
+                    "volume_surge",
+                    "volume_dry_up",
+                    "volume_surprise_",
+                    "volume_price_",
+                    "session_volume_",
+                    "obv",
+                    "vol_momentum_",
+                )
+            )
+        ],
         "microstructure": [
             c for c in columns
             if c.startswith("vwap_") or c in {"above_vwap", "session_volume_pace"}
