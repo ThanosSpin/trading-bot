@@ -393,6 +393,19 @@ def get_predictions(symbols, debug=True):
             "allow_intraday": sig.get("allow_intraday"),
             "intraday_volume": sig.get("intraday_volume"),
             "intraday_volume_ratio": sig.get("intraday_volume_ratio"),
+            "vwap_distance": sig.get("vwap_distance"),
+            "vwap_slope_2": sig.get("vwap_slope_2"),
+            "vwap_slope_4": sig.get("vwap_slope_4"),
+            "above_vwap": sig.get("above_vwap"),
+            "volume_time_ratio": sig.get("volume_time_ratio"),
+            "session_volume_pace": sig.get("session_volume_pace"),
+            "relative_return_1": sig.get("relative_return_1"),
+            "relative_return_2": sig.get("relative_return_2"),
+            "relative_return_4": sig.get("relative_return_4"),
+            "relative_strength_accel": sig.get("relative_strength_accel"),
+            "relative_session_return": sig.get("relative_session_return"),
+            "relative_vwap_strength": sig.get("relative_vwap_strength"),
+            "relative_market_available": sig.get("relative_market_available"),
             "price": sig.get("price"),
             "session_return": session_return,
             "daily_movement_expected": (
@@ -543,6 +556,17 @@ def print_signal_diagnostics(decisions, diagnostics):
             f"| q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} "
             f"| regime={sig.get('intraday_regime')} | model={model_used} | {action}"
         )
+        if sig.get("relative_market_available"):
+            print(
+                f"    [RELATIVE] {sym}: "
+                f"session_vs_SPY={fmt(sig.get('relative_session_return'), 4)} "
+                f"rel_60m={fmt(sig.get('relative_return_4'), 4)} "
+                f"accel={fmt(sig.get('relative_strength_accel'), 4)} "
+                f"VWAP={fmt(sig.get('vwap_distance'), 4)} "
+                f"VWAP_slope_2={fmt(sig.get('vwap_slope_2'), 4)} "
+                f"VWAP_slope={fmt(sig.get('vwap_slope_4'), 4)} "
+                f"volume_time={fmt(sig.get('volume_time_ratio'), 2)}"
+            )
 
 
 # ===============================================================
@@ -667,6 +691,9 @@ def apply_close_time_derisk(
             "qty": qty,
             "explain": reason,
             "priority_rank": 0,
+            "exit_reason": (
+                "close_time_loss" if hit_daily_loss else "close_time_gain_trim"
+            ),
         }
         if hit_daily_loss:
             decisions[sym]["risk_exit"] = "close_time_loss"
@@ -793,6 +820,53 @@ def execute_decisions(decisions, diagnostics=None):
     """
     diagnostics = diagnostics or {}
 
+    def _entry_reason(decision):
+        explain = str(decision.get("explain", "")).lower()
+        if decision.get("relative_momentum"):
+            return "relative_momentum"
+        if decision.get("pyramid"):
+            return "pyramid"
+        if decision.get("recalc_all_in") or decision.get("recalc_after_sells"):
+            return "rotation"
+        if "rebuy" in explain or "same-day" in explain:
+            return "rebuy"
+        if "dip-buy" in explain:
+            return "dip_buy"
+        return "ordinary"
+
+    def _exit_reason(decision):
+        if decision.get("exit_reason"):
+            return str(decision["exit_reason"])
+        if decision.get("risk_exit"):
+            return str(decision["risk_exit"])
+        explain = str(decision.get("explain", "")).lower()
+        if "rotation" in explain or "rotate" in explain or "sold to fund" in explain:
+            return "rotation"
+        if "profit" in explain or "gain trim" in explain:
+            return "profit_trim"
+        if "close-time" in explain:
+            return "close_time_derisk"
+        if "stop" in explain:
+            return "stop"
+        return "model_exit"
+
+    def _attribution(sym, decision, action, shares_before, price):
+        diag = diagnostics.get(sym, {}) or {}
+        enriched = dict(decision)
+        enriched.update(
+            {
+                "model_used": diag.get("intraday_model_used") or diag.get("model") or "daily",
+                "regime": diag.get("intraday_regime") or "daily",
+                "entry_reason": _entry_reason(decision) if action == "buy" else "",
+                "exit_reason": _exit_reason(decision) if action == "sell" else "",
+                "decision_probability": diag.get("final_prob"),
+                "buy_threshold": _effective_buy_threshold(sym, diagnostics),
+                "sell_threshold": _effective_sell_threshold(sym, diagnostics),
+                "position_value_before": float(shares_before or 0.0) * float(price or 0.0),
+            }
+        )
+        return enriched
+
     def _get_live_account_cash(proxy_symbol: str = "NVDA") -> float:
         # cash is account-level; any symbol PM works, proxy_symbol is just a handle
         try:
@@ -880,6 +954,10 @@ def execute_decisions(decisions, diagnostics=None):
             sell_failed.add(sym)
             continue
 
+        # Snapshot the broker position before submission so the execution log
+        # records the actual pre-fill position rather than a post-fill refresh.
+        pm.refresh_live()
+        shares_before = float(pm.data.get("shares", 0.0) or 0.0)
         filled_qty, filled_price = execute_trade("sell", qty, sym, decision=decision)
 
         if not filled_qty:
@@ -888,9 +966,16 @@ def execute_decisions(decisions, diagnostics=None):
             continue
 
         any_sell_filled = True
-        pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
-        pm._apply("sell", filled_price, filled_qty, account_cash=account_cash)
+        pm._apply(
+            "sell",
+            filled_price,
+            filled_qty,
+            account_cash=account_cash,
+            decision=_attribution(
+                sym, decision, "sell", shares_before, filled_price
+            ),
+        )
         mark_session_sell(sym)
         if decision.get("risk_exit"):
             mark_session_stop(sym, decision["risk_exit"])
@@ -976,15 +1061,26 @@ def execute_decisions(decisions, diagnostics=None):
             continue
 
         pm = PortfolioManager(sym)
-        filled_qty, filled_price = execute_trade("buy", qty, sym)
+        # Capture the position immediately before the order. Refreshing after
+        # the fill and then applying the fill would count the execution twice.
+        pm.refresh_live()
+        shares_before = float(pm.data.get("shares", 0.0) or 0.0)
+        filled_qty, filled_price = execute_trade("buy", qty, sym, decision=decision)
 
         if not filled_qty:
             print(f"[WARN] {sym} BUY not filled.")
             continue
 
-        pm.refresh_live()
         account_cash = _get_live_account_cash(proxy_symbol=sym)
-        pm._apply("buy", filled_price, filled_qty, account_cash=account_cash)
+        pm._apply(
+            "buy",
+            filled_price,
+            filled_qty,
+            account_cash=account_cash,
+            decision=_attribution(
+                sym, decision, "buy", shares_before, filled_price
+            ),
+        )
         mark_session_buy(sym, is_pyramid=bool(decision.get("pyramid", False)))
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
@@ -1120,6 +1216,7 @@ def process_all_symbols(symbols):
                 f"{MARGIN_EMERGENCY_PROB_THRESH:.3f}"
             ),
             "priority_rank": 0,
+            "exit_reason": "emergency_signal_exit",
         }
 
         print(
@@ -1321,6 +1418,18 @@ def verify_trading_config():
 # ===============================================================
 # Entry Point
 # ===============================================================
+def reconcile_recent_sell_fills(symbols):
+    """Apply and durably record broker SELL fills from today's NY session."""
+    recent_sells = get_recent_filled_sells(symbols)
+    changed = record_broker_sell_fills(recent_sells)
+    if changed:
+        # Persist broker reconciliation immediately. If this process exits
+        # before the normal end-of-cycle save, the same fills must not be
+        # replayed by the next cron invocation.
+        save_session_state()
+    return changed
+
+
 def main():
     verify_runtime_environment()
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
@@ -1331,9 +1440,7 @@ def main():
     # 1) Load previous session state (buys/sells/sell_times) from disk
     load_session_state()
 
-    recent_sells = get_recent_filled_sells(symbols)
-
-    record_broker_sell_fills(recent_sells)
+    reconcile_recent_sell_fills(symbols)
 
     # Wait for confirmation if live trading
     bot_env = get_active_env()

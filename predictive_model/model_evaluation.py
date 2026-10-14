@@ -12,7 +12,7 @@ from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, log_loss
 from xgboost import XGBClassifier
 
 
-EVALUATION_VERSION = 5
+EVALUATION_VERSION = 6
 DEFAULT_COST_BPS = 10.0
 
 
@@ -402,6 +402,12 @@ def evaluate_walk_forward(
         )
 
         movement_gate = movement_probability >= movement_threshold
+        # Keep the decision score separate from the probability used to
+        # measure calibration.  The hard movement gate correctly suppresses
+        # trades, but replacing a probability with zero makes Brier/log-loss
+        # describe the gate rather than the two-stage model.  The joint
+        # probability is P(meaningful move) * P(up | meaningful move).
+        joint_probability = movement_probability * probability
         # Match live execution: a failed meaningful-move gate suppresses the
         # entry at every possible direction threshold.
         combined_probability = np.where(movement_gate, probability, 0.0)
@@ -430,10 +436,18 @@ def evaluate_walk_forward(
                 "threshold_eligible": bool(threshold_optimization["eligible"]),
             }
         )
-        for timestamp, target, predicted, realized, move_probability in zip(
+        for (
+            timestamp,
+            target,
+            predicted,
+            calibrated_probability,
+            realized,
+            move_probability,
+        ) in zip(
             X_scored.index,
             y_scored.to_numpy(),
             combined_probability,
+            joint_probability,
             returns_scored.to_numpy(),
             movement_probability,
         ):
@@ -442,6 +456,7 @@ def evaluate_walk_forward(
                     "timestamp": str(timestamp),
                     "actual": int(target),
                     "probability": float(predicted),
+                    "calibration_probability": float(calibrated_probability),
                     "movement_probability": float(move_probability),
                     "movement_threshold": float(movement_threshold),
                     "forward_return": float(realized),
@@ -508,7 +523,12 @@ def _metrics_from_signals(
     cost_bps: float,
     periods_per_year: int,
 ) -> dict:
-    probabilities = frame["probability"].to_numpy(dtype=float)
+    calibration_column = (
+        "calibration_probability"
+        if "calibration_probability" in frame.columns
+        else "probability"
+    )
+    probabilities = frame[calibration_column].to_numpy(dtype=float)
     actual = frame["actual"].to_numpy(dtype=int)
     returns = frame["forward_return"].to_numpy(dtype=float)
     # Use a synthetic probability vector that exactly reproduces per-fold signals
@@ -610,10 +630,18 @@ def promotion_decision(candidate: dict, champion: Optional[dict]) -> dict:
     )
     candidate_comparison = comparison_frame.assign(
         probability=overlap["probability_candidate"],
+        calibration_probability=overlap.get(
+            "calibration_probability_candidate",
+            overlap["probability_candidate"],
+        ),
         threshold=overlap["threshold_candidate"],
     )
     champion_comparison = comparison_frame.assign(
         probability=overlap["probability_champion"],
+        calibration_probability=overlap.get(
+            "calibration_probability_champion",
+            overlap["probability_champion"],
+        ),
         threshold=overlap["threshold_champion"],
     )
     periods_per_year = 252 if mode == "daily" else 252 * 26

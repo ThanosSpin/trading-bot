@@ -11,6 +11,8 @@ from broker import get_trading_api
 from account_cache import account_cache
 from json.decoder import JSONDecodeError
 
+from trade_attribution import ATTRIBUTION_COLUMNS
+
 # ============================================================
 # File helpers
 # ============================================================
@@ -197,52 +199,56 @@ class PortfolioManager:
     # Logging
     # ------------------------
 
-    def log(self, action, price, qty, shares_before, shares_after):
+    def log(self, action, price, qty, shares_before, shares_after, decision=None):
         """Write trade entry into trades_<symbol>.csv."""
         log_path = get_trade_log_file(self.symbol)
         file_exists = os.path.isfile(log_path)
         timestamp = datetime.utcnow().isoformat()
-
+        decision = decision if isinstance(decision, dict) else {}
         value = self.value()
+        base_columns = [
+            "timestamp", "symbol", "action", "qty", "price", "cash",
+            "shares", "value", "shares_before", "shares_after",
+        ]
+        columns = base_columns + ATTRIBUTION_COLUMNS
 
-        with open(log_path, "a", newline="") as f:
-            writer = csv.writer(f)
+        # Upgrade an existing legacy CSV before appending wider rows.
+        if file_exists:
+            with open(log_path, newline="") as source:
+                reader = csv.DictReader(source)
+                existing_columns = reader.fieldnames or []
+                if existing_columns != columns:
+                    rows = list(reader)
+                    with open(log_path, "w", newline="") as target:
+                        writer = csv.DictWriter(target, fieldnames=columns)
+                        writer.writeheader()
+                        for row in rows:
+                            writer.writerow({name: row.get(name, "") for name in columns})
+
+        row = {
+            "timestamp": timestamp,
+            "symbol": self.symbol,
+            "action": action,
+            "qty": f"{float(qty):g}",
+            "price": f"{float(price):.8g}",
+            "cash": f"{self.data['cash']:.2f}",
+            "shares": f"{self.data['shares']:.8g}",
+            "value": f"{value:.2f}",
+            "shares_before": f"{shares_before:.8g}",
+            "shares_after": f"{shares_after:.8g}",
+        }
+        row.update({name: decision.get(name, "") for name in ATTRIBUTION_COLUMNS})
+        with open(log_path, "a", newline="") as target:
+            writer = csv.DictWriter(target, fieldnames=columns)
             if not file_exists:
-                writer.writerow(
-                    [
-                        "timestamp",
-                        "symbol",
-                        "action",
-                        "qty",
-                        "price",
-                        "cash",
-                        "shares",
-                        "value",
-                        "shares_before",
-                        "shares_after",
-                    ]
-                )
-
-            writer.writerow(
-                [
-                    timestamp,
-                    self.symbol,
-                    action,
-                    f"{float(qty):g}",
-                    f"{float(price):.2f}",
-                    f"{self.data['cash']:.2f}",
-                    f"{self.data['shares']:.8g}",
-                    f"{value:.2f}",
-                    f"{shares_before:.8g}",
-                    f"{shares_after:.8g}",
-                ]
-            )
+                writer.writeheader()
+            writer.writerow(row)
 
     # ------------------------
     # Trading updates
     # ------------------------
 
-    def _apply(self, action, price, qty, account_cash: float = None):
+    def _apply(self, action, price, qty, account_cash: float = None, decision=None):
         """Internal balance update + logging + save.
         qty MUST be the executed (filled) quantity.
         """
@@ -315,7 +321,14 @@ class PortfolioManager:
 
         # log *after* state update so "shares" column equals shares_after
         shares_after_logged = float(self.data.get("shares", 0.0))
-        self.log(action, price, exec_qty, shares_before, shares_after_logged)
+        self.log(
+            action,
+            price,
+            exec_qty,
+            shares_before,
+            shares_after_logged,
+            decision=decision,
+        )
         self.save()
 
     # PUBLIC API -------------------------------------------------------

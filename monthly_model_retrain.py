@@ -193,6 +193,7 @@ def _train_to_stage(
 
     for symbol in symbols:
         intraday_data = None
+        intraday_benchmark = None
         for mode in MODES:
             label = f"{symbol}/{mode}"
             print(f"\n{'=' * 72}\nMONTHLY TRAINING: {label}\n{'=' * 72}")
@@ -202,6 +203,12 @@ def _train_to_stage(
                 else:
                     if intraday_data is None:
                         intraday_data = _fetch_training_data(symbol, mode)
+                    if intraday_benchmark is None:
+                        intraday_benchmark = (
+                            intraday_data
+                            if symbol == str(config.SPY_SYMBOL).upper()
+                            else _fetch_training_data(str(config.SPY_SYMBOL).upper(), mode)
+                        )
                     data = intraday_data
 
                 if data is None or data.empty:
@@ -214,6 +221,7 @@ def _train_to_stage(
                     mode=mode,
                     use_multiclass=USE_MULTICLASS,
                     use_two_stage=USE_TWO_STAGE,
+                    benchmark_df=(intraday_benchmark if mode != "daily" else None),
                 )
                 validate_artifact(artifact, symbol, mode)
 

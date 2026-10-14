@@ -1,6 +1,7 @@
 import unittest
 import json
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -93,6 +94,75 @@ class ExecutionGuardTests(unittest.TestCase):
             saved["session_date"],
             strategy._dt.now(strategy.NY_TZ).date().isoformat(),
         )
+
+    def test_prior_ny_day_sell_does_not_mutate_session_state(self):
+        now_ny = datetime.now(timezone.utc).astimezone(strategy.NY_TZ)
+        prior_day = now_ny - timedelta(days=1)
+
+        changed = strategy.record_broker_sell_fills(
+            [
+                {
+                    "id": "old-order",
+                    "symbol": "NVDA",
+                    "filled_qty": 10,
+                    "filled_at": prior_day.isoformat(),
+                }
+            ]
+        )
+
+        self.assertFalse(changed)
+        self.assertNotIn("NVDA", strategy._session_state["sells"])
+        self.assertNotIn("NVDA", strategy._session_state["sell_times"])
+        self.assertNotIn(
+            "old-order", strategy._session_state["processed_sell_order_ids"]
+        )
+
+    def test_current_ny_day_sell_is_recorded_only_once(self):
+        fill = {
+            "id": "current-order",
+            "symbol": "NVDA",
+            "filled_qty": 10,
+            "filled_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        self.assertTrue(strategy.record_broker_sell_fills([fill]))
+        first_time = strategy._session_state["sell_times"]["NVDA"]
+        self.assertFalse(strategy.record_broker_sell_fills([fill]))
+
+        self.assertIn("NVDA", strategy._session_state["sells"])
+        self.assertEqual(strategy._session_state["sell_times"]["NVDA"], first_time)
+        self.assertEqual(
+            strategy._session_state["processed_sell_order_ids"], {"current-order"}
+        )
+
+    def test_direct_sell_without_timestamp_uses_current_session(self):
+        self.assertTrue(strategy.mark_session_sell("AAPL"))
+        self.assertIn("AAPL", strategy._session_state["sells"])
+
+    def test_recent_sell_query_excludes_prior_ny_date(self):
+        now_ny = datetime.now(timezone.utc).astimezone(trader.NY_TZ)
+        current_fill = SimpleNamespace(
+            id="current",
+            symbol="NVDA",
+            side="sell",
+            filled_qty="2",
+            filled_at=now_ny,
+        )
+        prior_fill = SimpleNamespace(
+            id="prior",
+            symbol="NVDA",
+            side="sell",
+            filled_qty="3",
+            filled_at=now_ny - timedelta(days=1),
+        )
+        client = SimpleNamespace(
+            list_orders=lambda **_kwargs: [current_fill, prior_fill]
+        )
+
+        with patch.object(trader, "_api", return_value=client):
+            fills = trader.get_recent_filled_sells(["NVDA"])
+
+        self.assertEqual([fill["id"] for fill in fills], ["current"])
 
     def test_rotation_uses_guarded_buy_and_requires_flat_target(self):
         decisions = {

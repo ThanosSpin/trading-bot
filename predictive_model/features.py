@@ -1,6 +1,7 @@
 # patched_features.py
 import pandas as pd
 import numpy as np
+from typing import Optional
 
 from predictive_model.data_loader import fetch_historical_data
 from predictive_model.time_features import add_time_features as canonical_add_time_features
@@ -89,6 +90,182 @@ def _fix_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = pd.to_numeric(s, errors="coerce")
 
     return df
+
+
+def add_intraday_vwap_volume_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add causal regular-session VWAP and time-of-day volume features."""
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Intraday features require a DatetimeIndex")
+    if df.index.tz is None:
+        raise ValueError("Intraday features require a timezone-aware DatetimeIndex")
+
+    out = df.copy()
+    ny_index = out.index.tz_convert("America/New_York")
+    clock_minute = pd.Series(
+        ny_index.hour * 60 + ny_index.minute,
+        index=out.index,
+        dtype="int64",
+    )
+    regular_session = clock_minute.between(9 * 60 + 30, 16 * 60 - 1)
+    session_key = pd.Series(ny_index.date, index=out.index)
+
+    close = pd.to_numeric(out["Close"], errors="coerce")
+    high = pd.to_numeric(out["High"], errors="coerce")
+    low = pd.to_numeric(out["Low"], errors="coerce")
+    volume = pd.to_numeric(out["Volume"], errors="coerce").clip(lower=0.0)
+    regular_volume = volume.where(regular_session)
+
+    typical_price = (high + low + close) / 3.0
+    cumulative_volume = regular_volume.groupby(session_key).cumsum()
+    cumulative_price_volume = (
+        (typical_price * regular_volume).groupby(session_key).cumsum()
+    )
+    session_vwap = cumulative_price_volume / cumulative_volume.replace(0.0, np.nan)
+    vwap_distance = close / session_vwap.replace(0.0, np.nan) - 1.0
+    above_vwap = (vwap_distance > 0.0).astype(float)
+    previous_above = above_vwap.groupby(session_key).shift(1)
+
+    out["vwap_distance"] = vwap_distance.where(regular_session, 0.0).fillna(0.0)
+    out["vwap_slope_2"] = (
+        session_vwap.groupby(session_key)
+        .pct_change(periods=2, fill_method=None)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+    out["vwap_slope_4"] = (
+        session_vwap.groupby(session_key)
+        .pct_change(periods=4, fill_method=None)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+    out["above_vwap"] = above_vwap.where(regular_session, 0.0).fillna(0.0)
+    out["vwap_cross_up"] = (
+        ((above_vwap == 1.0) & (previous_above == 0.0))
+        .astype(float)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+    out["vwap_cross_down"] = (
+        ((above_vwap == 0.0) & (previous_above == 1.0))
+        .astype(float)
+        .where(regular_session, 0.0)
+        .fillna(0.0)
+    )
+
+    # The baseline for a clock slot uses earlier sessions only. The shifted
+    # rolling fallback provides a neutral causal baseline during session one.
+    expected_slot_volume = regular_volume.groupby(clock_minute).transform(
+        lambda values: values.shift(1).expanding(min_periods=1).mean()
+    )
+    fallback_volume = regular_volume.shift(1).rolling(20, min_periods=1).mean()
+    expected_volume = expected_slot_volume.fillna(fallback_volume)
+    volume_time_ratio = (volume / expected_volume.replace(0.0, np.nan)).clip(
+        lower=0.05, upper=20.0
+    )
+    out["volume_time_ratio"] = (
+        volume_time_ratio.where(regular_session, 1.0).fillna(1.0)
+    )
+    out["volume_time_log_ratio"] = np.log(out["volume_time_ratio"])
+
+    expected_cumulative_volume = (
+        expected_volume.where(regular_session).groupby(session_key).cumsum()
+    )
+    session_volume_pace = cumulative_volume / expected_cumulative_volume.replace(
+        0.0, np.nan
+    )
+    out["session_volume_pace"] = (
+        session_volume_pace.clip(lower=0.05, upper=20.0)
+        .where(regular_session, 1.0)
+        .fillna(1.0)
+    )
+    return out
+
+
+def add_intraday_relative_market_features(
+    df: pd.DataFrame,
+    benchmark_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    """Add causal returns relative to a timestamp-aligned market benchmark.
+
+    Benchmark observations are joined backward with a one-bar tolerance, so a
+    symbol bar can never see a later SPY bar. Missing benchmark data produces
+    neutral values, keeping old-model inference safe while making the missing
+    context explicit through ``relative_market_available``.
+    """
+    out = df.copy()
+    feature_names = [
+        "spy_return_1",
+        "spy_return_2",
+        "spy_return_4",
+        "relative_return_1",
+        "relative_return_2",
+        "relative_return_4",
+        "relative_strength_accel",
+        "relative_session_return",
+        "relative_vwap_strength",
+    ]
+    for name in feature_names:
+        out[name] = 0.0
+    out["relative_market_available"] = 0.0
+
+    if benchmark_df is None or benchmark_df.empty:
+        return out
+    if not isinstance(out.index, pd.DatetimeIndex) or out.index.tz is None:
+        raise ValueError("Relative intraday features require a timezone-aware index")
+    if not isinstance(benchmark_df.index, pd.DatetimeIndex):
+        raise ValueError("Benchmark data requires a DatetimeIndex")
+
+    benchmark = _fix_ohlcv(benchmark_df).sort_index()
+    benchmark_index = benchmark.index
+    if benchmark_index.tz is None:
+        benchmark_index = benchmark_index.tz_localize("UTC")
+    else:
+        benchmark_index = benchmark_index.tz_convert("UTC")
+    benchmark_close = pd.Series(
+        pd.to_numeric(benchmark["Close"], errors="coerce").to_numpy(),
+        index=benchmark_index,
+    ).dropna()
+
+    target_index = out.index.tz_convert("UTC")
+    target_times = pd.DataFrame({"timestamp": target_index}).sort_values("timestamp")
+    benchmark_times = pd.DataFrame(
+        {"timestamp": benchmark_close.index, "benchmark_close": benchmark_close.to_numpy()}
+    ).sort_values("timestamp")
+    aligned = pd.merge_asof(
+        target_times,
+        benchmark_times,
+        on="timestamp",
+        direction="backward",
+        tolerance=pd.Timedelta(minutes=16),
+    )
+    spy_close = pd.Series(aligned["benchmark_close"].to_numpy(), index=out.index)
+    available = spy_close.notna()
+    if not available.any():
+        return out
+
+    asset_close = pd.to_numeric(out["Close"], errors="coerce")
+    for bars in (1, 2, 4):
+        spy_return = spy_close.pct_change(bars, fill_method=None)
+        asset_return = asset_close.pct_change(bars, fill_method=None)
+        out[f"spy_return_{bars}"] = spy_return.fillna(0.0)
+        out[f"relative_return_{bars}"] = (asset_return - spy_return).fillna(0.0)
+
+    out["relative_strength_accel"] = (
+        out["relative_return_4"] - out["relative_return_4"].shift(2)
+    ).fillna(0.0)
+
+    ny_index = out.index.tz_convert("America/New_York")
+    session_key = pd.Series(ny_index.date, index=out.index)
+    asset_session_return = asset_close / asset_close.groupby(session_key).transform("first") - 1.0
+    spy_session_return = spy_close / spy_close.groupby(session_key).transform("first") - 1.0
+    out["relative_session_return"] = (
+        asset_session_return - spy_session_return
+    ).fillna(0.0)
+    out["relative_vwap_strength"] = (
+        out.get("vwap_distance", 0.0) + out["relative_return_4"]
+    ).fillna(0.0)
+    out["relative_market_available"] = available.astype(float)
+    return out
 
 
 # ============================================================================
@@ -287,6 +464,7 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
 
     if mode == "intraday" and isinstance(df.index, pd.DatetimeIndex):
         df = canonical_add_time_features(df)
+        df = add_intraday_vwap_volume_features(df)
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
@@ -372,10 +550,18 @@ def get_feature_schema(df: pd.DataFrame) -> dict:
         "trend": [c for c in columns if c.startswith(("ema_", "sma_", "momentum_", "breakout_", "trend_consistency_"))],
         "oscillators": [c for c in columns if c.startswith(("rsi_", "macd", "stoch_", "bb_"))],
         "volatility": [c for c in columns if c.startswith(("atr", "vol_"))],
-        "volume": [c for c in columns if c.startswith(("volume_roc", "obv", "vol_momentum_"))],
+        "volume": [c for c in columns if c.startswith(("volume_roc", "volume_time_", "obv", "vol_momentum_"))],
+        "microstructure": [
+            c for c in columns
+            if c.startswith("vwap_") or c in {"above_vwap", "session_volume_pace"}
+        ],
         "lags": [c for c in columns if c.startswith("lag_ret_")],
         "time": [c for c in columns if c.startswith(("time_", "minutes_", "is_", "clock_"))],
-        "market_regime": [c for c in columns if c.startswith("spy_")],
+        "market_regime": [
+            c for c in columns
+            if c.startswith("spy_")
+            or c.startswith("relative_")
+        ],
     }
     return {
         "feature_count": len(columns),
@@ -405,8 +591,12 @@ def build_daily_features(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
+def build_intraday_features(
+    df: pd.DataFrame,
+    benchmark_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
     result = _build_base_features(df, mode="intraday")
+    result = add_intraday_relative_market_features(result, benchmark_df)
     result = add_spy_regime_features(result)
     result = _remove_unnamed_columns(result)
     result.attrs["feature_schema"] = get_feature_schema(result)

@@ -53,7 +53,7 @@ PAPER_TRADE_NOTES = {}
 # Keep the complete universe monitored while limiting which symbols may open
 # new positions in each environment. SELL and risk-exit eligibility is not
 # controlled by these lists.
-LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL", "SPY"]
+LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL", "ABBV", "SPY"]
 PAPER_ENTRY_SYMBOLS = list(SYMBOL) + ["SPY"]
 
 BUY_THRESHOLD = 0.55
@@ -65,6 +65,11 @@ POST_STOP_REBUY_COOLDOWN_MINUTES = 120
 POST_STOP_REBUY_BUFFER = 0.10
 ORDER_FILL_TIMEOUT_SECONDS = 30
 AAPL_BUY_THRESHOLD = 0.60
+AAPL_MOMENTUM_INTRADAY_MIN_PROB = 0.58
+AAPL_MOMENTUM_MIN_RELATIVE_SESSION = 0.003
+AAPL_MOMENTUM_MIN_RELATIVE_60M = 0.005
+AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO = 0.80
+AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER = 0.50
 
 USE_ARTIFACT_THRESHOLDS = True
 ARTIFACT_THRESHOLD_FALLBACK = 0.55
@@ -106,6 +111,9 @@ SPY_SYMBOL = "SPY"
 PRICE_WEAK_THRESHOLD = -0.01 
 WEAK_PROB_THRESHOLD = 0.50
 WEAK_RATIO_THRESHOLD = 0.50
+PRICE_WEAK_RATIO_THRESHOLD = 0.75
+LAST_HOUR_BUY_BUFFER = 0.04
+FINAL_15_MIN_BUY_BUFFER = 0.06
 SPY_ENTRY_THRESHOLD = 0.70
 SPY_EXIT_THRESHOLD = 0.50
 SPY_RISK_FRACTION = 1.0
@@ -133,6 +141,12 @@ MODEL_EVAL_TRANSACTION_COST_BPS = 10.0
 # Keep training responsive on the small VM. Models are trained sequentially,
 # so one worker avoids CPU saturation and calibration process duplication.
 MODEL_TRAIN_N_JOBS = 1
+
+# Experimental guarded entry path. Keep disabled unless explicitly enabled in
+# the isolated paper worktree with RELATIVE_MOMENTUM_ENTRY_ENABLED=true.
+RELATIVE_MOMENTUM_ENTRY_ENABLED = os.getenv(
+    "RELATIVE_MOMENTUM_ENTRY_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 STOP_LOSS = 0.97
 TAKE_PROFIT = None

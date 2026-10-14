@@ -127,6 +127,13 @@ class ModelEvaluationTests(unittest.TestCase):
             all("threshold" in record for record in result["predictions"])
         )
         self.assertIn("movement_probability", result["predictions"][0])
+        self.assertIn("calibration_probability", result["predictions"][0])
+        self.assertTrue(
+            all(
+                0.0 <= record["calibration_probability"] <= 1.0
+                for record in result["predictions"]
+            )
+        )
         self.assertEqual(result["holding_period_bars"], 4)
         self.assertTrue(
             all(fold["test_rows_non_overlapping"] < fold["test_rows_all_market_bars"]
