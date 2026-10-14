@@ -1418,6 +1418,18 @@ def verify_trading_config():
 # ===============================================================
 # Entry Point
 # ===============================================================
+def reconcile_recent_sell_fills(symbols):
+    """Apply and durably record broker SELL fills from today's NY session."""
+    recent_sells = get_recent_filled_sells(symbols)
+    changed = record_broker_sell_fills(recent_sells)
+    if changed:
+        # Persist broker reconciliation immediately. If this process exits
+        # before the normal end-of-cycle save, the same fills must not be
+        # replayed by the next cron invocation.
+        save_session_state()
+    return changed
+
+
 def main():
     verify_runtime_environment()
     symbols = SYMBOL if isinstance(SYMBOL, list) else [SYMBOL]
@@ -1428,9 +1440,7 @@ def main():
     # 1) Load previous session state (buys/sells/sell_times) from disk
     load_session_state()
 
-    recent_sells = get_recent_filled_sells(symbols)
-
-    record_broker_sell_fills(recent_sells)
+    reconcile_recent_sell_fills(symbols)
 
     # Wait for confirmation if live trading
     bot_env = get_active_env()

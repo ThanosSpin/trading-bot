@@ -209,6 +209,7 @@ def save_session_state():
 
 
 def record_broker_sell_fills(fills):
+    changed = False
     for fill in fills:
         order_id = str(fill["id"])
         symbol = str(fill["symbol"]).upper()
@@ -218,13 +219,18 @@ def record_broker_sell_fills(fills):
 
         sold_at = fill.get("filled_at")
 
-        mark_session_sell(symbol, sold_at=sold_at)
+        if not mark_session_sell(symbol, sold_at=sold_at):
+            continue
+
         _session_state["processed_sell_order_ids"].add(order_id)
+        changed = True
 
         print(
             f"[SESSION] Broker SELL recorded: "
             f"{symbol}, qty={fill['filled_qty']}, order={order_id}"
         )
+
+    return changed
 
 
 def mark_session_buy(sym: str, is_pyramid: bool = False):
@@ -297,7 +303,6 @@ def _suppress_unselected_secondary_buy(symbol, action, selected_secondary):
 
 def mark_session_sell(sym: str, sold_at=None):
     sym = sym.upper()
-    _session_state["sells"].add(sym)
 
     if sold_at is None:
         sold_at = _dt.now(timezone.utc)
@@ -306,21 +311,28 @@ def mark_session_sell(sym: str, sold_at=None):
         try:
             sold_at = _dt.fromisoformat(sold_at.replace("Z", "+00:00"))
         except Exception:
-            sold_at = _dt.now(timezone.utc)
+            print(f"[MARK_SELL] {sym}: ignoring invalid sold_at={sold_at!r}")
+            return False
+
+    if not isinstance(sold_at, _dt):
+        print(f"[MARK_SELL] {sym}: ignoring invalid sold_at={sold_at!r}")
+        return False
 
     if sold_at.tzinfo is None:
         sold_at = sold_at.replace(tzinfo=timezone.utc)
 
     sold_at = sold_at.astimezone(timezone.utc)
 
-    # Ignore fills older than 24 hours
-    min_allowed = _dt.now(timezone.utc) - timedelta(hours=24)
-    if sold_at < min_allowed:
+    current_session_date = _dt.now(NY_TZ).date()
+    sold_session_date = sold_at.astimezone(NY_TZ).date()
+    if sold_session_date != current_session_date:
         print(
             f"[MARK_SELL] {sym}: ignoring stale sold_at={sold_at} "
-            f"(older than 24h, min_allowed={min_allowed})"
+            f"(NY date={sold_session_date}, current NY date={current_session_date})"
         )
-        return
+        return False
+
+    _session_state["sells"].add(sym)
 
     existing = _session_state["sell_times"].get(sym)
     if existing is None or sold_at > existing:
@@ -331,6 +343,8 @@ def mark_session_sell(sym: str, sold_at=None):
             f"[MARK_SELL] {sym}: keeping existing sell_times={existing} "
             f"(new={sold_at} is not newer)"
         )
+
+    return True
 
 
 def mark_session_flattened(sym: str):

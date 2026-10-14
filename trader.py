@@ -15,6 +15,7 @@ from predictive_model.data_loader import fetch_latest_price
 from portfolio import PortfolioManager
 
 UTC = pytz.UTC
+NY_TZ = pytz.timezone("America/New_York")
 
 
 def _api():
@@ -192,7 +193,14 @@ def get_margin_status(api=None):
 
 
 def get_recent_filled_sells(symbols, lookback_hours=24):
-    since_dt = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    # Session locks are scoped to the current New York trading date. A rolling
+    # 24-hour window can include yesterday's afternoon fills during the next
+    # morning and incorrectly activate same-day rebuy protection.
+    now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+    session_start_ny = NY_TZ.localize(
+        datetime.combine(now_ny.date(), datetime.min.time())
+    )
+    session_start_utc = session_start_ny.astimezone(timezone.utc)
 
     orders = _api().list_orders(
         status="closed",
@@ -229,8 +237,8 @@ def get_recent_filled_sells(symbols, lookback_hours=24):
         if filled_at.tzinfo is None:
             filled_at = filled_at.replace(tzinfo=timezone.utc)
 
-        # Only include fills within the lookback window
-        if filled_at < since_dt:
+        # Only include fills from the current New York trading date.
+        if filled_at.astimezone(timezone.utc) < session_start_utc:
             continue
 
         fills.append(
