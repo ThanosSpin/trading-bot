@@ -163,9 +163,15 @@ def add_intraday_vwap_volume_features(
 
     seasonality_window = max(int(volume_seasonality_sessions), 2)
 
-    # Same-clock-slot statistics use prior sessions only. Median volume is less
-    # sensitive than a mean to earnings and index-rebalance volume spikes.
-    expected_slot_volume = regular_volume.groupby(clock_minute).transform(
+    # Preserve the established time-ratio definition because strategy entry
+    # guards consume it. New robust model features use separately named fields.
+    legacy_slot_volume = regular_volume.groupby(clock_minute).transform(
+        lambda values: values.shift(1).expanding(min_periods=1).mean()
+    )
+
+    # Robust same-clock-slot statistics use prior sessions only. Median volume
+    # is less sensitive than a mean to earnings and index-rebalance spikes.
+    robust_slot_volume = regular_volume.groupby(clock_minute).transform(
         lambda values: values.shift(1).rolling(
             seasonality_window, min_periods=1
         ).median()
@@ -184,7 +190,8 @@ def add_intraday_vwap_volume_features(
     # A causal recent-bar fallback keeps early-history rows usable until a
     # same-slot history exists. It never includes the current bar.
     fallback_volume = regular_volume.shift(1).rolling(20, min_periods=1).mean()
-    expected_volume = expected_slot_volume.fillna(fallback_volume)
+    expected_volume = legacy_slot_volume.fillna(fallback_volume)
+    robust_expected_volume = robust_slot_volume.fillna(fallback_volume)
     expected_mean = mean_slot_volume.fillna(fallback_volume)
     fallback_std = regular_volume.shift(1).rolling(20, min_periods=3).std(ddof=0)
     expected_std = std_slot_volume.fillna(fallback_std)
@@ -196,6 +203,15 @@ def add_intraday_vwap_volume_features(
         volume_time_ratio.where(regular_session, 1.0).fillna(1.0)
     )
     out["volume_time_log_ratio"] = np.log(out["volume_time_ratio"])
+    robust_ratio = (volume / robust_expected_volume.replace(0.0, np.nan)).clip(
+        lower=0.05, upper=20.0
+    )
+    out["volume_slot_robust_ratio"] = (
+        robust_ratio.where(regular_session, 1.0).fillna(1.0)
+    )
+    out["volume_slot_robust_log_ratio"] = np.log(
+        out["volume_slot_robust_ratio"]
+    )
     volume_time_zscore = (
         (volume - expected_mean) / expected_std.replace(0.0, np.nan)
     ).clip(lower=-8.0, upper=8.0)
@@ -203,12 +219,12 @@ def add_intraday_vwap_volume_features(
         volume_time_zscore.where(regular_session, 0.0).fillna(0.0)
     )
     out["volume_surge"] = (
-        (out["volume_time_ratio"] >= 1.5).astype(float)
+        (out["volume_slot_robust_ratio"] >= 1.5).astype(float)
         .where(regular_session, 0.0)
         .fillna(0.0)
     )
     out["volume_dry_up"] = (
-        (out["volume_time_ratio"] <= 0.6).astype(float)
+        (out["volume_slot_robust_ratio"] <= 0.6).astype(float)
         .where(regular_session, 0.0)
         .fillna(0.0)
     )
@@ -624,6 +640,7 @@ def get_feature_schema(df: pd.DataFrame) -> dict:
                 (
                     "volume_roc",
                     "volume_time_",
+                    "volume_slot_",
                     "volume_surge",
                     "volume_dry_up",
                     "volume_surprise_",

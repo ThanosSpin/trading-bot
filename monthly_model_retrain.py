@@ -151,6 +151,7 @@ def _artifact_summary(artifact: dict) -> dict:
         "target_horizon": artifact.get("target_horizon"),
         "target_horizon_bars": artifact.get("target_horizon_bars"),
         "movement_threshold": artifact.get("movement_threshold"),
+        "volume_feature_set": artifact.get("volume_feature_set"),
         "feature_count": len(artifact.get("features") or []),
         "train_samples": split.get("train_samples"),
         "calibration_samples": split.get("calibration_samples"),
@@ -186,7 +187,10 @@ def _train_to_stage(
     symbols: List[str],
     stage_dir: Path,
     enforce_promotion_gate: bool = True,
+    volume_feature_set: str = "all",
+    modes: Optional[Tuple[str, ...]] = None,
 ) -> Tuple[dict, List[str], List[str]]:
+    modes = tuple(modes or MODES)
     summaries: Dict[str, dict] = {}
     rejections: List[str] = []
     failures: List[str] = []
@@ -194,7 +198,7 @@ def _train_to_stage(
     for symbol in symbols:
         intraday_data = None
         intraday_benchmark = None
-        for mode in MODES:
+        for mode in modes:
             label = f"{symbol}/{mode}"
             print(f"\n{'=' * 72}\nMONTHLY TRAINING: {label}\n{'=' * 72}")
             try:
@@ -222,6 +226,7 @@ def _train_to_stage(
                     use_multiclass=USE_MULTICLASS,
                     use_two_stage=USE_TWO_STAGE,
                     benchmark_df=(intraday_benchmark if mode != "daily" else None),
+                    volume_feature_set=volume_feature_set,
                 )
                 validate_artifact(artifact, symbol, mode)
 
@@ -275,7 +280,11 @@ def _cleanup_old_backups() -> None:
         print(f"[BACKUP] Removed old monthly backup: {old_dir}")
 
 
-def _promote_batch(stage_dir: Path, symbols: List[str]) -> None:
+def _promote_batch(
+    stage_dir: Path,
+    symbols: List[str],
+    modes: Optional[Tuple[str, ...]] = None,
+) -> None:
     """Back up active artifacts and atomically replace each file."""
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     month_dir = MODEL_DIR / "monthly_backups" / datetime.now().strftime("%Y-%m")
@@ -283,7 +292,8 @@ def _promote_batch(stage_dir: Path, symbols: List[str]) -> None:
     month_dir.mkdir(parents=True, exist_ok=True)
     rollback_dir.mkdir(parents=True, exist_ok=True)
 
-    filenames = [f"{symbol}_{mode}_xgb.pkl" for symbol in symbols for mode in MODES]
+    modes = tuple(modes or MODES)
+    filenames = [f"{symbol}_{mode}_xgb.pkl" for symbol in symbols for mode in modes]
     existed = {}
 
     for filename in filenames:
@@ -373,11 +383,15 @@ def _send_email(report: dict, report_path: Path) -> None:
         print(f"[EMAIL] Notification failed: {exc}")
 
 
-def _validate_existing(symbols: List[str]) -> Tuple[dict, List[str]]:
+def _validate_existing(
+    symbols: List[str],
+    modes: Optional[Tuple[str, ...]] = None,
+) -> Tuple[dict, List[str]]:
+    modes = tuple(modes or MODES)
     summaries = {}
     failures = []
     for symbol in symbols:
-        for mode in MODES:
+        for mode in modes:
             label = f"{symbol}/{mode}"
             path = MODEL_DIR / f"{symbol}_{mode}_xgb.pkl"
             try:
@@ -409,33 +423,51 @@ def main() -> int:
         ),
     )
     parser.add_argument("--no-email", action="store_true")
+    parser.add_argument(
+        "--volume-feature-set",
+        choices=("baseline", "robust", "pace", "confirmation", "all"),
+        default="all",
+        help="Intraday volume-seasonality feature bundle used for ablation",
+    )
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        choices=MODES,
+        help="Optional mode subset; allowed only for shadow evaluation",
+    )
     args = parser.parse_args()
     if args.validate_only and args.shadow:
         parser.error("--validate-only and --shadow cannot be used together")
+    if args.modes and not args.shadow:
+        parser.error("--modes is allowed only with --shadow")
 
     symbols = _symbols(args.symbols)
+    modes = tuple(args.modes or MODES)
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
-    expected_models = len(symbols) * len(MODES)
+    expected_models = len(symbols) * len(modes)
     stage_dir = MODEL_DIR / ".monthly_retrain_staging" / run_id
     if not args.validate_only:
         stage_dir.mkdir(parents=True, exist_ok=False)
 
     print(f"[MONTHLY] Run ID: {run_id}")
     print(f"[MONTHLY] Symbols: {', '.join(symbols)}")
-    print(f"[MONTHLY] Modes: {', '.join(MODES)}")
+    print(f"[MONTHLY] Modes: {', '.join(modes)}")
     print(f"[MONTHLY] Model directory: {MODEL_DIR}")
     print(f"[MONTHLY] Intraday history: {INTRADAY_PERIOD} @ {INTRADAY_INTERVAL}")
     print(f"[MONTHLY] Multiclass: {USE_MULTICLASS}")
     print(f"[MONTHLY] Two-stage targets: {USE_TWO_STAGE}")
+    print(f"[MONTHLY] Volume feature set: {args.volume_feature_set}")
 
     if args.validate_only:
-        summaries, failures = _validate_existing(symbols)
+        summaries, failures = _validate_existing(symbols, modes=modes)
         rejections = []
     else:
         summaries, rejections, failures = _train_to_stage(
             symbols,
             stage_dir,
             enforce_promotion_gate=not args.shadow,
+            volume_feature_set=args.volume_feature_set,
+            modes=modes,
         )
 
     accepted_count = sum(
@@ -463,7 +495,8 @@ def main() -> int:
         "validate_only": args.validate_only,
         "shadow": args.shadow,
         "symbols": symbols,
-        "modes": list(MODES),
+        "modes": list(modes),
+        "volume_feature_set": args.volume_feature_set,
         "expected_models": expected_models,
         "evaluated_count": len(summaries),
         "accepted_count": accepted_count,
@@ -476,7 +509,7 @@ def main() -> int:
 
     if not failures and not rejections and not args.validate_only and not args.shadow:
         try:
-            _promote_batch(stage_dir, symbols)
+            _promote_batch(stage_dir, symbols, modes=modes)
             report["promoted"] = True
             report["promoted_count"] = expected_models
         except Exception as exc:

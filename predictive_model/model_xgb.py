@@ -57,6 +57,39 @@ _calibrator_cache = {}
 
 warnings.filterwarnings("ignore", message=".*cv='prefit'.*")
 
+VOLUME_FEATURE_VARIANTS = {
+    "baseline": set(),
+    "robust": {
+        "volume_slot_robust_ratio",
+        "volume_slot_robust_log_ratio",
+        "volume_time_zscore",
+        "volume_surge",
+        "volume_dry_up",
+    },
+    "pace": {
+        "session_volume_pace_change_2",
+        "volume_surprise_change_2",
+    },
+    "confirmation": {"volume_price_confirmation"},
+}
+VOLUME_SEASONALITY_FEATURES = set().union(*VOLUME_FEATURE_VARIANTS.values())
+VOLUME_FEATURE_VARIANTS["all"] = set(VOLUME_SEASONALITY_FEATURES)
+
+
+def _apply_volume_feature_variant(feature_cols, variant: str):
+    variant = str(variant or "all").strip().lower()
+    if variant not in VOLUME_FEATURE_VARIANTS:
+        raise ValueError(
+            f"Unknown volume feature set {variant!r}; expected one of "
+            f"{sorted(VOLUME_FEATURE_VARIANTS)}"
+        )
+    allowed = VOLUME_FEATURE_VARIANTS[variant]
+    return [
+        column
+        for column in feature_cols
+        if column not in VOLUME_SEASONALITY_FEATURES or column in allowed
+    ]
+
 
 # ---------------------------------------------------------
 # Utility
@@ -342,6 +375,7 @@ def train_model(
     use_multiclass: bool = False,
     use_two_stage: Optional[bool] = None,
     benchmark_df: Optional[pd.DataFrame] = None,
+    volume_feature_set: str = "all",
 ):
     """
     Train XGB model with chronological train/calibration/test split.
@@ -445,6 +479,17 @@ def train_model(
         "Volume",
     ]
     feature_cols = [col for col in df_feat.columns if col not in exclude_cols]
+    if mode in ("intraday", "intraday_mr", "intraday_mom"):
+        feature_cols = _apply_volume_feature_variant(
+            feature_cols, volume_feature_set
+        )
+        retained_volume_features = sorted(
+            set(feature_cols).intersection(VOLUME_SEASONALITY_FEATURES)
+        )
+        print(
+            f"[VOLUME ABLATION] set={volume_feature_set} "
+            f"features={retained_volume_features}"
+        )
 
     X = df_feat[feature_cols].copy()
     y = pd.Series(df_feat[target_col], dtype=int)
@@ -894,6 +939,11 @@ def train_model(
             }
         ),
         "feature_importance": feature_importance,
+        "volume_feature_set": (
+            str(volume_feature_set).strip().lower()
+            if mode in ("intraday", "intraday_mr", "intraday_mom")
+            else None
+        ),
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
         "mode": mode,
@@ -1477,6 +1527,8 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                         "vwap_slope_4",
                         "above_vwap",
                         "volume_time_ratio",
+                        "volume_slot_robust_ratio",
+                        "volume_slot_robust_log_ratio",
                         "volume_time_zscore",
                         "volume_surge",
                         "volume_dry_up",

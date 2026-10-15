@@ -7,6 +7,10 @@ from predictive_model.features import (
     add_intraday_relative_market_features,
     add_intraday_vwap_volume_features,
 )
+from predictive_model.model_xgb import (
+    VOLUME_SEASONALITY_FEATURES,
+    _apply_volume_feature_variant,
+)
 
 
 class IntradayVwapVolumeFeatureTests(unittest.TestCase):
@@ -77,6 +81,8 @@ class IntradayVwapVolumeFeatureTests(unittest.TestCase):
         result = add_intraday_vwap_volume_features(changed)
 
         feature_names = [
+            "volume_slot_robust_ratio",
+            "volume_slot_robust_log_ratio",
             "volume_time_zscore",
             "volume_surge",
             "volume_dry_up",
@@ -121,7 +127,7 @@ class IntradayVwapVolumeFeatureTests(unittest.TestCase):
 
         # The final bar compares with the most recent 20 same-slot sessions,
         # whose robust median is 200 rather than the full-history average.
-        self.assertAlmostEqual(result.iloc[-1]["volume_time_ratio"], 1.0)
+        self.assertAlmostEqual(result.iloc[-1]["volume_slot_robust_ratio"], 1.0)
 
     def test_volume_feature_schema_includes_seasonality_group(self):
         from predictive_model.features import get_feature_schema
@@ -130,8 +136,31 @@ class IntradayVwapVolumeFeatureTests(unittest.TestCase):
         volume_features = get_feature_schema(result)["groups"]["volume"]
 
         self.assertIn("volume_time_zscore", volume_features)
+        self.assertIn("volume_slot_robust_ratio", volume_features)
         self.assertIn("session_volume_pace_change_2", volume_features)
         self.assertIn("volume_price_confirmation", volume_features)
+
+    def test_volume_ablation_variants_are_disjoint_and_reproducible(self):
+        ordinary = ["return_1", "volume_time_ratio"]
+        candidates = ordinary + sorted(VOLUME_SEASONALITY_FEATURES)
+
+        baseline = _apply_volume_feature_variant(candidates, "baseline")
+        robust = _apply_volume_feature_variant(candidates, "robust")
+        pace = _apply_volume_feature_variant(candidates, "pace")
+        confirmation = _apply_volume_feature_variant(candidates, "confirmation")
+        all_features = _apply_volume_feature_variant(candidates, "all")
+
+        self.assertEqual(baseline, ordinary)
+        self.assertIn("volume_slot_robust_ratio", robust)
+        self.assertNotIn("session_volume_pace_change_2", robust)
+        self.assertIn("session_volume_pace_change_2", pace)
+        self.assertNotIn("volume_slot_robust_ratio", pace)
+        self.assertIn("volume_price_confirmation", confirmation)
+        self.assertEqual(all_features, candidates)
+
+    def test_unknown_volume_ablation_variant_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unknown volume feature set"):
+            _apply_volume_feature_variant(["return_1"], "unknown")
 
     def test_timezone_is_required(self):
         frame = self._frame()

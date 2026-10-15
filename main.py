@@ -398,6 +398,10 @@ def get_predictions(symbols, debug=True):
             "vwap_slope_4": sig.get("vwap_slope_4"),
             "above_vwap": sig.get("above_vwap"),
             "volume_time_ratio": sig.get("volume_time_ratio"),
+            "volume_slot_robust_ratio": sig.get("volume_slot_robust_ratio"),
+            "volume_slot_robust_log_ratio": sig.get(
+                "volume_slot_robust_log_ratio"
+            ),
             "volume_time_zscore": sig.get("volume_time_zscore"),
             "volume_surge": sig.get("volume_surge"),
             "volume_dry_up": sig.get("volume_dry_up"),
@@ -579,6 +583,7 @@ def print_signal_diagnostics(decisions, diagnostics):
             print(
                 f"    [VOLUME SEASONALITY] {sym}: "
                 f"slot_ratio={fmt(sig.get('volume_time_ratio'), 2)} "
+                f"robust_ratio={fmt(sig.get('volume_slot_robust_ratio'), 2)} "
                 f"slot_z={fmt(sig.get('volume_time_zscore'), 2)} "
                 f"pace={fmt(sig.get('session_volume_pace'), 2)} "
                 f"pace_change_30m={fmt(sig.get('session_volume_pace_change_2'), 3)} "
