@@ -21,6 +21,7 @@ ATTRIBUTION_COLUMNS = [
     "client_order_id",
     "source_commit",
     "source_checkout",
+    "broker_order_id",
 ]
 
 

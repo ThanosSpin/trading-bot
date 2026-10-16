@@ -11,6 +11,7 @@ from config import (
 )
 
 from broker import get_trading_api
+from trade_attribution import ATTRIBUTION_COLUMNS
 
 api_market = get_trading_api()
 
@@ -112,6 +113,10 @@ def gather_all_trades(symbols):
                     "action": t.side.lower(),
                     "qty": qty,
                     "price": float(price),
+                    "broker_order_id": str(getattr(t, "id", "") or ""),
+                    "client_order_id": str(
+                        getattr(t, "client_order_id", "") or ""
+                    ),
                 }
             )
 
@@ -293,7 +298,81 @@ def replay_and_emit(events, initial_cash: float = 0.0):
     cash = initial_cash
     symbols_state = {}
     per_symbol_rows = {}
+    existing_attribution = {}
+    used_attribution_rows = {}
     daily_rows = []
+
+    def load_existing_attribution(symbol):
+        path = trade_log_path(symbol)
+        if not os.path.exists(path):
+            return pd.DataFrame()
+        try:
+            frame = pd.read_csv(path)
+        except Exception as error:
+            print(f"  [WARN] Could not preserve attribution from {path}: {error}")
+            return pd.DataFrame()
+        for column in ATTRIBUTION_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = ""
+        frame["timestamp"] = pd.to_datetime(
+            frame.get("timestamp"), utc=True, errors="coerce"
+        )
+        frame["action"] = frame.get("action", "").astype(str).str.lower().str.strip()
+        frame["qty"] = pd.to_numeric(frame.get("qty"), errors="coerce")
+        frame["price"] = pd.to_numeric(frame.get("price"), errors="coerce")
+        # Rows without any attribution add no information to the rebuilt log.
+        has_attribution = frame[ATTRIBUTION_COLUMNS].fillna("").astype(str).apply(
+            lambda row: any(value.strip() and value.strip().lower() != "nan" for value in row),
+            axis=1,
+        )
+        return frame[has_attribution].copy()
+
+    def preserved_attribution(symbol, trade):
+        if symbol not in existing_attribution:
+            existing_attribution[symbol] = load_existing_attribution(symbol)
+            used_attribution_rows[symbol] = set()
+        frame = existing_attribution[symbol]
+        if frame.empty:
+            return {}
+
+        order_id = str(trade.get("broker_order_id", "") or "")
+        candidates = frame
+        if order_id and "broker_order_id" in frame.columns:
+            exact = frame[frame["broker_order_id"].astype(str).eq(order_id)]
+            if not exact.empty:
+                candidates = exact
+            else:
+                candidates = pd.DataFrame()
+
+        if candidates.empty:
+            candidates = frame[
+                frame["action"].eq(str(trade.get("action", "")).lower())
+                & frame["qty"].sub(float(trade.get("qty", 0.0))).abs().le(1e-6)
+            ].copy()
+            if not candidates.empty:
+                target_time = pd.Timestamp(trade["timestamp"])
+                candidates["time_delta"] = (
+                    candidates["timestamp"] - target_time
+                ).abs().dt.total_seconds()
+                price = float(trade.get("price", 0.0) or 0.0)
+                tolerance = max(0.02, abs(price) * 0.002)
+                candidates = candidates[
+                    candidates["time_delta"].le(120.0)
+                    & candidates["price"].sub(price).abs().le(tolerance)
+                ].sort_values("time_delta")
+
+        candidates = candidates[
+            ~candidates.index.isin(used_attribution_rows[symbol])
+        ]
+        if candidates.empty:
+            return {}
+        match = candidates.iloc[0]
+        used_attribution_rows[symbol].add(match.name)
+        return {
+            column: match.get(column, "")
+            for column in ATTRIBUTION_COLUMNS
+            if pd.notna(match.get(column, ""))
+        }
 
     for e in events:
         ts = e["timestamp"]
@@ -325,8 +404,7 @@ def replay_and_emit(events, initial_cash: float = 0.0):
                 s["shares"] * s["last_price"] for s in symbols_state.values()
             )
 
-            per_symbol_rows[sym].append(
-                {
+            row = {
                     "timestamp": ts.isoformat(),
                     "symbol": sym,
                     "action": action,
@@ -337,8 +415,16 @@ def replay_and_emit(events, initial_cash: float = 0.0):
                     "value": round(replayed_value, 6),
                     "timestamplocal": tsl.isoformat(),
                     "timestampstr": tsl.strftime("%Y-%m-%d %H%M%S"),
+                    "broker_order_id": e.get("broker_order_id", ""),
+                    "client_order_id": e.get("client_order_id", ""),
                 }
-            )
+            row.update(preserved_attribution(sym, e))
+            # Broker data is authoritative for identifiers. Do not let a
+            # legacy attribution row with blank IDs erase newly fetched IDs.
+            row["broker_order_id"] = e.get("broker_order_id", "")
+            if e.get("client_order_id"):
+                row["client_order_id"] = e["client_order_id"]
+            per_symbol_rows[sym].append(row)
 
         replayed_value = cash + sum(
             s["shares"] * s["last_price"] for s in symbols_state.values()
@@ -360,35 +446,13 @@ def replay_and_emit(events, initial_cash: float = 0.0):
         path = trade_log_path(sym)
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(
-                [
-                    "timestamp",
-                    "symbol",
-                    "action",
-                    "qty",
-                    "price",
-                    "cash",
-                    "shares",
-                    "value",
-                    "timestamplocal",
-                    "timestampstr",
-                ]
-            )
+            columns = [
+                "timestamp", "symbol", "action", "qty", "price", "cash",
+                "shares", "value", "timestamplocal", "timestampstr",
+            ] + ATTRIBUTION_COLUMNS
+            w.writerow(columns)
             for r in rows:
-                w.writerow(
-                    [
-                        r["timestamp"],
-                        r["symbol"],
-                        r["action"],
-                        r["qty"],
-                        r["price"],
-                        r["cash"],
-                        r["shares"],
-                        r["value"],
-                        r["timestamplocal"],
-                        r["timestampstr"],
-                    ]
-                )
+                w.writerow([r.get(column, "") for column in columns])
         print(f"  ✅ Wrote trade log: {path} ({len(rows)} rows)")
 
     # ── Build daily_portfolio DataFrame ───────────────────────────────────────

@@ -530,6 +530,8 @@ def execute_trade(action, quantity, symbol, decision=None):
             time_in_force="gtc",
             client_order_id=explicit_client_order_id,
         )
+        if isinstance(decision, dict):
+            decision["broker_order_id"] = str(order.id)
         print(
             f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} "
             f"(id={order.id}, client_order_id={explicit_client_order_id}, "
