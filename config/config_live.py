@@ -43,6 +43,25 @@ elif BOT_ENV == "live2":
 
 
 # ============================================================
+# Temporary live validation safeguards
+# ============================================================
+
+# Keep monitoring the full universe and allow every existing position to be
+# sold, while limiting new live exposure to the two symbols selected for the
+# stabilization cohort.
+LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL"]
+
+# A single forecast error must not consume most of a small live account.
+MAX_POSITION_SIZE_PCT = 0.25
+MAX_POSITION_SIZE_DOLLARS = None
+
+# Disable additions to an existing live position while the entry/exit model
+# contract and blended thresholds are being validated. Paper retains its own
+# configuration so prospective behavior can still be measured.
+MAX_PYRAMID_ADDITIONS = 0
+
+
+# ============================================================
 # Validation
 # ============================================================
 

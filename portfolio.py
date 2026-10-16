@@ -286,6 +286,9 @@ class PortfolioManager:
             # ── Guard 3 prerequisite: record first entry time ──
             if shares_before <= 0:
                 self.data["entry_time"] = datetime.utcnow().isoformat()
+                if isinstance(decision, dict):
+                    self.data["entry_model"] = decision.get("model_used")
+                    self.data["entry_regime"] = decision.get("regime")
 
         # -----------------------
         # SELL
@@ -306,6 +309,8 @@ class PortfolioManager:
                 self.data["avg_price"] = 0.0
                 self.data["max_price"] = 0.0
                 self.data["entry_time"] = None  # ── Guard 3: clear on flat
+                self.data["entry_model"] = None
+                self.data["entry_regime"] = None
 
         else:
             # unknown action

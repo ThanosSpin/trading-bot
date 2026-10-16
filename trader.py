@@ -13,6 +13,12 @@ from entry_policy import is_new_entry_allowed
 from market import is_market_open, is_trading_day
 from predictive_model.data_loader import fetch_latest_price
 from portfolio import PortfolioManager
+from runtime_identity import (
+    EXECUTION_ID,
+    GIT_COMMIT,
+    SOURCE_CHECKOUT,
+    client_order_id,
+)
 
 UTC = pytz.UTC
 NY_TZ = pytz.timezone("America/New_York")
@@ -506,15 +512,28 @@ def execute_trade(action, quantity, symbol, decision=None):
 
         quantity = float(allowed_qty)
 
+        explicit_client_order_id = client_order_id(action, symU)
+        if isinstance(decision, dict):
+            decision.update(
+                {
+                    "execution_id": EXECUTION_ID,
+                    "client_order_id": explicit_client_order_id,
+                    "source_commit": GIT_COMMIT,
+                    "source_checkout": SOURCE_CHECKOUT,
+                }
+            )
         order = client.submit_order(
             symbol=symU,
             qty=quantity,
             side=action,
             type="market",
             time_in_force="gtc",
+            client_order_id=explicit_client_order_id,
         )
         print(
-            f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})"
+            f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} "
+            f"(id={order.id}, client_order_id={explicit_client_order_id}, "
+            f"execution_id={EXECUTION_ID})"
         )
 
         result = _wait_for_terminal_order(client, order.id)

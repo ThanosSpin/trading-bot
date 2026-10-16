@@ -60,6 +60,7 @@ from broker import (
 )
 
 from config import BASE_URL as CONFIG_BASE_URL
+from runtime_identity import acquire_runtime_lock
 import os, csv
 import pandas as pd
 from datetime import datetime, timezone, time as dtime
@@ -1501,4 +1502,5 @@ def main():
 
 
 if __name__ == "__main__":
+    acquire_runtime_lock()
     main()

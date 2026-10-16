@@ -17,6 +17,10 @@ ATTRIBUTION_COLUMNS = [
     "buy_threshold",
     "sell_threshold",
     "position_value_before",
+    "execution_id",
+    "client_order_id",
+    "source_commit",
+    "source_checkout",
 ]
 
 

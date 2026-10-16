@@ -25,6 +25,7 @@ from order_utils import get_order_params, print_market_status, get_market_sessio
 
 from config import (
     PRE_MARKET_ENABLED,
+    PRE_MARKET_EXECUTE_ORDERS,
     PRE_MARKET_MIN_PROB,
     PRE_MARKET_MAX_ALLOCATION,
     PRE_MARKET_LIMIT_BUFFER,
@@ -480,6 +481,10 @@ def scan_and_queue_orders():
             if prob >= PRE_MARKET_MIN_PROB:
                 print(f"\n  🎯 HIGH CONVICTION BUY SIGNAL!")
 
+                if not PRE_MARKET_EXECUTE_ORDERS:
+                    print("  🔎 SIGNAL ONLY - order submission is disabled")
+                    continue
+
                 # Calculate position size
                 allocation = available_cash * PRE_MARKET_MAX_ALLOCATION
                 max_qty = int(allocation // price)
@@ -570,6 +575,11 @@ def scan_and_queue_orders():
             # SELL SIGNAL (Low probability)
             # ============================================================
             elif prob <= min_sell_prob:
+
+                if not PRE_MARKET_EXECUTE_ORDERS:
+                    print("  🔎 HIGH CONVICTION SELL SIGNAL - signal only")
+                    print("  🔎 Order submission is disabled")
+                    continue
 
                 # ── Pre-market SELL guard ────────────────────────────────
                 # Block sells triggered by noisy pre-market/after-hours data.

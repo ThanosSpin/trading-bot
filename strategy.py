@@ -56,6 +56,7 @@ from config import (
     COST_AWARE_MIN_HYSTERESIS,
     MODEL_REBUY_BUFFER,
     MODEL_PYRAMID_BUFFER,
+    MODEL_SWITCH_EXIT_CONFIRMATION_BUFFER,
     MODEL_MIN_CLASS_BOUNDARY,
     AAPL_MODEL_MIN_CLASS_BOUNDARY,
     BUY_SESSION_RETURN_FLOOR,
@@ -1410,6 +1411,48 @@ def should_trade(
     # ---------------------------------------------------------
     if prob_up <= effective_sell_threshold:
         if shares > 0:
+            entry_model = str(pm.data.get("entry_model") or "").strip()
+            entry_regime = str(pm.data.get("entry_regime") or "").strip()
+            current_model = str(d_diag.get("intraday_model_used") or "").strip()
+            current_regime = str(d_diag.get("intraday_regime") or "").strip()
+            model_changed = bool(
+                entry_model and current_model and entry_model != current_model
+            )
+            regime_changed = bool(
+                entry_regime and current_regime and entry_regime != current_regime
+            )
+            strong_switch_exit = prob_up <= (
+                effective_sell_threshold
+                - float(MODEL_SWITCH_EXIT_CONFIRMATION_BUFFER)
+            )
+            if model_changed and not strong_switch_exit:
+                return make_decision(
+                    "hold",
+                    0,
+                    explain
+                    + "MODEL EXIT deferred - active model differs from entry "
+                    + f"({entry_model}/{entry_regime or 'unknown'} -> "
+                    + f"{current_model}/{current_regime or 'unknown'}). "
+                    + "Risk stops remain active.",
+                )
+            if regime_changed and not strong_switch_exit:
+                return make_decision(
+                    "hold",
+                    0,
+                    explain
+                    + "MODEL EXIT deferred - regime differs from entry "
+                    + f"({entry_model or 'unknown'}/{entry_regime} -> "
+                    + f"{current_model or 'unknown'}/{current_regime}). "
+                    + "Risk stops remain active.",
+                )
+            if (model_changed or regime_changed) and strong_switch_exit:
+                print(
+                    f"[MODEL EXIT CONFIRMATION] {symbol}: allowing strong exit "
+                    f"prob={prob_up:.3f} <= "
+                    f"{effective_sell_threshold - float(MODEL_SWITCH_EXIT_CONFIRMATION_BUFFER):.3f} "
+                    f"despite {entry_model or 'unknown'}/{entry_regime or 'unknown'} -> "
+                    f"{current_model or 'unknown'}/{current_regime or 'unknown'}"
+                )
             entry_ts = pm.data.get("entry_time")
             if entry_ts:
                 try:

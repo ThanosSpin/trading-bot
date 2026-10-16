@@ -50,23 +50,60 @@ class ExecutionGuardTests(unittest.TestCase):
         fetch.assert_called_once_with("NVDA", period="3mo", interval="1d")
 
     def test_pyramid_cooldown_and_cap_reset_when_position_closes(self):
-        allowed, _ = strategy._pyramid_allowed("ABBV")
-        self.assertTrue(allowed)
+        with patch.object(strategy, "MAX_PYRAMID_ADDITIONS", 2):
+            allowed, _ = strategy._pyramid_allowed("ABBV")
+            self.assertTrue(allowed)
 
-        strategy.mark_session_buy("ABBV", is_pyramid=True)
-        allowed, reason = strategy._pyramid_allowed("ABBV")
+            strategy.mark_session_buy("ABBV", is_pyramid=True)
+            allowed, reason = strategy._pyramid_allowed("ABBV")
+            self.assertFalse(allowed)
+            self.assertIn("cooldown", reason)
+
+            strategy._session_state["last_pyramid_times"].pop("ABBV")
+            strategy.mark_session_buy("ABBV", is_pyramid=True)
+            allowed, reason = strategy._pyramid_allowed("ABBV")
+            self.assertFalse(allowed)
+            self.assertIn("maximum", reason)
+
+            strategy.mark_session_position_closed("ABBV")
+            allowed, _ = strategy._pyramid_allowed("ABBV")
+            self.assertTrue(allowed)
+
+    def test_live_configuration_disables_pyramiding(self):
+        allowed, reason = strategy._pyramid_allowed("NVDA")
         self.assertFalse(allowed)
-        self.assertIn("cooldown", reason)
+        self.assertIn("maximum 0", reason)
 
-        strategy._session_state["last_pyramid_times"].pop("ABBV")
-        strategy.mark_session_buy("ABBV", is_pyramid=True)
-        allowed, reason = strategy._pyramid_allowed("ABBV")
-        self.assertFalse(allowed)
-        self.assertIn("maximum", reason)
+    def test_model_exit_is_deferred_when_entry_model_differs(self):
+        pm = SimpleNamespace(
+            data={
+                "shares": 10,
+                "cash": 1000.0,
+                "avg_price": 100.0,
+                "entry_model": "intraday_mr",
+                "entry_regime": "mr",
+                "entry_time": (
+                    datetime.utcnow() - timedelta(hours=2)
+                ).isoformat(),
+            },
+            refresh_live=lambda: None,
+        )
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.55,
+                "intraday_model_used": "intraday_mom",
+                "intraday_regime": "mom",
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=99.0
+        ):
+            decision = strategy.should_trade(
+                "NVDA", 0.51, diagnostics=diagnostics
+            )
 
-        strategy.mark_session_position_closed("ABBV")
-        allowed, _ = strategy._pyramid_allowed("ABBV")
-        self.assertTrue(allowed)
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("active model differs from entry", decision["explain"])
 
     def test_stop_exit_blocks_immediate_reentry(self):
         strategy.mark_session_stop("ABBV", "dollar_stop")

@@ -83,6 +83,9 @@ COST_AWARE_SELL_CEILING = 0.52
 COST_AWARE_MIN_HYSTERESIS = 0.04
 MODEL_REBUY_BUFFER = 0.04
 MODEL_PYRAMID_BUFFER = 0.08
+# When the active regime model differs from the model that opened a position,
+# require a materially stronger ordinary exit. Risk exits bypass this guard.
+MODEL_SWITCH_EXIT_CONFIRMATION_BUFFER = 0.05
 # A trained, cost-aware artifact may lower the legacy entry floor, but never
 # below a neutral class boundary. AAPL retains a slightly higher safety floor.
 MODEL_MIN_CLASS_BOUNDARY = 0.50
@@ -177,6 +180,9 @@ MARGIN_EMERGENCY_PROB_THRESH = 0.40
 ROTATION_MIN_EDGE = 0.03
 
 PRE_MARKET_ENABLED = True
+# The scanner is research-only. All account mutations must pass through the
+# main strategy process so session state, sizing, attribution, and exits agree.
+PRE_MARKET_EXECUTE_ORDERS = False
 PRE_MARKET_MIN_PROB = 0.55
 PRE_MARKET_MAX_ALLOCATION = 1.0
 PRE_MARKET_LIMIT_BUFFER = 0.002
