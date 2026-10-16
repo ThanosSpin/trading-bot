@@ -31,6 +31,7 @@ from config import (
     RS_MARGIN,
     MAX_POSITION_SIZE_PCT,
     MAX_POSITION_SIZE_DOLLARS,
+    MAX_TOTAL_POSITION_SIZE_PCT,
     DIP_BUY_ENABLED,
     DIP_BUY_THRESHOLD,
     DIP_BUY_MIN_PROB,
@@ -487,7 +488,13 @@ def detect_afterhours_dip(sym: str, threshold: float = 0.015) -> bool:
 # ---------------------------------------------------------
 # Helper for position limits
 # ---------------------------------------------------------
-def apply_position_limits(qty: int, price: float, cash: float, symbol: str) -> int:
+def apply_position_limits(
+    qty: int,
+    price: float,
+    cash: float,
+    symbol: str,
+    current_position_value: float = 0.0,
+) -> int:
     """
     Apply hard position size limits to prevent over-concentration.
 
@@ -508,12 +515,21 @@ def apply_position_limits(qty: int, price: float, cash: float, symbol: str) -> i
     # Limit 1: Percentage of cash
     max_by_pct = int((cash * MAX_POSITION_SIZE_PCT) // price)
 
-    # Limit 2: Absolute dollar amount (if configured)
+    # Limit 2: Total position exposure after this fill. For an initial entry,
+    # the 25% per-order cap above is tighter. Pyramid additions may scale the
+    # position gradually but may not exceed the configured total cap.
+    current_position_value = max(0.0, float(current_position_value or 0.0))
+    available_capital = max(0.0, float(cash)) + current_position_value
+    total_position_cap = available_capital * float(MAX_TOTAL_POSITION_SIZE_PCT)
+    remaining_position_capacity = max(0.0, total_position_cap - current_position_value)
+    max_by_total_position = int(remaining_position_capacity // price)
+
+    # Limit 3: Absolute dollar amount (if configured)
     if MAX_POSITION_SIZE_DOLLARS is not None:
         max_by_dollars = int(MAX_POSITION_SIZE_DOLLARS // price)
-        max_allowed = min(max_by_pct, max_by_dollars)
+        max_allowed = min(max_by_pct, max_by_total_position, max_by_dollars)
     else:
-        max_allowed = max_by_pct
+        max_allowed = min(max_by_pct, max_by_total_position)
 
     # Return lesser of proposed and max allowed
     if qty > max_allowed:
@@ -1264,6 +1280,50 @@ def should_trade(
     # ---------------------------------------------------------
     if shares > 0 and prob_up >= effective_buy_threshold:
 
+        entry_model = str(pm.data.get("entry_model") or "").strip()
+        entry_regime = str(pm.data.get("entry_regime") or "").strip()
+        current_model = str(d_diag.get("intraday_model_used") or "").strip()
+        current_regime = str(d_diag.get("intraday_regime") or "").strip()
+
+        if not entry_model or not entry_regime:
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + "HOLD - pyramid blocked because entry model/regime "
+                + "attribution is unavailable.",
+            )
+        if entry_model and current_model and entry_model != current_model:
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + "HOLD - pyramid blocked because active model differs from "
+                + f"entry ({entry_model} -> {current_model}).",
+            )
+        if entry_regime and current_regime and entry_regime != current_regime:
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + "HOLD - pyramid blocked because regime differs from entry "
+                + f"({entry_regime} -> {current_regime}).",
+            )
+        if intraday_mom is None or float(intraday_mom) <= 0.0:
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + "HOLD - pyramid requires positive intraday momentum.",
+            )
+        if session_return is None or float(session_return) <= 0.0:
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + "HOLD - pyramid requires a positive session return.",
+            )
+
         # -- Guard 2: block averaging down into a losing position ----------
         avg_cost = float(pm.data.get("avg_price", 0.0))
         if avg_cost > 0 and price < avg_cost:
@@ -1340,7 +1400,13 @@ def should_trade(
         affordable = int(cash // price)
 
         # Apply position limits
-        qty = apply_position_limits(affordable, price, cash, symbol)
+        qty = apply_position_limits(
+            affordable,
+            price,
+            cash,
+            symbol,
+            current_position_value=shares * price,
+        )
 
         # A sell cooldown blocks every new BUY, including pyramid adds.
         allowed, cooldown_reason = _rebuy_allowed(

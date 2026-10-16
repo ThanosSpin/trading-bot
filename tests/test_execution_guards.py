@@ -69,10 +69,30 @@ class ExecutionGuardTests(unittest.TestCase):
             allowed, _ = strategy._pyramid_allowed("ABBV")
             self.assertTrue(allowed)
 
-    def test_live_configuration_disables_pyramiding(self):
-        allowed, reason = strategy._pyramid_allowed("NVDA")
-        self.assertFalse(allowed)
-        self.assertIn("maximum 0", reason)
+    def test_live_configuration_allows_controlled_pyramiding(self):
+        allowed, _ = strategy._pyramid_allowed("NVDA")
+        self.assertTrue(allowed)
+
+    def test_position_limits_scale_from_25_to_at_most_50_percent(self):
+        initial = strategy.apply_position_limits(100, 100.0, 10000.0, "NVDA")
+        first_add = strategy.apply_position_limits(
+            100,
+            100.0,
+            7500.0,
+            "NVDA",
+            current_position_value=2500.0,
+        )
+        final_add = strategy.apply_position_limits(
+            100,
+            100.0,
+            5625.0,
+            "NVDA",
+            current_position_value=4375.0,
+        )
+
+        self.assertEqual(initial, 25)
+        self.assertEqual(first_add, 18)
+        self.assertEqual(final_add, 6)
 
     def test_model_exit_is_deferred_when_entry_model_differs(self):
         pm = SimpleNamespace(

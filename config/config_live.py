@@ -55,10 +55,11 @@ LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL"]
 MAX_POSITION_SIZE_PCT = 0.25
 MAX_POSITION_SIZE_DOLLARS = None
 
-# Disable additions to an existing live position while the entry/exit model
-# contract and blended thresholds are being validated. Paper retains its own
-# configuration so prospective behavior can still be measured.
-MAX_PYRAMID_ADDITIONS = 0
+# Permit at most two evidence-backed additions. Strategy guards also require a
+# stronger probability, positive momentum/session return, the original entry
+# model/regime, a cooldown, and the total-position cap.
+MAX_PYRAMID_ADDITIONS = 2
+MAX_TOTAL_POSITION_SIZE_PCT = 0.50
 
 
 # ============================================================

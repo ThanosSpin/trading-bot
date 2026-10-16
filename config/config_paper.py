@@ -46,9 +46,9 @@ ENV_NAME = "paper"
 MAX_POSITION_SIZE_PCT = 0.25
 MAX_POSITION_SIZE_DOLLARS = 25000
 RISK_FRACTION = 0.25
-# Match the live stabilization cohort: validate entries and exits without
-# changing the cost basis through pyramid additions.
-MAX_PYRAMID_ADDITIONS = 0
+# Match the controlled live scaling policy in prospective validation.
+MAX_PYRAMID_ADDITIONS = 2
+MAX_TOTAL_POSITION_SIZE_PCT = 0.50
 # Match the live risk policy during paper validation.
 MAX_LOSS_PER_TRADE = None
 MAX_LOSS_ACCOUNT_EQUITY_PCT = 0.005

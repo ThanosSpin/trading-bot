@@ -165,6 +165,9 @@ PROFIT_TRIGGER_PCT = 0.02  # +2% intraday profit trigger
 
 MAX_POSITION_SIZE_PCT = 0.90
 MAX_POSITION_SIZE_DOLLARS = None
+# Initial entries use MAX_POSITION_SIZE_PCT. Evidence-backed additions may
+# increase one position only up to this fraction of available account capital.
+MAX_TOTAL_POSITION_SIZE_PCT = 0.50
 MIN_RETURN_THRESHOLD = 0.002
 
 DIP_BUY_ENABLED = True
