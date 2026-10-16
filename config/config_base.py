@@ -110,10 +110,8 @@ USE_TWO_STAGE_TARGETS = True
 SPY_SYMBOL = "SPY"
 PRICE_WEAK_THRESHOLD = -0.01 
 WEAK_PROB_THRESHOLD = 0.50
-# Probability weakness is intentionally stricter than price weakness. With the
-# four-symbol core universe, three weak model probabilities are cautionary but
-# do not suppress a guarded opportunity in the remaining symbol. All four must
-# be weak before the probability channel blocks new core entries.
+# With the four-symbol core universe, three weak model probabilities meet this
+# inclusive threshold and block new core entries.
 WEAK_RATIO_THRESHOLD = 0.75
 PRICE_WEAK_RATIO_THRESHOLD = 0.75
 LAST_HOUR_BUY_BUFFER = 0.04
