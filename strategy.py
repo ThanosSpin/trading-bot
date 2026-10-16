@@ -32,6 +32,7 @@ from config import (
     MAX_POSITION_SIZE_PCT,
     MAX_POSITION_SIZE_DOLLARS,
     MAX_TOTAL_POSITION_SIZE_PCT,
+    MAX_TOTAL_POSITION_SIZE_PCT_BY_SYMBOL,
     DIP_BUY_ENABLED,
     DIP_BUY_THRESHOLD,
     DIP_BUY_MIN_PROB,
@@ -511,16 +512,24 @@ def apply_position_limits(
         return 0
 
     proposed_value = qty * price
+    current_position_value = max(0.0, float(current_position_value or 0.0))
+    available_capital = max(0.0, float(cash)) + current_position_value
 
-    # Limit 1: Percentage of cash
-    max_by_pct = int((cash * MAX_POSITION_SIZE_PCT) // price)
+    # Limit 1: Each tranche is capped at the configured fraction of account
+    # capital. Initial entries therefore use 25%; confirmed additions may add
+    # another 25% tranche without shrinking merely because cash was deployed.
+    tranche_capital = available_capital if current_position_value > 0 else float(cash)
+    max_by_pct = int((tranche_capital * MAX_POSITION_SIZE_PCT) // price)
 
     # Limit 2: Total position exposure after this fill. For an initial entry,
     # the 25% per-order cap above is tighter. Pyramid additions may scale the
     # position gradually but may not exceed the configured total cap.
-    current_position_value = max(0.0, float(current_position_value or 0.0))
-    available_capital = max(0.0, float(cash)) + current_position_value
-    total_position_cap = available_capital * float(MAX_TOTAL_POSITION_SIZE_PCT)
+    symbol_total_cap_pct = float(
+        (MAX_TOTAL_POSITION_SIZE_PCT_BY_SYMBOL or {}).get(
+            str(symbol).upper(), MAX_TOTAL_POSITION_SIZE_PCT
+        )
+    )
+    total_position_cap = available_capital * symbol_total_cap_pct
     remaining_position_capacity = max(0.0, total_position_cap - current_position_value)
     max_by_total_position = int(remaining_position_capacity // price)
 

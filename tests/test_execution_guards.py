@@ -73,7 +73,7 @@ class ExecutionGuardTests(unittest.TestCase):
         allowed, _ = strategy._pyramid_allowed("NVDA")
         self.assertTrue(allowed)
 
-    def test_position_limits_scale_from_25_to_at_most_50_percent(self):
+    def test_nvda_position_limits_scale_in_25_percent_confirmed_tranches(self):
         initial = strategy.apply_position_limits(100, 100.0, 10000.0, "NVDA")
         first_add = strategy.apply_position_limits(
             100,
@@ -85,14 +85,33 @@ class ExecutionGuardTests(unittest.TestCase):
         final_add = strategy.apply_position_limits(
             100,
             100.0,
-            5625.0,
+            5000.0,
             "NVDA",
-            current_position_value=4375.0,
+            current_position_value=5000.0,
         )
 
         self.assertEqual(initial, 25)
-        self.assertEqual(first_add, 18)
-        self.assertEqual(final_add, 6)
+        self.assertEqual(first_add, 25)
+        self.assertEqual(final_add, 25)
+
+    def test_non_nvda_position_stops_at_50_percent(self):
+        first_add = strategy.apply_position_limits(
+            100,
+            100.0,
+            7500.0,
+            "AAPL",
+            current_position_value=2500.0,
+        )
+        blocked_add = strategy.apply_position_limits(
+            100,
+            100.0,
+            5000.0,
+            "AAPL",
+            current_position_value=5000.0,
+        )
+
+        self.assertEqual(first_add, 25)
+        self.assertEqual(blocked_add, 0)
 
     def test_model_exit_is_deferred_when_entry_model_differs(self):
         pm = SimpleNamespace(

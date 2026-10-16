@@ -168,6 +168,9 @@ MAX_POSITION_SIZE_DOLLARS = None
 # Initial entries use MAX_POSITION_SIZE_PCT. Evidence-backed additions may
 # increase one position only up to this fraction of available account capital.
 MAX_TOTAL_POSITION_SIZE_PCT = 0.50
+# NVDA is the preferred core symbol and may scale further after two separately
+# confirmed pyramid signals. Other symbols retain the general total cap.
+MAX_TOTAL_POSITION_SIZE_PCT_BY_SYMBOL = {"NVDA": 0.80}
 MIN_RETURN_THRESHOLD = 0.002
 
 DIP_BUY_ENABLED = True
