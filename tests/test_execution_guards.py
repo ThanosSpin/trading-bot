@@ -94,7 +94,7 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(first_add, 25)
         self.assertEqual(final_add, 25)
 
-    def test_non_nvda_position_stops_at_50_percent(self):
+    def test_aapl_uses_core_symbol_80_percent_cap(self):
         first_add = strategy.apply_position_limits(
             100,
             100.0,
@@ -102,7 +102,7 @@ class ExecutionGuardTests(unittest.TestCase):
             "AAPL",
             current_position_value=2500.0,
         )
-        blocked_add = strategy.apply_position_limits(
+        second_add = strategy.apply_position_limits(
             100,
             100.0,
             5000.0,
@@ -111,6 +111,17 @@ class ExecutionGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(first_add, 25)
+        self.assertEqual(second_add, 25)
+
+    def test_non_core_symbol_stops_at_50_percent(self):
+        blocked_add = strategy.apply_position_limits(
+            100,
+            100.0,
+            5000.0,
+            "ABBV",
+            current_position_value=5000.0,
+        )
+
         self.assertEqual(blocked_add, 0)
 
     def test_model_exit_is_deferred_when_entry_model_differs(self):
