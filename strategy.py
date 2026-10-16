@@ -997,7 +997,11 @@ def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
 
     price_ratio = len(weak_price) / max(len(universe), 1)
 
-    is_weak = (prob_ratio >= WEAK_RATIO_THRESHOLD) or (
+    # Use a strict comparison for probability weakness so that exactly three
+    # weak symbols in a four-symbol universe do not suppress a valid guarded
+    # entry in the remaining symbol. Price weakness stays inclusive because
+    # broad realized declines are stronger evidence of a weak market.
+    is_weak = (prob_ratio > WEAK_RATIO_THRESHOLD) or (
         price_ratio >= PRICE_WEAK_RATIO_THRESHOLD
     )
 
@@ -1005,7 +1009,7 @@ def _weak_market(symbols: List[str], preds: Dict[str, float]) -> bool:
         f"[WEAK-MARKET DEBUG] universe={universe} "
         f"weak_prob={weak_prob} (prob_ratio={prob_ratio:.2f}) "
         f"weak_price={weak_price} (price_ratio={price_ratio:.2f}) "
-        f"prob_ratio_threshold={WEAK_RATIO_THRESHOLD:.2f} "
+        f"prob_ratio_rule=>{WEAK_RATIO_THRESHOLD:.2f} "
         f"price_ratio_threshold={PRICE_WEAK_RATIO_THRESHOLD:.2f} "
         f"is_weak={is_weak}"
     )

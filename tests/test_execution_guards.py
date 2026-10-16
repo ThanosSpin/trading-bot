@@ -73,6 +73,27 @@ class ExecutionGuardTests(unittest.TestCase):
         allowed, _ = strategy._pyramid_allowed("NVDA")
         self.assertTrue(allowed)
 
+    def test_three_of_four_weak_probabilities_do_not_block_guarded_entry(self):
+        symbols = ["NVDA", "AAPL", "ABBV", "PLTR"]
+        predictions = {
+            "NVDA": 0.648,
+            "AAPL": 0.49,
+            "ABBV": 0.48,
+            "PLTR": 0.47,
+        }
+        with patch.object(strategy, "WEAK_RATIO_THRESHOLD", 0.75), patch.object(
+            strategy, "fetch_previous_close", return_value=100.0
+        ), patch.object(strategy, "fetch_latest_price", return_value=100.0):
+            self.assertFalse(strategy._weak_market(symbols, predictions))
+
+    def test_four_of_four_weak_probabilities_block_core_entries(self):
+        symbols = ["NVDA", "AAPL", "ABBV", "PLTR"]
+        predictions = {symbol: 0.49 for symbol in symbols}
+        with patch.object(strategy, "WEAK_RATIO_THRESHOLD", 0.75), patch.object(
+            strategy, "fetch_previous_close", return_value=100.0
+        ), patch.object(strategy, "fetch_latest_price", return_value=100.0):
+            self.assertTrue(strategy._weak_market(symbols, predictions))
+
     def test_nvda_position_limits_scale_in_25_percent_confirmed_tranches(self):
         initial = strategy.apply_position_limits(100, 100.0, 10000.0, "NVDA")
         first_add = strategy.apply_position_limits(
