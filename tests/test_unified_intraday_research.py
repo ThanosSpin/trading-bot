@@ -74,6 +74,16 @@ class UnifiedIntradayResearchTests(unittest.TestCase):
             type(model_factory("xgboost")).__name__,
         )
 
+    def test_no_trade_evaluation_is_not_profitable(self):
+        metrics = aggregate_non_overlapping_trades(
+            np.array([0.10, 0.20]),
+            np.array([False, False]),
+            cost_bps=10.0,
+        )
+        self.assertEqual(metrics["trade_count"], 0)
+        self.assertEqual(metrics["net_return"], 0.0)
+        self.assertEqual(metrics["profit_factor"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

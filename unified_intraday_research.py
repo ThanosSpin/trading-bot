@@ -176,6 +176,7 @@ def evaluate_model(
     n_splits: int = 5,
 ) -> dict:
     records = []
+    fold_summaries = []
     folds = walk_forward_splits(len(X), n_splits=n_splits, gap_bars=horizon_bars)
     for fold in folds:
         train_end = fold["train_end"]
@@ -207,6 +208,8 @@ def evaluate_model(
             periods_per_year=max(1, (252 * 26) // horizon_bars),
         )
         threshold = float(threshold_result["best_threshold"])
+        calibration_metrics = threshold_result.get("selected_metrics") or {}
+        threshold_eligible = bool(threshold_result.get("eligible"))
 
         # Score non-overlapping holding windows to avoid counting the same
         # forward move repeatedly.
@@ -226,9 +229,39 @@ def evaluate_model(
                     "forward_return": float(future_return),
                     "probability": float(prob),
                     "threshold": threshold,
+                    "threshold_eligible": threshold_eligible,
                     "trade": bool(prob >= threshold),
                 }
             )
+
+        fold_records = [row for row in records if row["fold"] == fold["fold"]]
+        fold_trade_mask = np.asarray(
+            [row["trade"] for row in fold_records], dtype=bool
+        )
+        fold_test_metrics = aggregate_non_overlapping_trades(
+            np.asarray([row["forward_return"] for row in fold_records], dtype=float),
+            fold_trade_mask,
+            cost_bps,
+        )
+        fold_summaries.append(
+            {
+                "fold": fold["fold"],
+                "test_start": str(X_test.index.min()),
+                "test_end": str(X_test.index.max()),
+                "threshold": threshold,
+                "threshold_eligible": threshold_eligible,
+                "calibration_trade_count": int(
+                    calibration_metrics.get("trade_count", 0)
+                ),
+                "calibration_net_return": float(
+                    calibration_metrics.get("net_return", 0.0)
+                ),
+                "calibration_profit_factor": float(
+                    calibration_metrics.get("profit_factor", 0.0)
+                ),
+                **{f"test_{key}": value for key, value in fold_test_metrics.items()},
+            }
+        )
 
     record_frame = pd.DataFrame(records)
     trade_mask = record_frame["trade"].to_numpy(dtype=bool)
@@ -238,6 +271,21 @@ def evaluate_model(
         cost_bps=cost_bps,
     )
     selected = record_frame.loc[record_frame["trade"]]
+    eligible_folds = sum(row["threshold_eligible"] for row in fold_summaries)
+    profitable_folds = sum(
+        row["test_trade_count"] >= 5 and row["test_net_return"] > 0
+        for row in fold_summaries
+    )
+    active_folds = sum(row["test_trade_count"] > 0 for row in fold_summaries)
+    stable_candidate = bool(
+        eligible_folds >= 3
+        and profitable_folds >= 3
+        and active_folds >= 4
+        and metrics["trade_count"] >= 50
+        and metrics["net_return"] > 0
+        and metrics["profit_factor"] >= 1.20
+        and metrics["max_drawdown"] >= -0.15
+    )
     metrics.update(
         {
             "model_kind": kind,
@@ -249,6 +297,11 @@ def evaluate_model(
                 float((selected["forward_return"] > 0).mean())
                 if not selected.empty else 0.0
             ),
+            "eligible_folds": int(eligible_folds),
+            "active_folds": int(active_folds),
+            "profitable_folds": int(profitable_folds),
+            "stable_candidate": stable_candidate,
+            "fold_summaries": fold_summaries,
             "records": records,
         }
     )
@@ -308,7 +361,10 @@ def main() -> int:
                 f"[UNIFIED] {symbol}/{kind}: rows={len(X)} "
                 f"trades={metrics['trade_count']} net={metrics['net_return']:.2%} "
                 f"pf={metrics['profit_factor']:.3f} "
-                f"dd={metrics['max_drawdown']:.2%}"
+                f"dd={metrics['max_drawdown']:.2%} "
+                f"eligible_folds={metrics['eligible_folds']}/5 "
+                f"profitable_folds={metrics['profitable_folds']}/5 "
+                f"stable={metrics['stable_candidate']}"
             )
         report["results"][symbol] = symbol_result
 
