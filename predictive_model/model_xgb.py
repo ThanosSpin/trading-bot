@@ -47,6 +47,7 @@ from config import (
     MODEL_EVAL_TRANSACTION_COST_BPS,
     MODEL_EVAL_WALK_FORWARD_FOLDS,
     MODEL_TRAIN_N_JOBS,
+    SECTOR_BENCHMARKS,
     USE_TWO_STAGE_TARGETS,
 )
 
@@ -342,6 +343,9 @@ def train_model(
     use_multiclass: bool = False,
     use_two_stage: Optional[bool] = None,
     benchmark_df: Optional[pd.DataFrame] = None,
+    sector_df: Optional[pd.DataFrame] = None,
+    sector_symbol: Optional[str] = None,
+    sector_feature_set: Optional[str] = None,
 ):
     """
     Train XGB model with chronological train/calibration/test split.
@@ -370,7 +374,23 @@ def train_model(
                 if symbol.upper() == "SPY"
                 else fetch_historical_data("SPY", period="60d", interval="15m")
             )
-        df_feat = build_intraday_features(df, benchmark_df=benchmark_df)
+        sector_symbol = sector_symbol or SECTOR_BENCHMARKS.get(symbol.upper())
+        if sector_df is None and sector_symbol:
+            sector_df = fetch_historical_data(
+                sector_symbol, period="60d", interval="15m"
+            )
+        if sector_symbol:
+            sector_rows = 0 if sector_df is None else len(sector_df)
+            print(
+                f"[SECTOR FEATURES] {symbol}: benchmark={sector_symbol} "
+                f"rows={sector_rows} set={sector_feature_set or os.getenv('SECTOR_FEATURE_SET', 'all')}"
+            )
+        df_feat = build_intraday_features(
+            df,
+            benchmark_df=benchmark_df,
+            sector_df=sector_df,
+            sector_feature_set=sector_feature_set,
+        )
         if mode in ("intraday_mr", "intraday_mom"):
             df_feat, regime_config = _filter_intraday_rows_by_mode(df_feat, mode=mode)
         for c in ["ret_12", "mom_12_abs", "mom_4_abs", "vol_12"]:
@@ -897,6 +917,12 @@ def train_model(
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
         "mode": mode,
+        "sector_benchmark": sector_symbol,
+        "sector_feature_set": (
+            (sector_feature_set or os.getenv("SECTOR_FEATURE_SET", "all"))
+            if mode != "daily"
+            else None
+        ),
         "calibrated": calibrated and (movement_calibrated if use_two_stage else True),
         "num_classes": num_classes,
         "target_type": (
@@ -1461,9 +1487,18 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                         lookback_minutes=best_lb,
                         interval=resample_to,
                     )
+                sector_symbol = SECTOR_BENCHMARKS.get(symU)
+                sector_intra = None
+                if sector_symbol:
+                    sector_intra = fetch_intraday_history(
+                        sector_symbol,
+                        lookback_minutes=best_lb,
+                        interval=resample_to,
+                    )
                 df_feat_intra = build_intraday_features(
                     df_intra_resampled,
                     benchmark_df=benchmark_intra,
+                    sector_df=sector_intra,
                 )
                 if df_feat_intra is None or df_feat_intra.empty:
                     results["allow_intraday"] = False

@@ -1,4 +1,5 @@
 # patched_features.py
+import os
 import pandas as pd
 import numpy as np
 from typing import Optional
@@ -265,6 +266,155 @@ def add_intraday_relative_market_features(
         out.get("vwap_distance", 0.0) + out["relative_return_4"]
     ).fillna(0.0)
     out["relative_market_available"] = available.astype(float)
+    return out
+
+
+SECTOR_FEATURE_SETS = {
+    "baseline": set(),
+    "returns": {
+        "sector_return_1", "sector_return_2", "sector_return_4",
+        "sector_relative_return_1", "sector_relative_return_2",
+        "sector_relative_return_4", "sector_relative_strength_accel",
+        "sector_session_return", "sector_relative_session_return",
+        "sector_direction_agreement_4",
+    },
+    "vwap": {
+        "sector_vwap_distance", "sector_vwap_slope_2", "sector_vwap_slope_4",
+        "sector_relative_vwap_distance",
+    },
+    "risk": {"sector_corr_20", "sector_beta_20"},
+}
+SECTOR_FEATURE_SETS["all"] = set().union(
+    SECTOR_FEATURE_SETS["returns"],
+    SECTOR_FEATURE_SETS["vwap"],
+    SECTOR_FEATURE_SETS["risk"],
+)
+
+
+def _align_intraday_columns_backward(
+    target_index: pd.DatetimeIndex,
+    source: pd.DataFrame,
+    columns,
+) -> pd.DataFrame:
+    """Align source columns without allowing a later source bar."""
+    source_index = source.index
+    if source_index.tz is None:
+        source_index = source_index.tz_localize("UTC")
+    else:
+        source_index = source_index.tz_convert("UTC")
+    values = source.loc[:, list(columns)].copy()
+    values.index = source_index
+    values = values[~values.index.duplicated(keep="last")].sort_index()
+
+    target_utc = target_index.tz_convert("UTC")
+    left = pd.DataFrame({"timestamp": target_utc, "_order": range(len(target_utc))})
+    right = values.reset_index().rename(columns={values.index.name or "index": "timestamp"})
+    aligned = pd.merge_asof(
+        left.sort_values("timestamp"),
+        right.sort_values("timestamp"),
+        on="timestamp",
+        direction="backward",
+        tolerance=pd.Timedelta(minutes=16),
+    ).sort_values("_order")
+    return aligned.loc[:, list(columns)].set_axis(target_index)
+
+
+def add_intraday_sector_features(
+    df: pd.DataFrame,
+    sector_df: Optional[pd.DataFrame],
+    feature_set: Optional[str] = None,
+) -> pd.DataFrame:
+    """Add causal symbol-versus-sector features for intraday models.
+
+    The sector ETF is joined backward within one 15-minute bar. A symbol bar
+    can therefore use a contemporaneous or earlier sector bar, never a future
+    observation. ``SECTOR_FEATURE_SET`` supports controlled ablation runs.
+    """
+    selected_set = (feature_set or os.getenv("SECTOR_FEATURE_SET", "all")).lower()
+    if selected_set not in SECTOR_FEATURE_SETS:
+        raise ValueError(
+            f"Unknown sector feature set {selected_set!r}; "
+            f"expected one of {sorted(SECTOR_FEATURE_SETS)}"
+        )
+    selected = SECTOR_FEATURE_SETS[selected_set]
+    out = df.copy()
+    if not selected:
+        return out
+
+    for name in selected:
+        out[name] = 0.0
+    out["sector_available"] = 0.0
+    if sector_df is None or sector_df.empty:
+        return out
+    if not isinstance(out.index, pd.DatetimeIndex) or out.index.tz is None:
+        raise ValueError("Sector intraday features require a timezone-aware index")
+    if not isinstance(sector_df.index, pd.DatetimeIndex):
+        raise ValueError("Sector benchmark data requires a DatetimeIndex")
+
+    sector = add_intraday_vwap_volume_features(_fix_ohlcv(sector_df).sort_index())
+    aligned = _align_intraday_columns_backward(
+        out.index,
+        sector,
+        ["Close", "vwap_distance", "vwap_slope_2", "vwap_slope_4"],
+    )
+    sector_close = pd.to_numeric(aligned["Close"], errors="coerce")
+    available = sector_close.notna()
+    if not available.any():
+        return out
+
+    asset_close = pd.to_numeric(out["Close"], errors="coerce")
+    asset_return_1 = asset_close.pct_change(fill_method=None)
+    sector_return_1 = sector_close.pct_change(fill_method=None)
+    for bars in (1, 2, 4):
+        sector_return = sector_close.pct_change(bars, fill_method=None)
+        asset_return = asset_close.pct_change(bars, fill_method=None)
+        if f"sector_return_{bars}" in selected:
+            out[f"sector_return_{bars}"] = sector_return.fillna(0.0)
+        if f"sector_relative_return_{bars}" in selected:
+            out[f"sector_relative_return_{bars}"] = (
+                asset_return - sector_return
+            ).fillna(0.0)
+
+    if "sector_relative_strength_accel" in selected:
+        out["sector_relative_strength_accel"] = (
+            out["sector_relative_return_4"]
+            - out["sector_relative_return_4"].shift(2)
+        ).fillna(0.0)
+
+    ny_index = out.index.tz_convert("America/New_York")
+    session_key = pd.Series(ny_index.date, index=out.index)
+    sector_session = sector_close / sector_close.groupby(session_key).transform("first") - 1.0
+    asset_session = asset_close / asset_close.groupby(session_key).transform("first") - 1.0
+    if "sector_session_return" in selected:
+        out["sector_session_return"] = sector_session.fillna(0.0)
+    if "sector_relative_session_return" in selected:
+        out["sector_relative_session_return"] = (asset_session - sector_session).fillna(0.0)
+    if "sector_direction_agreement_4" in selected:
+        asset_return_4 = asset_close.pct_change(4, fill_method=None)
+        sector_return_4 = sector_close.pct_change(4, fill_method=None)
+        out["sector_direction_agreement_4"] = (
+            np.sign(asset_return_4) == np.sign(sector_return_4)
+        ).astype(float).where(asset_return_4.notna() & sector_return_4.notna(), 0.0)
+
+    for name in ("sector_vwap_distance", "sector_vwap_slope_2", "sector_vwap_slope_4"):
+        if name in selected:
+            source_name = name.removeprefix("sector_")
+            out[name] = pd.to_numeric(aligned[source_name], errors="coerce").fillna(0.0)
+    if "sector_relative_vwap_distance" in selected:
+        out["sector_relative_vwap_distance"] = (
+            pd.to_numeric(out.get("vwap_distance", 0.0), errors="coerce")
+            - pd.to_numeric(aligned["vwap_distance"], errors="coerce")
+        ).fillna(0.0)
+    if "sector_corr_20" in selected:
+        out["sector_corr_20"] = asset_return_1.rolling(20, min_periods=8).corr(
+            sector_return_1
+        ).fillna(0.0)
+    if "sector_beta_20" in selected:
+        covariance = asset_return_1.rolling(20, min_periods=8).cov(sector_return_1)
+        variance = sector_return_1.rolling(20, min_periods=8).var()
+        out["sector_beta_20"] = (covariance / variance.replace(0.0, np.nan)).fillna(0.0)
+
+    out["sector_available"] = available.astype(float)
     return out
 
 
@@ -562,6 +712,7 @@ def get_feature_schema(df: pd.DataFrame) -> dict:
             if c.startswith("spy_")
             or c.startswith("relative_")
         ],
+        "sector": [c for c in columns if c.startswith("sector_")],
     }
     return {
         "feature_count": len(columns),
@@ -594,9 +745,16 @@ def build_daily_features(df: pd.DataFrame) -> pd.DataFrame:
 def build_intraday_features(
     df: pd.DataFrame,
     benchmark_df: Optional[pd.DataFrame] = None,
+    sector_df: Optional[pd.DataFrame] = None,
+    sector_feature_set: Optional[str] = None,
 ) -> pd.DataFrame:
     result = _build_base_features(df, mode="intraday")
     result = add_intraday_relative_market_features(result, benchmark_df)
+    result = add_intraday_sector_features(
+        result,
+        sector_df,
+        feature_set=sector_feature_set,
+    )
     result = add_spy_regime_features(result)
     result = _remove_unnamed_columns(result)
     result.attrs["feature_schema"] = get_feature_schema(result)

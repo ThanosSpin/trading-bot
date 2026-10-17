@@ -108,6 +108,14 @@ USE_MULTICLASS_MODELS = False
 USE_TWO_STAGE_TARGETS = True
 
 SPY_SYMBOL = "SPY"
+# Liquid sector benchmarks used only as model inputs. SPY is the broad-market
+# benchmark, so it intentionally has no separate sector proxy.
+SECTOR_BENCHMARKS = {
+    "NVDA": "SMH",
+    "AAPL": "XLK",
+    "ABBV": "XLV",
+    "PLTR": "IGV",
+}
 PRICE_WEAK_THRESHOLD = -0.01 
 WEAK_PROB_THRESHOLD = 0.50
 # With the four-symbol core universe, three weak model probabilities meet this

@@ -152,6 +152,8 @@ def _artifact_summary(artifact: dict) -> dict:
         "target_horizon_bars": artifact.get("target_horizon_bars"),
         "movement_threshold": artifact.get("movement_threshold"),
         "feature_count": len(artifact.get("features") or []),
+        "sector_benchmark": artifact.get("sector_benchmark"),
+        "sector_feature_set": artifact.get("sector_feature_set"),
         "train_samples": split.get("train_samples"),
         "calibration_samples": split.get("calibration_samples"),
         "test_samples": split.get("test_samples"),
@@ -186,6 +188,7 @@ def _train_to_stage(
     symbols: List[str],
     stage_dir: Path,
     enforce_promotion_gate: bool = True,
+    sector_feature_set: str = "all",
 ) -> Tuple[dict, List[str], List[str]]:
     summaries: Dict[str, dict] = {}
     rejections: List[str] = []
@@ -194,6 +197,8 @@ def _train_to_stage(
     for symbol in symbols:
         intraday_data = None
         intraday_benchmark = None
+        intraday_sector = None
+        sector_symbol = config.SECTOR_BENCHMARKS.get(symbol)
         for mode in MODES:
             label = f"{symbol}/{mode}"
             print(f"\n{'=' * 72}\nMONTHLY TRAINING: {label}\n{'=' * 72}")
@@ -210,6 +215,8 @@ def _train_to_stage(
                             else _fetch_training_data(str(config.SPY_SYMBOL).upper(), mode)
                         )
                     data = intraday_data
+                    if sector_symbol and intraday_sector is None:
+                        intraday_sector = _fetch_training_data(sector_symbol, mode)
 
                 if data is None or data.empty:
                     raise ValueError("no training data returned")
@@ -222,6 +229,9 @@ def _train_to_stage(
                     use_multiclass=USE_MULTICLASS,
                     use_two_stage=USE_TWO_STAGE,
                     benchmark_df=(intraday_benchmark if mode != "daily" else None),
+                    sector_df=(intraday_sector if mode != "daily" else None),
+                    sector_symbol=(sector_symbol if mode != "daily" else None),
+                    sector_feature_set=sector_feature_set,
                 )
                 validate_artifact(artifact, symbol, mode)
 
@@ -409,6 +419,12 @@ def main() -> int:
         ),
     )
     parser.add_argument("--no-email", action="store_true")
+    parser.add_argument(
+        "--sector-feature-set",
+        choices=("baseline", "returns", "vwap", "risk", "all"),
+        default=os.getenv("SECTOR_FEATURE_SET", "all").lower(),
+        help="Sector feature ablation set (default: all)",
+    )
     args = parser.parse_args()
     if args.validate_only and args.shadow:
         parser.error("--validate-only and --shadow cannot be used together")
@@ -427,6 +443,7 @@ def main() -> int:
     print(f"[MONTHLY] Intraday history: {INTRADAY_PERIOD} @ {INTRADAY_INTERVAL}")
     print(f"[MONTHLY] Multiclass: {USE_MULTICLASS}")
     print(f"[MONTHLY] Two-stage targets: {USE_TWO_STAGE}")
+    print(f"[MONTHLY] Sector feature set: {args.sector_feature_set}")
 
     if args.validate_only:
         summaries, failures = _validate_existing(symbols)
@@ -436,6 +453,7 @@ def main() -> int:
             symbols,
             stage_dir,
             enforce_promotion_gate=not args.shadow,
+            sector_feature_set=args.sector_feature_set,
         )
 
     accepted_count = sum(
@@ -462,6 +480,7 @@ def main() -> int:
         "status": status,
         "validate_only": args.validate_only,
         "shadow": args.shadow,
+        "sector_feature_set": args.sector_feature_set,
         "symbols": symbols,
         "modes": list(MODES),
         "expected_models": expected_models,
