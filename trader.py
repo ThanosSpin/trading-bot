@@ -8,7 +8,15 @@ from collections import defaultdict
 from broker import get_trading_api
 from pdt.pdt_tracker import add_opened_today, reduce_opened_today
 
-from config import USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS, ORDER_FILL_TIMEOUT_SECONDS
+from config import (
+    USE_LIVE_TRADING,
+    PAPER_TRADE_SYMBOLS,
+    ORDER_FILL_TIMEOUT_SECONDS,
+    MAX_POSITION_SIZE_PCT,
+    MAX_POSITION_SIZE_DOLLARS,
+    MAX_TOTAL_POSITION_SIZE_PCT,
+    MAX_TOTAL_POSITION_SIZE_PCT_BY_SYMBOL,
+)
 from entry_policy import is_new_entry_allowed
 from market import is_market_open, is_trading_day
 from predictive_model.data_loader import fetch_latest_price
@@ -56,6 +64,83 @@ def _wait_for_terminal_order(client, order_id, timeout_seconds=None):
         result = client.get_order(order_id)
 
     return result
+
+
+def _broker_buy_preflight(client, symbol, requested_qty, price, account, decision=None):
+    """Clamp a BUY against broker positions and pending BUY orders."""
+    symU = str(symbol).upper().strip()
+    requested_qty = max(0, int(float(requested_qty or 0)))
+    price = float(price or 0.0)
+    decision = decision if isinstance(decision, dict) else {}
+
+    if requested_qty <= 0 or price <= 0:
+        return 0
+
+    try:
+        positions = client.list_positions()
+        position_qty = 0.0
+        for position in positions:
+            if str(getattr(position, "symbol", "")).upper() == symU:
+                position_qty = max(0.0, float(getattr(position, "qty", 0) or 0))
+                break
+
+        pending_buy_qty = 0.0
+        for order in client.list_orders(status="open", limit=500, nested=True):
+            if str(getattr(order, "symbol", "")).upper() != symU:
+                continue
+            if str(getattr(order, "side", "")).lower() != "buy":
+                continue
+            order_qty = max(0.0, float(getattr(order, "qty", 0) or 0))
+            filled_qty = max(0.0, float(getattr(order, "filled_qty", 0) or 0))
+            pending_buy_qty += max(0.0, order_qty - filled_qty)
+    except Exception as exc:
+        print(
+            f"[BROKER BUY PREFLIGHT] {symU}: blocked because broker exposure "
+            f"could not be verified: {exc}"
+        )
+        return 0
+
+    is_pyramid = bool(decision.get("pyramid"))
+    if not is_pyramid and (position_qty > 0 or pending_buy_qty > 0):
+        print(
+            f"[BROKER BUY PREFLIGHT] {symU}: initial BUY blocked; "
+            f"broker_position={position_qty:g}, pending_buy={pending_buy_qty:g}. "
+            "A position increase must be an explicitly guarded pyramid."
+        )
+        return 0
+
+    try:
+        equity = float(getattr(account, "equity", 0) or 0)
+    except Exception:
+        equity = 0.0
+    if equity <= 0:
+        print(f"[BROKER BUY PREFLIGHT] {symU}: blocked; invalid account equity={equity}.")
+        return 0
+
+    if is_pyramid:
+        cap_pct = float(
+            (MAX_TOTAL_POSITION_SIZE_PCT_BY_SYMBOL or {}).get(
+                symU, MAX_TOTAL_POSITION_SIZE_PCT
+            )
+        )
+        exposure_cap = equity * cap_pct
+    else:
+        exposure_cap = equity * float(MAX_POSITION_SIZE_PCT)
+        if MAX_POSITION_SIZE_DOLLARS is not None:
+            exposure_cap = min(exposure_cap, float(MAX_POSITION_SIZE_DOLLARS))
+
+    broker_exposure = (position_qty + pending_buy_qty) * price
+    remaining_value = max(0.0, exposure_cap - broker_exposure)
+    allowed_qty = min(requested_qty, int(remaining_value // price))
+
+    if allowed_qty < requested_qty:
+        print(
+            f"[BROKER BUY PREFLIGHT] {symU}: requested={requested_qty} -> "
+            f"allowed={allowed_qty}; broker_position={position_qty:g}, "
+            f"pending_buy={pending_buy_qty:g}, exposure_cap=${exposure_cap:.2f}."
+        )
+
+    return allowed_qty
 
 
 # =====================================================================
@@ -448,10 +533,21 @@ def execute_trade(action, quantity, symbol, decision=None):
                 print(f"[WARN] No live price for {symU} — skipping BUY.")
                 return 0.0, None
 
+            allowed_qty = _broker_buy_preflight(
+                client,
+                symU,
+                quantity,
+                price,
+                acct,
+                decision=decision,
+            )
+            if allowed_qty <= 0:
+                return 0.0, None
+
             bp = float(getattr(acct, "buying_power", 0) or 0)
-            if price * quantity > bp:
+            if price * allowed_qty > bp:
                 print(
-                    f"[WARN] Buying power insufficient for {symU}: need {price * quantity:.2f}, have {bp:.2f}"
+                    f"[WARN] Buying power insufficient for {symU}: need {price * allowed_qty:.2f}, have {bp:.2f}"
                 )
                 return 0.0, None
 

@@ -23,6 +23,18 @@ class _OrderClient:
         return self.last
 
 
+class _ExposureClient:
+    def __init__(self, positions=None, orders=None):
+        self.positions = positions or []
+        self.orders = orders or []
+
+    def list_positions(self):
+        return self.positions
+
+    def list_orders(self, **_kwargs):
+        return self.orders
+
+
 class ExecutionGuardTests(unittest.TestCase):
     def setUp(self):
         strategy.reset_session_state()
@@ -72,6 +84,46 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_live_configuration_allows_controlled_pyramiding(self):
         allowed, _ = strategy._pyramid_allowed("NVDA")
         self.assertTrue(allowed)
+
+    def test_broker_preflight_blocks_duplicate_initial_position(self):
+        client = _ExposureClient(
+            positions=[SimpleNamespace(symbol="NVDA", qty="114")]
+        )
+        account = SimpleNamespace(equity="102526.77")
+
+        allowed = trader._broker_buy_preflight(
+            client, "NVDA", 114, 217.44, account, decision={"pyramid": False}
+        )
+
+        self.assertEqual(allowed, 0)
+
+    def test_broker_preflight_blocks_duplicate_pending_buy(self):
+        client = _ExposureClient(
+            orders=[
+                SimpleNamespace(
+                    symbol="NVDA", side="buy", qty="114", filled_qty="0"
+                )
+            ]
+        )
+        account = SimpleNamespace(equity="102526.77")
+
+        allowed = trader._broker_buy_preflight(
+            client, "NVDA", 114, 217.44, account, decision={"pyramid": False}
+        )
+
+        self.assertEqual(allowed, 0)
+
+    def test_broker_preflight_allows_guarded_pyramid_within_total_cap(self):
+        client = _ExposureClient(
+            positions=[SimpleNamespace(symbol="NVDA", qty="114")]
+        )
+        account = SimpleNamespace(equity="100000")
+
+        allowed = trader._broker_buy_preflight(
+            client, "NVDA", 100, 200.0, account, decision={"pyramid": True}
+        )
+
+        self.assertEqual(allowed, 100)
 
     def test_three_of_four_weak_probabilities_block_core_entries(self):
         symbols = ["NVDA", "AAPL", "ABBV", "PLTR"]
