@@ -5,6 +5,7 @@ import pandas as pd
 
 from config import SECTOR_BENCHMARKS
 from predictive_model.features import (
+    SECTOR_FEATURE_SETS,
     add_intraday_sector_features,
     add_intraday_vwap_volume_features,
 )
@@ -90,6 +91,20 @@ class IntradaySectorFeatureTests(unittest.TestCase):
         self.assertNotIn("sector_beta_20", returns.columns)
         self.assertIn("sector_relative_vwap_distance", vwap.columns)
         self.assertNotIn("sector_relative_return_4", vwap.columns)
+
+    def test_sector_feature_column_order_is_deterministic(self):
+        asset = add_intraday_vwap_volume_features(self._frame())
+        original_columns = list(asset.columns)
+        result = add_intraday_sector_features(
+            asset,
+            self._frame(),
+            feature_set="all",
+        )
+        added_columns = list(result.columns[len(original_columns):])
+        self.assertEqual(
+            added_columns,
+            [*sorted(SECTOR_FEATURE_SETS["all"]), "sector_available"],
+        )
 
 
 if __name__ == "__main__":

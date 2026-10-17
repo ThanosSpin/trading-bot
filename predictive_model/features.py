@@ -341,7 +341,11 @@ def add_intraday_sector_features(
     if not selected:
         return out
 
-    for name in selected:
+    # Sets deliberately define membership for the ablation groups, but model
+    # feature order must remain stable across processes. XGBoost column
+    # subsampling is position-sensitive, so hash-randomized insertion order can
+    # otherwise produce materially different models from identical data.
+    for name in sorted(selected):
         out[name] = 0.0
     out["sector_available"] = 0.0
     if sector_df is None or sector_df.empty:
