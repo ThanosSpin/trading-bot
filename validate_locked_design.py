@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 
 import config
@@ -22,6 +23,20 @@ from unified_intraday_research import (
     split_development_holdout,
     verify_dataset_manifest,
 )
+
+
+def align_timestamp_to_index(timestamp, index) -> pd.Timestamp:
+    """Represent a boundary timestamp with the same timezone convention as an index."""
+    index_timezone = getattr(index, "tz", None)
+    boundary = pd.Timestamp(timestamp)
+    if index_timezone is None:
+        if boundary.tzinfo is not None:
+            boundary = boundary.tz_convert("UTC").tz_localize(None)
+    elif boundary.tzinfo is None:
+        boundary = boundary.tz_localize(index_timezone)
+    else:
+        boundary = boundary.tz_convert(index_timezone)
+    return boundary
 
 
 def evaluate_selection(symbol: str, selection: dict, lock: dict, data_dir: Path) -> dict:
@@ -41,7 +56,9 @@ def evaluate_selection(symbol: str, selection: dict, lock: dict, data_dir: Path)
         float(lock["cost_bps"]),
         float(selection["volatility_multiplier"]),
     )
-    holdout_start_timestamp = raw_holdout.index.min()
+    holdout_start_timestamp = align_timestamp_to_index(
+        raw_holdout.index.min(), X.index
+    )
     horizon = int(selection["horizon_bars"])
     development_mask = X.index < holdout_start_timestamp
     holdout_mask = X.index >= holdout_start_timestamp

@@ -8,6 +8,7 @@ import pandas as pd
 from build_intraday_dataset import regular_session_only
 from freeze_research_dataset import build_manifest
 from lock_unified_design import select_designs
+from validate_locked_design import align_timestamp_to_index
 from unified_intraday_research import (
     add_causal_regime_feature,
     aggregate_non_overlapping_trades,
@@ -161,6 +162,21 @@ class UnifiedIntradayResearchTests(unittest.TestCase):
         selected = select_designs(report)
         self.assertEqual(selected["NVDA"]["target_design"], "30m_050vol")
         self.assertEqual(selected["NVDA"]["model_kind"], "logistic")
+
+    def test_validation_boundary_matches_naive_feature_index(self):
+        index = pd.date_range("2026-07-21 13:30", periods=2, freq="15min")
+        boundary = pd.Timestamp("2026-07-21 13:30", tz="UTC")
+        aligned = align_timestamp_to_index(boundary, index)
+        self.assertIsNone(aligned.tzinfo)
+        self.assertEqual(aligned, index[0])
+
+    def test_validation_boundary_matches_aware_feature_index(self):
+        index = pd.date_range(
+            "2026-07-21 09:30", periods=2, freq="15min", tz="America/New_York"
+        )
+        boundary = pd.Timestamp("2026-07-21 13:30", tz="UTC")
+        aligned = align_timestamp_to_index(boundary, index)
+        self.assertEqual(aligned, index[0])
 
 
 if __name__ == "__main__":
