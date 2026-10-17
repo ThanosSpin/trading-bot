@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,13 @@ from predictive_model.model_evaluation import (
 
 
 RAW_COLUMNS = {"Open", "High", "Low", "Close", "Volume"}
+TARGET_DESIGNS = (
+    {"name": "30m_050vol", "horizon_bars": 2, "volatility_multiplier": 0.50},
+    {"name": "30m_075vol", "horizon_bars": 2, "volatility_multiplier": 0.75},
+    {"name": "60m_050vol", "horizon_bars": 4, "volatility_multiplier": 0.50},
+    {"name": "60m_075vol", "horizon_bars": 4, "volatility_multiplier": 0.75},
+)
+HISTORICAL_VALIDATION_SESSIONS = 63
 
 
 def load_frame(data_dir: Path, symbol: str) -> pd.DataFrame:
@@ -62,6 +70,7 @@ def prepare_dataset(
     sector_feature_set: str,
     horizon_bars: int,
     cost_bps: float,
+    volatility_multiplier: float = 0.50,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     features = build_intraday_features(
         symbol_frame,
@@ -76,7 +85,7 @@ def prepare_dataset(
     move_threshold = pd.concat(
         [
             pd.Series(float(cost_bps) / 10000.0, index=features.index),
-            realized_volatility * np.sqrt(horizon_bars) * 0.50,
+            realized_volatility * np.sqrt(horizon_bars) * volatility_multiplier,
         ],
         axis=1,
     ).max(axis=1)
@@ -97,6 +106,57 @@ def prepare_dataset(
         forward_return.loc[valid],
         move_threshold.loc[valid],
     )
+
+
+def split_development_holdout(
+    frame: pd.DataFrame,
+    holdout_sessions: int = HISTORICAL_VALIDATION_SESSIONS,
+) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Reserve the latest complete NY trading sessions for historical validation."""
+    if holdout_sessions < 1:
+        raise ValueError("holdout_sessions must be positive")
+    index = pd.DatetimeIndex(frame.index)
+    if index.tz is None:
+        index = index.tz_localize("UTC")
+    session_dates = pd.Index(index.tz_convert("America/New_York").date).unique()
+    if len(session_dates) <= holdout_sessions:
+        raise ValueError(
+            f"dataset has {len(session_dates)} sessions; need more than {holdout_sessions}"
+        )
+    first_holdout_session = session_dates[-holdout_sessions]
+    holdout_mask = np.asarray(
+        index.tz_convert("America/New_York").date >= first_holdout_session,
+        dtype=bool,
+    )
+    development = frame.loc[~holdout_mask].copy()
+    holdout = frame.loc[holdout_mask].copy()
+    return development, holdout, str(first_holdout_session)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def dataset_manifest_hash(manifest_path: Path) -> str:
+    manifest = json.loads(manifest_path.read_text())
+    canonical = json.dumps(manifest.get("files", {}), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def verify_dataset_manifest(data_dir: Path, manifest_path: Path) -> str:
+    manifest = json.loads(manifest_path.read_text())
+    for filename, expected in manifest.get("files", {}).items():
+        path = data_dir / filename
+        if not path.exists():
+            raise FileNotFoundError(f"frozen dataset file is missing: {path}")
+        actual = file_sha256(path)
+        if actual != expected.get("sha256"):
+            raise ValueError(f"frozen dataset changed: {filename}")
+    return str(manifest.get("dataset_id") or dataset_manifest_hash(manifest_path))
 
 
 def model_factory(kind: str):
@@ -313,59 +373,93 @@ def main() -> int:
     parser.add_argument("--symbols", nargs="+", default=["NVDA", "AAPL", "ABBV", "PLTR"])
     parser.add_argument("--data-dir", default="research_data/intraday_15m")
     parser.add_argument("--output-dir", default="logs/unified_intraday")
-    parser.add_argument("--horizon-bars", type=int, default=4)
+    parser.add_argument(
+        "--target-design",
+        choices=["all", *[item["name"] for item in TARGET_DESIGNS]],
+        default="all",
+    )
     parser.add_argument("--cost-bps", type=float, default=10.0)
+    parser.add_argument("--holdout-sessions", type=int, default=HISTORICAL_VALIDATION_SESSIONS)
+    parser.add_argument("--manifest", required=True)
     args = parser.parse_args()
-    if args.horizon_bars < 1:
-        parser.error("--horizon-bars must be positive")
 
     data_dir = Path(args.data_dir).resolve()
+    manifest_path = Path(args.manifest).resolve()
+    dataset_id = verify_dataset_manifest(data_dir, manifest_path)
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     spy = load_frame(data_dir, config.SPY_SYMBOL)
     candidate_sets = {"AAPL": "returns", "PLTR": "all"}
     report = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "horizon_bars": args.horizon_bars,
+        "phase": "development",
+        "dataset_id": dataset_id,
+        "manifest": str(manifest_path),
+        "holdout_sessions": args.holdout_sessions,
         "cost_bps": args.cost_bps,
         "results": {},
     }
     for raw_symbol in args.symbols:
         symbol = str(raw_symbol).upper()
         symbol_frame = load_frame(data_dir, symbol)
+        development_frame, holdout_frame, holdout_start = split_development_holdout(
+            symbol_frame, args.holdout_sessions
+        )
         sector_symbol = config.SECTOR_BENCHMARKS.get(symbol)
         sector = load_frame(data_dir, sector_symbol) if sector_symbol else None
-        feature_set = candidate_sets.get(symbol, "baseline")
-        X, y, returns, move_threshold = prepare_dataset(
-            symbol_frame,
-            spy,
-            sector,
-            feature_set,
-            args.horizon_bars,
-            args.cost_bps,
+        development_end = development_frame.index.max()
+        spy_development = spy.loc[spy.index <= development_end]
+        sector_development = (
+            sector.loc[sector.index <= development_end] if sector is not None else None
         )
+        feature_set = candidate_sets.get(symbol, "baseline")
         symbol_result = {
-            "rows": len(X),
-            "features": len(X.columns),
+            "development_raw_rows": len(development_frame),
+            "holdout_raw_rows": len(holdout_frame),
+            "development_end": str(development_end),
+            "historical_validation_start": holdout_start,
             "sector_benchmark": sector_symbol,
             "sector_feature_set": feature_set,
-            "mean_move_threshold": float(move_threshold.mean()),
-            "models": {},
+            "designs": {},
         }
-        for kind in ("logistic", "xgboost"):
-            metrics = evaluate_model(
-                X, y, returns, kind, args.horizon_bars, args.cost_bps
+        designs = [
+            item for item in TARGET_DESIGNS
+            if args.target_design in ("all", item["name"])
+        ]
+        for design in designs:
+            X, y, returns, move_threshold = prepare_dataset(
+                development_frame,
+                spy_development,
+                sector_development,
+                feature_set,
+                design["horizon_bars"],
+                args.cost_bps,
+                design["volatility_multiplier"],
             )
-            symbol_result["models"][kind] = metrics
-            print(
-                f"[UNIFIED] {symbol}/{kind}: rows={len(X)} "
-                f"trades={metrics['trade_count']} net={metrics['net_return']:.2%} "
-                f"pf={metrics['profit_factor']:.3f} "
-                f"dd={metrics['max_drawdown']:.2%} "
-                f"eligible_folds={metrics['eligible_folds']}/5 "
-                f"profitable_folds={metrics['profitable_folds']}/5 "
-                f"stable={metrics['stable_candidate']}"
-            )
+            design_result = {
+                "horizon_bars": design["horizon_bars"],
+                "horizon_minutes": design["horizon_bars"] * 15,
+                "volatility_multiplier": design["volatility_multiplier"],
+                "rows": len(X),
+                "features": len(X.columns),
+                "mean_move_threshold": float(move_threshold.mean()),
+                "models": {},
+            }
+            for kind in ("logistic", "xgboost"):
+                metrics = evaluate_model(
+                    X, y, returns, kind, design["horizon_bars"], args.cost_bps
+                )
+                design_result["models"][kind] = metrics
+                print(
+                    f"[UNIFIED] {symbol}/{design['name']}/{kind}: rows={len(X)} "
+                    f"trades={metrics['trade_count']} net={metrics['net_return']:.2%} "
+                    f"pf={metrics['profit_factor']:.3f} "
+                    f"dd={metrics['max_drawdown']:.2%} "
+                    f"eligible_folds={metrics['eligible_folds']}/5 "
+                    f"profitable_folds={metrics['profitable_folds']}/5 "
+                    f"stable={metrics['stable_candidate']}"
+                )
+            symbol_result["designs"][design["name"]] = design_result
         report["results"][symbol] = symbol_result
 
     path = output_dir / f"unified_intraday_{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"

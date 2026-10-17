@@ -1,13 +1,19 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
 
 from build_intraday_dataset import regular_session_only
+from freeze_research_dataset import build_manifest
+from lock_unified_design import select_designs
 from unified_intraday_research import (
     add_causal_regime_feature,
     aggregate_non_overlapping_trades,
     model_factory,
+    split_development_holdout,
+    verify_dataset_manifest,
 )
 
 
@@ -83,6 +89,78 @@ class UnifiedIntradayResearchTests(unittest.TestCase):
         self.assertEqual(metrics["trade_count"], 0)
         self.assertEqual(metrics["net_return"], 0.0)
         self.assertEqual(metrics["profit_factor"], 0.0)
+
+    def test_latest_sessions_are_reserved_from_development(self):
+        sessions = []
+        for day in pd.bdate_range("2026-01-02", periods=70):
+            sessions.extend(
+                pd.date_range(
+                    f"{day.date()} 09:30", periods=3, freq="15min",
+                    tz="America/New_York",
+                )
+            )
+        frame = pd.DataFrame({"Close": np.arange(len(sessions))}, index=sessions)
+        development, holdout, holdout_start = split_development_holdout(frame, 10)
+        self.assertEqual(len(pd.Index(holdout.index.date).unique()), 10)
+        self.assertLess(development.index.max(), holdout.index.min())
+        self.assertEqual(holdout_start, str(holdout.index[0].date()))
+
+    def test_frozen_manifest_detects_dataset_change(self):
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            path = data_dir / "NVDA_15min.parquet"
+            self._frame(30).to_parquet(path)
+            manifest = build_manifest(data_dir)
+            manifest_path = data_dir / "manifest.json"
+            import json
+            manifest_path.write_text(json.dumps(manifest))
+            self.assertEqual(
+                verify_dataset_manifest(data_dir, manifest_path), manifest["dataset_id"]
+            )
+            changed = self._frame(30)
+            changed.iloc[-1, changed.columns.get_loc("Close")] += 1
+            changed.to_parquet(path)
+            with self.assertRaisesRegex(ValueError, "frozen dataset changed"):
+                verify_dataset_manifest(data_dir, manifest_path)
+
+    def test_lock_selects_only_stable_best_candidate(self):
+        report = {
+            "results": {
+                "NVDA": {
+                    "sector_benchmark": "SMH",
+                    "sector_feature_set": "baseline",
+                    "designs": {
+                        "30m_050vol": {
+                            "horizon_bars": 2,
+                            "horizon_minutes": 30,
+                            "volatility_multiplier": 0.5,
+                            "models": {
+                                "logistic": {
+                                    "stable_candidate": True,
+                                    "net_return": 0.04,
+                                    "profit_factor": 1.3,
+                                }
+                            },
+                        },
+                        "60m_050vol": {
+                            "horizon_bars": 4,
+                            "horizon_minutes": 60,
+                            "volatility_multiplier": 0.5,
+                            "models": {
+                                "xgboost": {
+                                    "stable_candidate": False,
+                                    "net_return": 0.20,
+                                    "profit_factor": 2.0,
+                                }
+                            },
+                        },
+                    },
+                }
+            }
+        }
+        selected = select_designs(report)
+        self.assertEqual(selected["NVDA"]["target_design"], "30m_050vol")
+        self.assertEqual(selected["NVDA"]["model_kind"], "logistic")
 
 
 if __name__ == "__main__":
