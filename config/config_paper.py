@@ -43,8 +43,11 @@ INITIAL_CAPITAL = 100000
 USE_LIVE_TRADING = True
 ENV_NAME = "paper"
 
-MAX_POSITION_SIZE_PCT = 0.25
-MAX_POSITION_SIZE_DOLLARS = 25000
+# Shared equity-based sizing now caps initial entries at 25% and confirmed
+# pyramids at their total-position ceiling. Keep these legacy per-order limits
+# out of the way so paper exercises the same scaling policy as live.
+MAX_POSITION_SIZE_PCT = 0.90
+MAX_POSITION_SIZE_DOLLARS = None
 RISK_FRACTION = 0.25
 # Match the live risk policy during paper validation.
 MAX_LOSS_PER_TRADE = None

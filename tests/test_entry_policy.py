@@ -8,11 +8,11 @@ class EntryPolicyTests(unittest.TestCase):
         for symbol in ("NVDA", "AAPL", "ABBV", "PLTR", "SPY"):
             self.assertTrue(is_new_entry_allowed(symbol, "paper"))
 
-    def test_live_allows_abbv_and_blocks_pltr_entries(self):
+    def test_live_allows_only_nvda_and_aapl_entries(self):
         self.assertTrue(is_new_entry_allowed("NVDA", "live"))
         self.assertTrue(is_new_entry_allowed("AAPL", "live2"))
-        self.assertTrue(is_new_entry_allowed("SPY", "live"))
-        self.assertTrue(is_new_entry_allowed("ABBV", "live"))
+        self.assertFalse(is_new_entry_allowed("SPY", "live"))
+        self.assertFalse(is_new_entry_allowed("ABBV", "live"))
         self.assertFalse(is_new_entry_allowed("PLTR", "live2"))
 
     def test_guard_preserves_risk_sell_and_blocks_buy(self):
