@@ -4,7 +4,7 @@ from pathlib import Path
 
 import joblib
 
-from activate_production_binary_models import MODES, activate
+from activate_production_binary_models import DEFAULT_ARTIFACTS, MODES, activate
 
 
 def _artifact(symbol, mode, target_type="binary", marker="source"):
@@ -33,14 +33,15 @@ class ProductionBinaryActivationTests(unittest.TestCase):
     def test_dry_run_changes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, active = self._directories(Path(tmp))
-            result = activate(source, active, ["NVDA"], apply=False)
+            result = activate(source, active, [("NVDA", "daily")], apply=False)
             self.assertFalse(result["applied"])
             self.assertEqual(joblib.load(active / "NVDA_daily_xgb.pkl")["model"], "active")
 
     def test_apply_backs_up_and_replaces_complete_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, active = self._directories(Path(tmp))
-            result = activate(source, active, ["NVDA"], apply=True)
+            artifacts = [("NVDA", mode) for mode in MODES]
+            result = activate(source, active, artifacts, apply=True)
             self.assertTrue(result["applied"])
             self.assertTrue(Path(result["manifest"]).is_file())
             for mode in MODES:
@@ -59,8 +60,23 @@ class ProductionBinaryActivationTests(unittest.TestCase):
                 source / "NVDA_intraday_mr_xgb.pkl",
             )
             with self.assertRaisesRegex(ValueError, "target_type must be binary"):
-                activate(source, active, ["NVDA"], apply=True)
+                activate(
+                    source,
+                    active,
+                    [("NVDA", "daily"), ("NVDA", "intraday_mr")],
+                    apply=True,
+                )
             self.assertEqual(joblib.load(active / "NVDA_daily_xgb.pkl")["model"], "active")
+
+    def test_default_plan_only_targets_identified_regressions(self):
+        self.assertEqual(
+            DEFAULT_ARTIFACTS,
+            (
+                ("NVDA", "daily"),
+                ("NVDA", "intraday_mr"),
+                ("AAPL", "daily"),
+            ),
+        )
 
 
 if __name__ == "__main__":
