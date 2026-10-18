@@ -31,6 +31,12 @@ from config import (
     RS_MARGIN,
     MAX_POSITION_SIZE_PCT,
     MAX_POSITION_SIZE_DOLLARS,
+    INITIAL_POSITION_EQUITY_PCT,
+    EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT,
+    EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO,
+    CORE_CONFIRMED_POSITION_EQUITY_PCT,
+    OTHER_CONFIRMED_POSITION_EQUITY_PCT,
+    CORE_CONFIRMED_POSITION_SYMBOLS,
     DIP_BUY_ENABLED,
     DIP_BUY_THRESHOLD,
     DIP_BUY_MIN_PROB,
@@ -486,7 +492,16 @@ def detect_afterhours_dip(sym: str, threshold: float = 0.015) -> bool:
 # ---------------------------------------------------------
 # Helper for position limits
 # ---------------------------------------------------------
-def apply_position_limits(qty: int, price: float, cash: float, symbol: str) -> int:
+def apply_position_limits(
+    qty: int,
+    price: float,
+    cash: float,
+    symbol: str,
+    *,
+    current_position_value: float = 0.0,
+    is_pyramid: bool = False,
+    initial_exposure_pct: float = None,
+) -> int:
     """
     Apply hard position size limits to prevent over-concentration.
 
@@ -504,15 +519,45 @@ def apply_position_limits(qty: int, price: float, cash: float, symbol: str) -> i
 
     proposed_value = qty * price
 
+    # Use equity for exposure limits so repeated additions cannot each consume
+    # a fresh percentage of the remaining cash. If account data is temporarily
+    # unavailable, cash plus the current position is a conservative fallback.
+    account = account_cache.get_account() or {}
+    equity = _safe_float(account.get("equity"), None)
+    if equity is None or equity <= 0:
+        equity = max(float(cash) + max(float(current_position_value), 0.0), 0.0)
+
+    if is_pyramid:
+        core_symbols = {str(s).upper() for s in CORE_CONFIRMED_POSITION_SYMBOLS}
+        exposure_pct = (
+            float(CORE_CONFIRMED_POSITION_EQUITY_PCT)
+            if symbol.upper() in core_symbols
+            else float(OTHER_CONFIRMED_POSITION_EQUITY_PCT)
+        )
+    else:
+        requested_pct = _safe_float(initial_exposure_pct, None)
+        exposure_pct = (
+            min(float(EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT), requested_pct)
+            if requested_pct is not None
+            else float(INITIAL_POSITION_EQUITY_PCT)
+        )
+        exposure_pct = max(float(INITIAL_POSITION_EQUITY_PCT), exposure_pct)
+
+    remaining_exposure = max(
+        0.0,
+        (equity * exposure_pct) - max(float(current_position_value), 0.0),
+    )
+    max_by_equity = int(remaining_exposure // price)
+
     # Limit 1: Percentage of cash
     max_by_pct = int((cash * MAX_POSITION_SIZE_PCT) // price)
 
     # Limit 2: Absolute dollar amount (if configured)
     if MAX_POSITION_SIZE_DOLLARS is not None:
         max_by_dollars = int(MAX_POSITION_SIZE_DOLLARS // price)
-        max_allowed = min(max_by_pct, max_by_dollars)
+        max_allowed = min(max_by_pct, max_by_dollars, max_by_equity)
     else:
-        max_allowed = max_by_pct
+        max_allowed = min(max_by_pct, max_by_equity)
 
     # Return lesser of proposed and max allowed
     if qty > max_allowed:
@@ -714,6 +759,35 @@ def _effective_pyramid_threshold(
     base_buy = _effective_buy_threshold(sym, diagnostics)
     legacy = float(PYRAMID_THRESHOLD)
     return max(legacy, min(0.99, base_buy + float(MODEL_PYRAMID_BUFFER)))
+
+
+def exceptional_initial_exposure_pct(
+    sym: str,
+    probability: float,
+    diagnostics: Dict[str, dict] = None,
+) -> float:
+    """Return 35% only when an NVDA/AAPL entry has broad confirmation."""
+    sym = sym.upper()
+    default = float(INITIAL_POSITION_EQUITY_PCT)
+    core_symbols = {str(s).upper() for s in CORE_CONFIRMED_POSITION_SYMBOLS}
+    if sym not in core_symbols:
+        return default
+
+    diag = ((diagnostics or {}).get(sym, {}) or {})
+    required_probability = _effective_pyramid_threshold(sym, diagnostics)
+    checks = (
+        _safe_float(probability, 0.0) >= required_probability,
+        _safe_float(diag.get("session_return"), 0.0) > 0.0,
+        _safe_float(diag.get("intraday_mom"), 0.0) > 0.0,
+        _safe_float(diag.get("vwap_distance"), 0.0) > 0.0,
+        _safe_float(diag.get("vwap_slope_2"), 0.0) > 0.0,
+        _safe_float(diag.get("relative_session_return"), 0.0) > 0.0,
+        _safe_float(diag.get("volume_time_ratio"), 0.0)
+        >= float(EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO),
+    )
+    if all(checks):
+        return float(EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT)
+    return default
 
 
 def _effective_spy_entry_threshold(diagnostics: Dict[str, dict] = None) -> float:
@@ -1266,12 +1340,18 @@ def should_trade(
     # ---------------------------------------------------------
     if shares > 0 and prob_up >= effective_buy_threshold:
 
-        # -- Guard 2: block averaging down into a losing position ----------
+        # -- Guard 2: add only after the existing position confirms --------
         avg_cost = float(pm.data.get("avg_price", 0.0))
-        if avg_cost > 0 and price < avg_cost:
+        if avg_cost <= 0:
+            return make_decision(
+                "hold",
+                0,
+                explain + "HOLD - pyramid blocked; average entry is unavailable.",
+            )
+        if price <= avg_cost:
             unrealized_pct = (price - avg_cost) / avg_cost
-            if unrealized_pct < -0.01:
-                # -- Fix: check stop-loss FIRST before blocking the add ----
+            if price < avg_cost:
+                # Risk exits remain immediate even though adding is blocked.
                 stop_decision = check_stop_tp(
                     symbol,
                     price,
@@ -1280,15 +1360,33 @@ def should_trade(
                     effective_buy_threshold=effective_buy_threshold,
                 )
                 if stop_decision is not None:
-                    return stop_decision  # stop-loss overrides averaging-down guard
+                    return stop_decision
 
-                return make_decision(
-                    "hold",
-                    0,
-                    explain + f"HOLD - averaging-down blocked "
-                    f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
-                    f"drawdown={unrealized_pct:.1%}).",
-                )
+            return make_decision(
+                "hold",
+                0,
+                explain + f"HOLD - pyramid requires a profitable position "
+                f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
+                f"return={unrealized_pct:.1%}).",
+            )
+
+        if session_return is None or session_return <= 0:
+            detail = "unavailable" if session_return is None else f"{session_return:.2%}"
+            return make_decision(
+                "hold",
+                0,
+                explain + f"HOLD - pyramid requires positive session return "
+                f"(current={detail}).",
+            )
+
+        if intraday_mom is None or intraday_mom <= 0:
+            detail = "unavailable" if intraday_mom is None else f"{intraday_mom:.3%}"
+            return make_decision(
+                "hold",
+                0,
+                explain + f"HOLD - pyramid requires positive intraday momentum "
+                f"(current={detail}).",
+            )
 
         # -- Guard 2b: don't chase - block pyramid if already up >2% from entry --
         avg_cost = float(pm.data.get("avg_price", 0.0))
@@ -1342,7 +1440,14 @@ def should_trade(
         affordable = int(cash // price)
 
         # Apply position limits
-        qty = apply_position_limits(affordable, price, cash, symbol)
+        qty = apply_position_limits(
+            affordable,
+            price,
+            cash,
+            symbol,
+            current_position_value=shares * price,
+            is_pyramid=True,
+        )
 
         # A sell cooldown blocks every new BUY, including pyramid adds.
         allowed, cooldown_reason = _rebuy_allowed(
@@ -1401,7 +1506,16 @@ def should_trade(
         affordable = int(cash // price)
         target = int(max_invest // price)
         qty = min(affordable, target)
-        qty = apply_position_limits(qty, price, cash, symbol)
+        initial_exposure_pct = exceptional_initial_exposure_pct(
+            symbol, prob_up, diagnostics
+        )
+        qty = apply_position_limits(
+            qty,
+            price,
+            cash,
+            symbol,
+            initial_exposure_pct=initial_exposure_pct,
+        )
 
         if qty > 0:
             return make_decision("buy", qty, explain + f"BUY. qty={qty}")
@@ -2227,7 +2341,15 @@ def compute_strategy_decisions(
             max_shares = int(sim_cash // nvda_px)
 
             # NEW: Apply limits
-            max_shares = apply_position_limits(max_shares, nvda_px, sim_cash, "NVDA")
+            max_shares = apply_position_limits(
+                max_shares,
+                nvda_px,
+                sim_cash,
+                "NVDA",
+                initial_exposure_pct=exceptional_initial_exposure_pct(
+                    "NVDA", nvda_prob, diagnostics
+                ),
+            )
 
             if max_shares >= 1:
                 decisions["NVDA"] = make_decision(
@@ -2693,7 +2815,13 @@ def compute_strategy_decisions(
             else 0
         )
         buy_qty = apply_position_limits(
-            buy_qty, price, cash, relative_symbol
+            buy_qty,
+            price,
+            cash,
+            relative_symbol,
+            initial_exposure_pct=exceptional_initial_exposure_pct(
+                relative_symbol, preds.get(relative_symbol, 0.0), diagnostics
+            ),
         )
         if buy_qty > 0:
             # Prefer the strongest confirmed relative-momentum candidate over

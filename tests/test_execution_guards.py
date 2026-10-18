@@ -304,6 +304,129 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(decision["action"], "hold")
         self.assertIn("entry blocked while session return", decision["explain"])
 
+    def _pyramid_decision(self, *, price=101.0, avg_price=100.0,
+                          session_return=0.01, intraday_mom=0.005):
+        pm = SimpleNamespace(
+            data={
+                "shares": 10,
+                "cash": 100000.0,
+                "avg_price": avg_price,
+                "max_price": max(price, avg_price),
+            },
+            refresh_live=lambda: None,
+            save=lambda: None,
+        )
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "session_return": session_return,
+                "intraday_mom": intraday_mom,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=price
+        ), patch.object(
+            strategy, "fetch_historical_data", return_value=None
+        ), patch.object(
+            strategy.account_cache,
+            "get_account",
+            return_value={"equity": 100000.0},
+        ):
+            return strategy.should_trade("NVDA", 0.90, diagnostics=diagnostics)
+
+    def test_pyramid_requires_profitable_existing_position(self):
+        decision = self._pyramid_decision(price=99.8, avg_price=100.0)
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("requires a profitable position", decision["explain"])
+
+    def test_pyramid_requires_positive_session_return(self):
+        decision = self._pyramid_decision(session_return=0.0)
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("requires positive session return", decision["explain"])
+
+    def test_pyramid_requires_positive_intraday_momentum(self):
+        decision = self._pyramid_decision(intraday_mom=-0.001)
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("requires positive intraday momentum", decision["explain"])
+
+    def test_confirmed_nvda_pyramid_can_scale_toward_eighty_percent(self):
+        decision = self._pyramid_decision()
+        self.assertEqual(decision["action"], "buy")
+        self.assertTrue(decision["pyramid"])
+        self.assertEqual(decision["qty"], 782)
+
+    def test_initial_position_is_capped_at_twenty_five_percent_equity(self):
+        with patch.object(
+            strategy.account_cache,
+            "get_account",
+            return_value={"equity": 100000.0},
+        ):
+            qty = strategy.apply_position_limits(1000, 100.0, 100000.0, "NVDA")
+        self.assertEqual(qty, 250)
+
+    def test_exceptional_confirmed_entry_can_start_at_thirty_five_percent(self):
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "session_return": 0.01,
+                "intraday_mom": 0.005,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.001,
+                "relative_session_return": 0.004,
+                "volume_time_ratio": 1.1,
+            }
+        }
+        exposure_pct = strategy.exceptional_initial_exposure_pct(
+            "NVDA", 0.65, diagnostics
+        )
+        with patch.object(
+            strategy.account_cache,
+            "get_account",
+            return_value={"equity": 100000.0},
+        ):
+            qty = strategy.apply_position_limits(
+                1000,
+                100.0,
+                100000.0,
+                "NVDA",
+                initial_exposure_pct=exposure_pct,
+            )
+        self.assertEqual(exposure_pct, 0.35)
+        self.assertEqual(qty, 350)
+
+    def test_exceptional_entry_falls_back_when_confirmation_is_incomplete(self):
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "session_return": 0.01,
+                "intraday_mom": 0.005,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.001,
+                "relative_session_return": -0.001,
+                "volume_time_ratio": 1.1,
+            }
+        }
+        self.assertEqual(
+            strategy.exceptional_initial_exposure_pct("NVDA", 0.75, diagnostics),
+            0.25,
+        )
+
+    def test_secondary_pyramid_total_exposure_is_capped_at_fifty_percent(self):
+        with patch.object(
+            strategy.account_cache,
+            "get_account",
+            return_value={"equity": 100000.0},
+        ):
+            qty = strategy.apply_position_limits(
+                1000,
+                100.0,
+                100000.0,
+                "ABBV",
+                current_position_value=25000.0,
+                is_pyramid=True,
+            )
+        self.assertEqual(qty, 250)
+
     def test_dynamic_stop_uses_smaller_account_equity_cap(self):
         pm = SimpleNamespace(
             data={"shares": 20, "avg_price": 267.378, "max_price": 267.378},

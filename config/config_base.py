@@ -53,7 +53,7 @@ PAPER_TRADE_NOTES = {}
 # Keep the complete universe monitored while limiting which symbols may open
 # new positions in each environment. SELL and risk-exit eligibility is not
 # controlled by these lists.
-LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL", "ABBV", "SPY"]
+LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL"]
 PAPER_ENTRY_SYMBOLS = list(SYMBOL) + ["SPY"]
 
 BUY_THRESHOLD = 0.55
@@ -164,6 +164,15 @@ PROFIT_TRIGGER_PCT = 0.02  # +2% intraday profit trigger
 
 MAX_POSITION_SIZE_PCT = 0.90
 MAX_POSITION_SIZE_DOLLARS = None
+# New positions start small enough to leave room for confirmation-based adds.
+INITIAL_POSITION_EQUITY_PCT = 0.25
+EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT = 0.35
+EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO = 0.80
+# NVDA and AAPL are the primary live symbols and may scale further only through
+# the guarded pyramid path. Research/secondary symbols retain a lower ceiling.
+CORE_CONFIRMED_POSITION_EQUITY_PCT = 0.80
+OTHER_CONFIRMED_POSITION_EQUITY_PCT = 0.50
+CORE_CONFIRMED_POSITION_SYMBOLS = ["NVDA", "AAPL"]
 MIN_RETURN_THRESHOLD = 0.002
 
 DIP_BUY_ENABLED = True

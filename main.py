@@ -18,6 +18,7 @@ from strategy import (
     mark_session_position_closed,
     mark_session_stop,
     apply_position_limits,
+    exceptional_initial_exposure_pct,
     _effective_buy_threshold,
     _effective_sell_threshold,
     combine_artifact_decision_thresholds,
@@ -1024,6 +1025,11 @@ def execute_decisions(decisions, diagnostics=None):
         # Flag-based recompute (preferred, no string matching)
         recalc_all_in = bool(decision.get("recalc_all_in", False))
         recalc_after_sells = bool(decision.get("recalc_after_sells", False))
+        initial_exposure_pct = exceptional_initial_exposure_pct(
+            sym,
+            (diagnostics.get(sym, {}) or {}).get("final_prob", 0.0),
+            diagnostics,
+        )
 
         # If strategy expected SPY to be sold first but it didn't fill, skip flagged buys.
         if (recalc_all_in or recalc_after_sells) and spy_sell_failed:
@@ -1039,7 +1045,13 @@ def execute_decisions(decisions, diagnostics=None):
             qty = int(remaining_cash // price)
 
             # ✅ Apply limits
-            qty = apply_position_limits(qty, price, remaining_cash, sym)
+            qty = apply_position_limits(
+                qty,
+                price,
+                remaining_cash,
+                sym,
+                initial_exposure_pct=initial_exposure_pct,
+            )
 
             print(
                 f"[INFO] {sym} recalc_all_in: cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}"
@@ -1051,9 +1063,24 @@ def execute_decisions(decisions, diagnostics=None):
 
             # Recalculated rotation orders must obey the same per-position
             # sizing limits as ordinary and all-in BUY orders.
-            qty = apply_position_limits(qty, price, remaining_cash, sym)
+            qty = apply_position_limits(
+                qty,
+                price,
+                remaining_cash,
+                sym,
+                initial_exposure_pct=initial_exposure_pct,
+            )
             print(
                 f"[INFO] {sym} recalc_after_sells: remaining_cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}"
+            )
+
+        elif not decision.get("pyramid"):
+            qty = apply_position_limits(
+                qty,
+                price,
+                remaining_cash,
+                sym,
+                initial_exposure_pct=initial_exposure_pct,
             )
 
         if qty <= 0:
