@@ -1485,15 +1485,23 @@ def should_trade(
     # ---------------------------------------------------------
     if prob_up >= effective_buy_threshold:
 
-        # If we have intraday_mom and it's not positive, block the buy
-        if intraday_mom is not None and intraday_mom <= 0:
-            return make_decision(
-                "hold",
-                0,
-                explain + f"HOLD - final_prob>=BUY threshold but intraday momentum "
-                f"is non-positive ({intraday_mom:.3%}); waiting for "
-                f"price to turn up.",
-            )
+        NEG_MOM_HARD_STOP = -0.0010   # -0.10%
+        POS_MOM_CONFIRM = 0.0005      # +0.05%
+        momentum_scale = 1.0
+        mom_text = f"{intraday_mom:.3%}" if intraday_mom is not None else "n/a"
+
+        if intraday_mom is not None:
+            if intraday_mom < NEG_MOM_HARD_STOP:
+                return make_decision(
+                    "hold",
+                    0,
+                    explain + f"HOLD - final_prob>=BUY threshold but intraday momentum "
+                    f"is clearly negative ({mom_text}); avoiding entry into weakening "
+                    f"price action.",
+                )
+            elif intraday_mom < POS_MOM_CONFIRM:
+                momentum_scale = 0.5
+
 
         # Check if this is a same-day rebuy
         if shares <= 0 and symbol.upper() in _session_state["buys"]:
@@ -1505,7 +1513,12 @@ def should_trade(
 
         affordable = int(cash // price)
         target = int(max_invest // price)
+
+        if momentum_scale < 1.0:
+            target = max(1, int(target * momentum_scale))
+
         qty = min(affordable, target)
+
         initial_exposure_pct = exceptional_initial_exposure_pct(
             symbol, prob_up, diagnostics
         )
@@ -1518,7 +1531,21 @@ def should_trade(
         )
 
         if qty > 0:
-            return make_decision("buy", qty, explain + f"BUY. qty={qty}")
+            if momentum_scale < 1.0:
+                return make_decision(
+                    "buy",
+                    qty,
+                    explain + f"BUY - weak/near-flat intraday momentum "
+                    f"({mom_text}); reduced size applied "
+                    f"(scale={momentum_scale:.2f}, qty={qty}).",
+                )
+            return make_decision(
+                "buy",
+                qty,
+                explain + f"BUY - final probability confirmed "
+                f"(intraday_mom={mom_text}). qty={qty}",
+            )
+
 
         return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
 
