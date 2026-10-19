@@ -14,20 +14,23 @@ from pathlib import Path
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BOT_DIR)
 
-from predictive_model.model_monitor import ModelMonitor
-
-
 def cleanup_logs_directory(logs_dir: str = "logs", days_to_keep: int = 30):
     """
-    Remove log files older than specified days from logs/ directory.
+    Recursively remove files older than specified days from logs/ directory.
+
+    Nested account directories such as ``logs/live`` and ``logs/live2`` are
+    included. Symbolic links are skipped so cleanup cannot follow a link out of
+    the configured logs tree.
 
     Args:
         logs_dir: Path to logs directory
         days_to_keep: Keep logs from last N days
     """
-    logs_path = os.path.join(BOT_DIR, logs_dir)
+    logs_path = Path(logs_dir)
+    if not logs_path.is_absolute():
+        logs_path = Path(BOT_DIR) / logs_path
 
-    if not os.path.exists(logs_path):
+    if not logs_path.exists():
         print(f"[INFO] Logs directory not found: {logs_path}")
         return
 
@@ -40,26 +43,28 @@ def cleanup_logs_directory(logs_dir: str = "logs", days_to_keep: int = 30):
     print(f"   Directory: {logs_path}")
     print("-" * 60)
 
-    for filename in os.listdir(logs_path):
-        filepath = os.path.join(logs_path, filename)
-
-        # Skip directories
-        if os.path.isdir(filepath):
+    for filepath in sorted(logs_path.rglob("*")):
+        if filepath.is_symlink() or not filepath.is_file():
             continue
+
+        relative_path = filepath.relative_to(logs_path)
 
         try:
             # Get file modification time
-            file_mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
+            file_mtime = datetime.fromtimestamp(filepath.stat().st_mtime)
 
             if file_mtime < cutoff:
-                file_size = os.path.getsize(filepath)
-                os.remove(filepath)
+                file_size = filepath.stat().st_size
+                filepath.unlink()
                 removed_count += 1
                 removed_size += file_size
-                print(f"  ✅ Removed: {filename} ({file_size/1024:.1f} KB, {file_mtime.strftime('%Y-%m-%d')})")
+                print(
+                    f"  ✅ Removed: {relative_path} "
+                    f"({file_size/1024:.1f} KB, {file_mtime.strftime('%Y-%m-%d')})"
+                )
 
         except Exception as e:
-            print(f"  ⚠️ Error removing {filename}: {e}")
+            print(f"  ⚠️ Error removing {relative_path}: {e}")
 
     if removed_count > 0:
         print("-" * 60)
@@ -79,6 +84,8 @@ def cleanup_prediction_logs(days_to_keep: int = 30):
     print("-" * 60)
 
     try:
+        from predictive_model.model_monitor import ModelMonitor
+
         monitor = ModelMonitor()
         monitor.cleanup_old_logs(days_to_keep=days_to_keep)
         print("✅ Prediction logs cleaned up")
