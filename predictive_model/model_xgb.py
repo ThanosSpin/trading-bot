@@ -83,6 +83,7 @@ def load_platt_calibrator(symbol: str, mode: str):
     _calibrator_cache[key] = platt
     return platt
 
+
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
@@ -95,7 +96,10 @@ def _clean_feature_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ["_".join([str(x) for x in col if str(x) != ""]).strip("_") for col in df.columns]
+        df.columns = [
+            "_".join([str(x) for x in col if str(x) != ""]).strip("_")
+            for col in df.columns
+        ]
 
     df = df.loc[:, ~df.columns.astype(str).str.match(r"^Unnamed")]
 
@@ -150,10 +154,14 @@ def _validate_exact_feature_schema(
     aligned = _clean_feature_dataframe(aligned)
 
     unnamed_cols = [
-        col for col in aligned.columns if col == "" or pd.isna(col) or str(col).strip() == ""
+        col
+        for col in aligned.columns
+        if col == "" or pd.isna(col) or str(col).strip() == ""
     ]
     if unnamed_cols:
-        raise ValueError(f"Unnamed columns present in inference features: {unnamed_cols[:10]}")
+        raise ValueError(
+            f"Unnamed columns present in inference features: {unnamed_cols[:10]}"
+        )
 
     non_numeric = aligned.select_dtypes(exclude=[np.number]).columns.tolist()
     if non_numeric:
@@ -169,8 +177,8 @@ def _validate_exact_feature_schema(
 def _time_ordered_train_cal_test_split(
     X: pd.DataFrame,
     y: pd.Series,
-    train_frac: float = 0.70,
-    cal_frac: float = 0.10,
+    train_frac: float = 0.60,
+    cal_frac: float = 0.20,
 ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
     if len(X) != len(y):
         raise ValueError("X and y must have the same length")
@@ -307,9 +315,8 @@ def _filter_intraday_rows_by_mode(
     if not np.isfinite(mom_threshold) or not np.isfinite(vol_threshold):
         raise ValueError("Regime thresholds are not finite")
 
-    momentum_mask = (
-        (with_regime["mom_4_abs"] >= mom_threshold)
-        | (with_regime["vol_12"] >= vol_threshold)
+    momentum_mask = (with_regime["mom_4_abs"] >= mom_threshold) | (
+        with_regime["vol_12"] >= vol_threshold
     )
     selected_mask = momentum_mask if mode == "intraday_mom" else ~momentum_mask
     filtered = with_regime.loc[selected_mask].copy()
@@ -377,9 +384,13 @@ def train_model(
             if c in df_feat.columns:
                 df_feat = df_feat.drop(columns=[c])
     else:
-        raise ValueError("mode must be 'daily' or one of 'intraday', 'intraday_mr', 'intraday_mom'")
+        raise ValueError(
+            "mode must be 'daily' or one of 'intraday', 'intraday_mr', 'intraday_mom'"
+        )
 
-    print(f"[FEATURES] Built {len(df_feat.columns)} total columns after feature engineering")
+    print(
+        f"[FEATURES] Built {len(df_feat.columns)} total columns after feature engineering"
+    )
 
     print("\n[CLEANUP] Cleaning DataFrame columns...")
     df_feat = _clean_feature_dataframe(df_feat)
@@ -387,8 +398,14 @@ def train_model(
 
     if use_multiclass:
         print("\n[TARGET] Creating multi-class target...")
-        thresholds = (-0.015, -0.003, 0.003, 0.015) if mode == "daily" else (-0.008, -0.002, 0.002, 0.008)
-        df_feat = create_multiclass_target(df_feat, forward_periods=1, thresholds=thresholds)
+        thresholds = (
+            (-0.015, -0.003, 0.003, 0.015)
+            if mode == "daily"
+            else (-0.008, -0.002, 0.002, 0.008)
+        )
+        df_feat = create_multiclass_target(
+            df_feat, forward_periods=1, thresholds=thresholds
+        )
         target_col = "Target_multiclass"
         num_classes = 5
         objective = "multi:softprob"
@@ -411,13 +428,17 @@ def train_model(
 
     class_counts = df_feat[target_col].value_counts()
     unique_classes = sorted(class_counts.index.tolist())
-    print(f"\n[CLASS CHECK] Found {len(unique_classes)} unique classes: {unique_classes}")
+    print(
+        f"\n[CLASS CHECK] Found {len(unique_classes)} unique classes: {unique_classes}"
+    )
     for cls in unique_classes:
         count = int(class_counts[cls])
         print(f" Class {cls}: {count} samples ({count / len(df_feat) * 100:.1f}%)")
 
     min_samples_per_class = 3 if mode in ("intraday_mr", "intraday_mom") else 5
-    valid_classes = [cls for cls in unique_classes if class_counts[cls] >= min_samples_per_class]
+    valid_classes = [
+        cls for cls in unique_classes if class_counts[cls] >= min_samples_per_class
+    ]
     if len(valid_classes) < 2:
         raise ValueError(
             f"Insufficient class diversity for {symbol}/{mode}. "
@@ -425,7 +446,9 @@ def train_model(
         )
 
     if use_multiclass and len(valid_classes) < num_classes:
-        print(f"\n[CLASS REMAP] Only {len(valid_classes)}/{num_classes} classes have enough samples")
+        print(
+            f"\n[CLASS REMAP] Only {len(valid_classes)}/{num_classes} classes have enough samples"
+        )
         df_feat = df_feat[df_feat[target_col].isin(valid_classes)].copy()
         class_mapping = {old: new for new, old in enumerate(sorted(valid_classes))}
         df_feat[target_col] = df_feat[target_col].map(class_mapping)
@@ -449,7 +472,9 @@ def train_model(
     X = df_feat[feature_cols].copy()
     y = pd.Series(df_feat[target_col], dtype=int)
 
-    unnamed_cols = [col for col in X.columns if col == "" or pd.isna(col) or str(col).strip() == ""]
+    unnamed_cols = [
+        col for col in X.columns if col == "" or pd.isna(col) or str(col).strip() == ""
+    ]
     if unnamed_cols:
         raise ValueError(f"Unnamed feature columns present: {unnamed_cols[:10]}")
 
@@ -457,7 +482,9 @@ def train_model(
 
     non_numeric = X.select_dtypes(exclude=[np.number]).columns.tolist()
     if non_numeric:
-        raise ValueError(f"Non-numeric features present after cleaning: {non_numeric[:10]}")
+        raise ValueError(
+            f"Non-numeric features present after cleaning: {non_numeric[:10]}"
+        )
 
     all_nan_cols = X.columns[X.isna().all()].tolist()
     if all_nan_cols:
@@ -493,9 +520,9 @@ def train_model(
         evaluation_bundle = pd.concat(
             [
                 evaluation_X,
-                pd.to_numeric(binary_evaluation_frame["target"], errors="coerce").rename(
-                    "training_target"
-                ),
+                pd.to_numeric(
+                    binary_evaluation_frame["target"], errors="coerce"
+                ).rename("training_target"),
                 pd.to_numeric(
                     binary_evaluation_frame["evaluation_target"], errors="coerce"
                 ).rename("evaluation_target"),
@@ -520,7 +547,9 @@ def train_model(
         evaluation_returns = evaluation_bundle["forward_return"].copy()
         evaluation_movement_target = evaluation_bundle["movement_target"].astype(int)
 
-    X_train, y_train, X_cal, y_cal, X_test, y_test = _time_ordered_train_cal_test_split(X, y)
+    X_train, y_train, X_cal, y_cal, X_test, y_test = _time_ordered_train_cal_test_split(
+        X, y
+    )
 
     print(f"\n[SPLIT] Train={len(X_train)} Cal={len(X_cal)} Test={len(X_test)}")
     print(f"[SPLIT] Train classes: {y_train.value_counts().to_dict()}")
@@ -532,7 +561,9 @@ def train_model(
     if num_classes == 2 and len(sorted(y_cal.unique())) < 2:
         raise ValueError("Calibration set has fewer than 2 classes.")
     if len(sorted(y_test.unique())) < 2:
-        print("[WARN] Final test set has one class; ROC AUC and some calibration metrics may be unavailable.")
+        print(
+            "[WARN] Final test set has one class; ROC AUC and some calibration metrics may be unavailable."
+        )
 
     print("\n[CLASS BALANCE] Analyzing train-set class distribution...")
     analyze_class_balance(y_train, name=f"{symbol}/{mode} Train Set")
@@ -547,7 +578,9 @@ def train_model(
                 print("[CLASS WEIGHT] Classes balanced, no weighting needed")
                 scale_pos_weight = None
             else:
-                print(f"[CLASS WEIGHT] Applying scale_pos_weight={scale_pos_weight:.3f}")
+                print(
+                    f"[CLASS WEIGHT] Applying scale_pos_weight={scale_pos_weight:.3f}"
+                )
         else:
             print("[CLASS WEIGHT] Insufficient class samples for weighting")
     else:
@@ -590,17 +623,21 @@ def train_model(
     if num_classes == 2 and len(X_train.columns) >= 25 and len(X_cal) >= 50:
         try:
             print(f"\n[FEATURE SELECTION] Running calibration-window SHAP selection...")
-            top_features, _shap_values, X_train_sel, X_cal_sel, fs_meta = select_features_with_shap(
-                model=model,
-                X_train=X_train,
-                X_cal=X_cal,
-                top_n=None,
-                plot=False,
-                symbol=symbol,
-                mode=mode,
+            top_features, _shap_values, X_train_sel, X_cal_sel, fs_meta = (
+                select_features_with_shap(
+                    model=model,
+                    X_train=X_train,
+                    X_cal=X_cal,
+                    top_n=None,
+                    plot=False,
+                    symbol=symbol,
+                    mode=mode,
+                )
             )
             if len(top_features) >= 10:
-                print(f"[FEATURE SELECTION] Retraining on {len(top_features)} selected features")
+                print(
+                    f"[FEATURE SELECTION] Retraining on {len(top_features)} selected features"
+                )
                 X_test = X_test[top_features].copy()
                 X_train = X_train_sel
                 X_cal = X_cal_sel
@@ -612,10 +649,14 @@ def train_model(
                 model.fit(X_train, y_train, eval_set=[(X_cal, y_cal)], verbose=False)
                 print(f"[FEATURE SELECTION] Retrained selected-feature model")
             else:
-                print(f"[FEATURE SELECTION] Too few features selected; keeping full schema")
+                print(
+                    f"[FEATURE SELECTION] Too few features selected; keeping full schema"
+                )
         except Exception as e:
             # print(f"[FEATURE SELECTION] Skipping due to error: {e}")
-            print("[FEATURE SELECTION] Skipping SHAP feature selection due to XGBoost shape mismatch.")
+            print(
+                "[FEATURE SELECTION] Skipping SHAP feature selection due to XGBoost shape mismatch."
+            )
 
     walk_forward_evaluation = None
     if num_classes == 2:
@@ -635,9 +676,7 @@ def train_model(
             cost_bps=MODEL_EVAL_TRANSACTION_COST_BPS,
             max_features=len(feature_list),
             movement_target=(evaluation_movement_target if use_two_stage else None),
-            holding_period_bars=(
-                4 if use_two_stage and mode != "daily" else 1
-            ),
+            holding_period_bars=(4 if use_two_stage and mode != "daily" else 1),
         )
         wf_metrics = walk_forward_evaluation["aggregate"]
         print(
@@ -656,7 +695,9 @@ def train_model(
     calibrated = False
 
     calibration_method = "sigmoid" if num_classes == 2 else "isotonic"
-    print(f"\n[CALIBRATION] Applying {calibration_method} calibration on calibration window only")
+    print(
+        f"\n[CALIBRATION] Applying {calibration_method} calibration on calibration window only"
+    )
     try:
         calibrated_model = CalibratedClassifierCV(
             model,
@@ -689,7 +730,9 @@ def train_model(
             _move_y_test,
         ) = _time_ordered_train_cal_test_split(movement_X, movement_y)
         if move_y_train.nunique() < 2 or move_y_cal.nunique() < 2:
-            raise ValueError("Two-stage movement model requires two train/calibration classes")
+            raise ValueError(
+                "Two-stage movement model requires two train/calibration classes"
+            )
         movement_params = dict(params)
         movement_params.pop("scale_pos_weight", None)
         move_neg = int((move_y_train == 0).sum())
@@ -723,6 +766,18 @@ def train_model(
                 step=0.01,
             )["best_threshold"]
         )
+
+        print(
+            f"[TWO-STAGE THRESHOLD OPTIMIZATION] {symbol}/{mode} "
+            f"cal_min={movement_cal_probability.min():.4f} "
+            f"cal_median={np.median(movement_cal_probability):.4f} "
+            f"cal_max={movement_cal_probability.max():.4f} "
+            f"movement_threshold={movement_threshold:.4f} "
+            f"positive_rate={float(np.mean(move_y_cal)):.2%} "
+            f"positives={int((move_y_cal == 1).sum())} "
+            f"negatives={int((move_y_cal == 0).sum())}"
+        )
+
         movement_calibrated = True
         print(
             f"[TWO-STAGE] Meaningful-move threshold={movement_threshold:.3f} "
@@ -734,29 +789,104 @@ def train_model(
 
     try:
         if num_classes == 2:
-            cal_pred_proba = final_model.predict_proba(X_cal)[:, 1]
-            threshold_opt = (
-                (walk_forward_evaluation or {}).get("threshold_optimization")
-                or optimize_binary_decision_threshold(
-                    y_cal,
-                    cal_pred_proba,
-                    metric="f1",
-                    min_threshold=0.35,
-                    max_threshold=0.65,
-                    step=0.01,
-                )
+            raw_cal_proba = base_model.predict_proba(X_cal)[:, 1]
+            calibrated_cal_proba = final_model.predict_proba(X_cal)[:, 1]
+
+            if mode.startswith("intraday"):
+                threshold_proba_cal = raw_cal_proba
+            else:
+                threshold_proba_cal = calibrated_cal_proba
+
+            threshold_opt = optimize_binary_decision_threshold(
+                y_cal,
+                threshold_proba_cal,
+                metric="balanced_accuracy",
+                min_threshold=0.45,
+                max_threshold=0.70,
+                step=0.01,
             )
+
             best_threshold = float(threshold_opt["best_threshold"])
-            y_pred_proba = final_model.predict_proba(X_test)[:, 1]
+
+            if best_threshold <= 0.3500001:
+                print(
+                    f"[THRESHOLD WARNING] {symbol}/{mode} "
+                    f"best threshold is at lower bound; "
+                    f"F1 may favor excessive positive predictions"
+                )
+
+            print(
+                f"[THRESHOLD OPTIMIZATION KEYS] {symbol}/{mode} "
+                f"keys={list(threshold_opt.keys())} "
+                f"result={threshold_opt}"
+            )
+
+            print(
+                f"[THRESHOLD OPTIMIZATION] {symbol}/{mode} "
+                f"source={'raw' if mode.startswith('intraday') else 'calibrated'} "
+                f"cal_min={threshold_proba_cal.min():.4f} "
+                f"cal_median={np.median(threshold_proba_cal):.4f} "
+                f"cal_max={threshold_proba_cal.max():.4f} "
+                f"best_threshold={best_threshold:.4f} "
+                f"positive_rate={float(np.mean(y_cal)):.2%} "
+                f"positives={int((y_cal == 1).sum())} "
+                f"negatives={int((y_cal == 0).sum())}"
+            )
+
+            print(
+                f"[CALIBRATION CLASS BALANCE] {symbol}/{mode} "
+                f"positive_rate={float(np.mean(y_cal)):.2%} "
+                f"positives={int(np.sum(y_cal == 1))} "
+                f"negatives={int(np.sum(y_cal == 0))}"
+            )
+
+            raw_test_proba = base_model.predict_proba(X_test)[:, 1]
+            calibrated_test_proba = final_model.predict_proba(X_test)[:, 1]
+
+            if mode.startswith("intraday"):
+                y_pred_proba = raw_test_proba
+            else:
+                y_pred_proba = calibrated_test_proba
+
+            positive_count = int((y_pred_proba >= best_threshold).sum())
+            total_count = len(y_pred_proba)
+            positive_rate = positive_count / total_count if total_count else 0.0
+
+            print(
+                f"[PROBABILITY DIAGNOSTICS] {symbol}/{mode} "
+                f"raw_min={raw_test_proba.min():.4f} "
+                f"raw_median={np.median(raw_test_proba):.4f} "
+                f"raw_max={raw_test_proba.max():.4f} "
+                f"calibrated_min={calibrated_test_proba.min():.4f} "
+                f"calibrated_median={np.median(calibrated_test_proba):.4f} "
+                f"calibrated_max={calibrated_test_proba.max():.4f} "
+                f"decision_source={'raw' if mode.startswith('intraday') else 'calibrated'} "
+                f"positive_predictions={positive_count}/{total_count} "
+                f"positive_rate={positive_rate:.2%} "
+                f"threshold={best_threshold:.4f}"
+            )
+
             y_pred = (y_pred_proba >= best_threshold).astype(int)
 
             metrics["accuracy"] = float(accuracy_score(y_test, y_pred))
-            metrics["logloss"] = float(log_loss(y_test, y_pred_proba, labels=[0, 1])) if len(np.unique(y_test)) >= 2 else None
-            metrics["roc_auc"] = float(roc_auc_score(y_test, y_pred_proba)) if len(np.unique(y_test)) >= 2 else None
-            metrics["precision"] = float(precision_score(y_test, y_pred, zero_division=0))
+            metrics["logloss"] = (
+                float(log_loss(y_test, y_pred_proba, labels=[0, 1]))
+                if len(np.unique(y_test)) >= 2
+                else None
+            )
+            metrics["roc_auc"] = (
+                float(roc_auc_score(y_test, y_pred_proba))
+                if len(np.unique(y_test)) >= 2
+                else None
+            )
+            metrics["precision"] = float(
+                precision_score(y_test, y_pred, zero_division=0)
+            )
             metrics["recall"] = float(recall_score(y_test, y_pred, zero_division=0))
             metrics["f1"] = float(f1_score(y_test, y_pred, zero_division=0))
-            metrics["confusion_matrix"] = confusion_matrix(y_test, y_pred, labels=[0, 1]).tolist()
+            metrics["confusion_matrix"] = confusion_matrix(
+                y_test, y_pred, labels=[0, 1]
+            ).tolist()
             metrics["decision_threshold"] = float(best_threshold)
             metrics["threshold_metric"] = threshold_opt["metric"]
             metrics["threshold_score"] = float(threshold_opt["best_score"])
@@ -780,21 +910,34 @@ def train_model(
             all_classes = list(range(num_classes))
 
             metrics["accuracy"] = float(accuracy_score(y_test, y_pred))
-            metrics["logloss"] = float(log_loss(y_test, y_pred_proba, labels=all_classes))
-            metrics["precision_weighted"] = float(precision_score(y_test, y_pred, average="weighted", zero_division=0))
-            metrics["recall_weighted"] = float(recall_score(y_test, y_pred, average="weighted", zero_division=0))
-            metrics["f1_weighted"] = float(f1_score(y_test, y_pred, average="weighted", zero_division=0))
+            metrics["logloss"] = float(
+                log_loss(y_test, y_pred_proba, labels=all_classes)
+            )
+            metrics["precision_weighted"] = float(
+                precision_score(y_test, y_pred, average="weighted", zero_division=0)
+            )
+            metrics["recall_weighted"] = float(
+                recall_score(y_test, y_pred, average="weighted", zero_division=0)
+            )
+            metrics["f1_weighted"] = float(
+                f1_score(y_test, y_pred, average="weighted", zero_division=0)
+            )
             metrics["precision_per_class"] = precision_score(
                 y_test, y_pred, average=None, zero_division=0, labels=all_classes
             ).tolist()
             metrics["recall_per_class"] = recall_score(
                 y_test, y_pred, average=None, zero_division=0, labels=all_classes
             ).tolist()
-            metrics["confusion_matrix"] = confusion_matrix(y_test, y_pred, labels=all_classes).tolist()
+            metrics["confusion_matrix"] = confusion_matrix(
+                y_test, y_pred, labels=all_classes
+            ).tolist()
 
             from sklearn.preprocessing import label_binarize
+
             y_test_bin = label_binarize(y_test, classes=range(num_classes))
-            metrics["brier_score"] = float(np.mean(np.sum((y_test_bin - y_pred_proba) ** 2, axis=1)))
+            metrics["brier_score"] = float(
+                np.mean(np.sum((y_test_bin - y_pred_proba) ** 2, axis=1))
+            )
 
         metrics["train_samples"] = len(X_train)
         metrics["calibration_samples"] = len(X_cal)
@@ -868,8 +1011,9 @@ def train_model(
             "features": feature_list,
             "feature_count": len(feature_list),
             "target_type": (
-                "multiclass" if use_multiclass else
-                ("two_stage" if use_two_stage else "binary")
+                "multiclass"
+                if use_multiclass
+                else ("two_stage" if use_two_stage else "binary")
             ),
         },
         "full_feature_schema": full_feature_schema,
@@ -884,15 +1028,14 @@ def train_model(
         "metrics": metrics,
         "walk_forward_evaluation": walk_forward_evaluation,
         "decision_threshold": metrics.get("decision_threshold", 0.5),
-        "threshold_optimization": (
-            (walk_forward_evaluation or {}).get("threshold_optimization")
-            or {
-                "best_threshold": metrics.get("decision_threshold", 0.5),
-                "metric": metrics.get("threshold_metric"),
-                "best_score": metrics.get("threshold_score"),
-                "grid": metrics.get("threshold_grid", []),
-            }
-        ),
+        "threshold_optimization": {
+            "best_threshold": metrics.get("decision_threshold", 0.5),
+            "metric": metrics.get("threshold_metric"),
+            "best_score": metrics.get("threshold_score"),
+            "grid": metrics.get("threshold_grid", []),
+            "eligible": metrics.get("threshold_eligible"),
+            "selected_metrics": metrics.get("threshold_selected_metrics"),
+        },
         "feature_importance": feature_importance,
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
@@ -900,13 +1043,15 @@ def train_model(
         "calibrated": calibrated and (movement_calibrated if use_two_stage else True),
         "num_classes": num_classes,
         "target_type": (
-            "multiclass" if use_multiclass else
-            ("two_stage" if use_two_stage else "binary")
+            "multiclass"
+            if use_multiclass
+            else ("two_stage" if use_two_stage else "binary")
         ),
         "target_horizon_bars": 1 if mode == "daily" else (4 if use_two_stage else 1),
         "target_horizon": (
-            "next_trading_session" if mode == "daily" else
-            ("60min" if use_two_stage else "15min")
+            "next_trading_session"
+            if mode == "daily"
+            else ("60min" if use_two_stage else "15min")
         ),
         "class_weighted": scale_pos_weight is not None,
     }
@@ -950,7 +1095,9 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
 
     try:
         model = model_dict["model"]
-        feat_cols = model_dict.get("feature_schema", {}).get("features", model_dict["features"])
+        feat_cols = model_dict.get("feature_schema", {}).get(
+            "features", model_dict["features"]
+        )
         num_classes = model_dict.get("num_classes", 2)
         target_type = model_dict.get("target_type", "binary")
 
@@ -973,8 +1120,8 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
             flat_probability = 1.0 - movement_probability
             final_probability = direction_probability if movement_expected else 0.5
             decision_threshold = float(model_dict.get("decision_threshold", 0.5))
-            threshold_metric = (
-                (model_dict.get("threshold_optimization") or {}).get("metric")
+            threshold_metric = (model_dict.get("threshold_optimization") or {}).get(
+                "metric"
             )
             return {
                 "final_prob": final_probability,
@@ -1000,8 +1147,8 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         if num_classes == 2 or target_type == "binary":
             prob = float(proba[1])
             decision_threshold = float(model_dict.get("decision_threshold", 0.5))
-            threshold_metric = (
-                (model_dict.get("threshold_optimization") or {}).get("metric")
+            threshold_metric = (model_dict.get("threshold_optimization") or {}).get(
+                "metric"
             )
 
             # The saved artifact owns calibration. Applying a second external
@@ -1010,8 +1157,12 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
                 "final_prob": prob,
                 "decision_threshold": decision_threshold,
                 "threshold_metric": threshold_metric,
-                "position_size": probability_to_position_size(prob, decision_threshold=decision_threshold),
-                "top_features": model_dict.get("feature_importance", {}).get("top_features", [])[:5],
+                "position_size": probability_to_position_size(
+                    prob, decision_threshold=decision_threshold
+                ),
+                "top_features": model_dict.get("feature_importance", {}).get(
+                    "top_features", []
+                )[:5],
                 "model_type": "binary",
             }
 
@@ -1058,8 +1209,12 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         predicted_class = int(np.argmax(proba))
         confidence = float(np.max(proba))
         mid_point = actual_num_classes / 2.0
-        bullish_prob = float(sum(proba[i] for i in range(actual_num_classes) if i >= mid_point))
-        bearish_prob = float(sum(proba[i] for i in range(actual_num_classes) if i < mid_point))
+        bullish_prob = float(
+            sum(proba[i] for i in range(actual_num_classes) if i >= mid_point)
+        )
+        bearish_prob = float(
+            sum(proba[i] for i in range(actual_num_classes) if i < mid_point)
+        )
         if bullish_prob + bearish_prob > 0:
             final_prob = bullish_prob / (bullish_prob + bearish_prob)
         else:
@@ -1074,7 +1229,9 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
             "bullish_prob": bullish_prob,
             "bearish_prob": bearish_prob,
             "flat_prob": 0.0,
-            "class_breakdown": {f"class_{i}": float(proba[i]) for i in range(actual_num_classes)},
+            "class_breakdown": {
+                f"class_{i}": float(proba[i]) for i in range(actual_num_classes)
+            },
             "num_classes": actual_num_classes,
             "model_type": target_type,
         }
@@ -1090,6 +1247,7 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
         print(f"[ERROR] predict_from_model: {e}")
         traceback.print_exc()
         return None
+
 
 # ---------------------------------------------------------
 # HELPER: Extract final probability
@@ -1146,11 +1304,11 @@ def get_signal_details(prediction) -> str:
 
         details = f"{signal} ({final_prob:.1%})"
         details += f" | Prediction: {pred_class} (conf: {confidence:.1%})"
-        details += f" | [↓↓:{breakdown.get('strong_down', 0):.0%} "
-        details += f"↓:{breakdown.get('weak_down', 0):.0%} "
-        details += f"→:{breakdown.get('flat', 0):.0%} "
-        details += f"↑:{breakdown.get('weak_up', 0):.0%} "
-        details += f"↑↑:{breakdown.get('strong_up', 0):.0%}]"
+        details += f" | [â†“â†“:{breakdown.get('strong_down', 0):.0%} "
+        details += f"â†“:{breakdown.get('weak_down', 0):.0%} "
+        details += f"â†’:{breakdown.get('flat', 0):.0%} "
+        details += f"â†‘:{breakdown.get('weak_up', 0):.0%} "
+        details += f"â†‘â†‘:{breakdown.get('strong_up', 0):.0%}]"
         position_size = prediction.get("position_size")
         if position_size is not None:
             details += f" | size={position_size:+.2f}"
@@ -1168,7 +1326,11 @@ def fetch_vix_level() -> float:
         df_vix = fetch_historical_data("^VIX", period="5d", interval="1d")
         if df_vix is not None and not df_vix.empty:
             vix_close = df_vix["Close"]
-            vix_close = vix_close.iloc[:, 0] if isinstance(vix_close, pd.DataFrame) else vix_close
+            vix_close = (
+                vix_close.iloc[:, 0]
+                if isinstance(vix_close, pd.DataFrame)
+                else vix_close
+            )
             vix_close = vix_close.dropna()
             if len(vix_close) > 0:
                 return float(vix_close.iloc[-1])
@@ -1190,7 +1352,9 @@ def vix_market_regime_filter(prob: float, vix_level: float, symbol: str = "") ->
 
     if scale < 1.0:
         adjusted = 0.5 + (prob - 0.5) * scale
-        print(f"[VIX FILTER] {symbol} VIX={vix_level:.1f} -> scale={scale:.2f} | prob {prob:.3f} -> {adjusted:.3f}")
+        print(
+            f"[VIX FILTER] {symbol} VIX={vix_level:.1f} -> scale={scale:.2f} | prob {prob:.3f} -> {adjusted:.3f}"
+        )
         return float(adjusted)
 
     return float(prob)
@@ -1199,7 +1363,9 @@ def vix_market_regime_filter(prob: float, vix_level: float, symbol: str = "") ->
 # ---------------------------------------------------------
 # CONTRADICTION DETECTION
 # ---------------------------------------------------------
-def detect_contradiction(daily_prob, intraday_prob, momentum=None, symbol="", verbose=True):
+def detect_contradiction(
+    daily_prob, intraday_prob, momentum=None, symbol="", verbose=True
+):
     """Detect contradictions between daily and intraday signals."""
     if daily_prob is None or intraday_prob is None:
         return {"contradiction": False, "reason": "Missing data", "severity": "low"}
@@ -1212,9 +1378,8 @@ def detect_contradiction(daily_prob, intraday_prob, momentum=None, symbol="", ve
     intraday_bullish = intraday_prob > bullish_threshold
     intraday_bearish = intraday_prob < bearish_threshold
 
-    models_disagree = (
-        (daily_bullish and intraday_bearish) or
-        (daily_bearish and intraday_bullish)
+    models_disagree = (daily_bullish and intraday_bearish) or (
+        daily_bearish and intraday_bullish
     )
 
     if not models_disagree:
@@ -1229,9 +1394,8 @@ def detect_contradiction(daily_prob, intraday_prob, momentum=None, symbol="", ve
             print(f"[CONTRADICTION] {reason}")
         return {"contradiction": True, "reason": reason, "severity": "high"}
 
-    extreme_disagree = (
-        (daily_prob > 0.65 and intraday_prob < 0.35) or
-        (daily_prob < 0.35 and intraday_prob > 0.65)
+    extreme_disagree = (daily_prob > 0.65 and intraday_prob < 0.35) or (
+        daily_prob < 0.35 and intraday_prob > 0.65
     )
 
     if extreme_disagree:
@@ -1246,13 +1410,14 @@ def detect_contradiction(daily_prob, intraday_prob, momentum=None, symbol="", ve
 # ---------------------------------------------------------
 # COMPUTE SIGNALS (kept compatible; inference now uses strict schema)
 # ---------------------------------------------------------
-def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT, resample_to="15min"):
+def compute_signals(
+    symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT, resample_to="15min"
+):
     results = {
         "daily_prob": None,
         "intraday_prob": None,
         "final_prob": None,
         "price": None,
-        "intraday_weight": float(intraday_weight),
         "allow_intraday": True,
         "intraday_rows": 0,
         "intraday_before": 0,
@@ -1267,6 +1432,13 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
         "intraday_prediction": None,
         "daily_signal": None,
         "intraday_signal": None,
+        "intraday_weight": min(float(intraday_weight), 0.55),
+        "intraday_weight_base_capped": min(float(intraday_weight), 0.55),
+        "intraday_stale_factor": 1.0,
+        "daily_model_age_days": None,
+        "intraday_mr_model_age_days": None,
+        "intraday_mom_model_age_days": None,
+        "intraday_legacy_model_age_days": None,
     }
 
     symU = str(symbol).upper().strip()
@@ -1309,7 +1481,11 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                             mode="daily",
                             predicted_prob=float(dp),
                             price=float(current_price),
-                            prediction_details=daily_prediction if isinstance(daily_prediction, dict) else None,
+                            prediction_details=(
+                                daily_prediction
+                                if isinstance(daily_prediction, dict)
+                                else None
+                            ),
                         )
                 except Exception as e:
                     print(f"[WARN] Could not log daily prediction: {e}")
@@ -1331,12 +1507,14 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
     close = pd.Series(dtype=float)
 
     try:
-        candidate_lookbacks = sorted([
-            lookback_minutes,
-            max(lookback_minutes, 600),
-            max(lookback_minutes, 900),
-            max(lookback_minutes, 1200),
-        ])
+        candidate_lookbacks = sorted(
+            [
+                lookback_minutes,
+                max(lookback_minutes, 600),
+                max(lookback_minutes, 900),
+                max(lookback_minutes, 1200),
+            ]
+        )
 
         best_df = None
         best_len = 0
@@ -1345,7 +1523,9 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
         rt = str(resample_to).lower().replace("mins", "min").replace(" ", "")
 
         for lb in candidate_lookbacks:
-            df_raw = fetch_intraday_history(symU, lookback_minutes=lb, interval=resample_to)
+            df_raw = fetch_intraday_history(
+                symU, lookback_minutes=lb, interval=resample_to
+            )
             if df_raw is None or df_raw.empty:
                 continue
 
@@ -1368,9 +1548,14 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
         df_intra_resampled = best_df
         results["intraday_before"] = best_before
         results["used_lookback_minutes"] = best_lb
-        results["intraday_rows"] = 0 if df_intra_resampled is None else len(df_intra_resampled)
+        results["intraday_rows"] = (
+            0 if df_intra_resampled is None else len(df_intra_resampled)
+        )
 
-        if df_intra_resampled is None or len(df_intra_resampled) < MIN_INTRADAY_BARS_FOR_FEATURES:
+        if (
+            df_intra_resampled is None
+            or len(df_intra_resampled) < MIN_INTRADAY_BARS_FOR_FEATURES
+        ):
             results["allow_intraday"] = False
             results["intraday_prob"] = None
             results["intraday_quality_score"] = 0.0
@@ -1446,7 +1631,9 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                     ("intraday", model_intraday_legacy),
                 ]
 
-            candidate_models = [(name, mdl) for name, mdl in candidate_models if mdl is not None]
+            candidate_models = [
+                (name, mdl) for name, mdl in candidate_models if mdl is not None
+            ]
 
             if not candidate_models:
                 results["allow_intraday"] = False
@@ -1502,7 +1689,9 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                                 model_used = cand_name
                                 break
                         except Exception as e:
-                            print(f"[WARN] Intraday fallback skipped {symU}/{cand_name}: {e}")
+                            print(
+                                f"[WARN] Intraday fallback skipped {symU}/{cand_name}: {e}"
+                            )
                             continue
 
                     if intraday_prediction is None:
@@ -1517,16 +1706,24 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
                     ip = get_final_prob(intraday_prediction)
                     if ip is not None:
                         results["intraday_prob"] = float(ip)
-                        results["intraday_quality_score"] = min(1.0, len(df_intra_resampled) / 120.0)
+                        results["intraday_quality_score"] = min(
+                            1.0, len(df_intra_resampled) / 120.0
+                        )
                         try:
-                            current_price = results.get("price") or fetch_latest_price(symU)
+                            current_price = results.get("price") or fetch_latest_price(
+                                symU
+                            )
                             if current_price and float(current_price) > 0:
                                 log_prediction(
                                     symbol=symU,
                                     mode=model_used,
                                     predicted_prob=float(ip),
                                     price=float(current_price),
-                                    prediction_details=intraday_prediction if isinstance(intraday_prediction, dict) else None,
+                                    prediction_details=(
+                                        intraday_prediction
+                                        if isinstance(intraday_prediction, dict)
+                                        else None
+                                    ),
                                 )
                         except Exception as e:
                             print(f"[WARN] Could not log prediction: {e}")
@@ -1536,7 +1733,6 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
         results["allow_intraday"] = False
         results["intraday_prob"] = None
         results["intraday_quality_score"] = 0.0
-
 
     if results.get("price") is None:
         try:
@@ -1548,7 +1744,7 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
 
     # ===============================
     # FINAL PROBABILITY + WEIGHT LOGIC
-    # ===============================            
+    # ===============================
     dp = results["daily_prob"]
     ip = results["intraday_prob"]
 
@@ -1589,7 +1785,9 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
 
     # --- 5) Contradiction logic (unchanged, but now based on dp/ip) ---
     if dp is not None and ip is not None:
-        contradiction = detect_contradiction(dp, ip, momentum=mom1h, symbol=symU, verbose=True)
+        contradiction = detect_contradiction(
+            dp, ip, momentum=mom1h, symbol=symU, verbose=True
+        )
         results["contradiction_detected"] = contradiction["contradiction"]
         results["contradiction_reason"] = contradiction["reason"]
         results["contradiction_severity"] = contradiction["severity"]
@@ -1610,23 +1808,27 @@ def compute_signals(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT
     else:
         raw_final = float(weight * ip + (1 - weight) * dp)
         results["final_prob_raw"] = raw_final
-        results["final_prob"] = vix_market_regime_filter(raw_final, vix_level=vix_level, symbol=symU)
+        results["final_prob"] = vix_market_regime_filter(
+            raw_final, vix_level=vix_level, symbol=symU
+        )
 
     results["final_signal"] = get_signal_details(results["final_prob"])
     print(
-    f"[DEBUG] compute_signals({symU}) -> "
-    f"dp={results['daily_prob']} ip={results['intraday_prob']} "
-    f"fp={results['final_prob']} w={results.get('intraday_weight_used', results.get('intraday_weight'))}"
-)
+        f"[DEBUG] compute_signals({symU}) -> "
+        f"dp={results['daily_prob']} ip={results['intraday_prob']} "
+        f"fp={results['final_prob']} w={results.get('intraday_weight_used', results.get('intraday_weight'))}"
+    )
     return results
+
 
 # ---------------------------------------------------------
 # COMPATIBILITY WRAPPER
 # ---------------------------------------------------------
-def predict_next(symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT, resample_to="15min"):
+def predict_next(
+    symbol, lookback_minutes=60, intraday_weight=INTRADAY_WEIGHT, resample_to="15min"
+):
     sig = compute_signals(symbol, lookback_minutes, intraday_weight, resample_to)
     return sig.get("final_prob")
-
 
 
 # ---------------------------------------------------------
@@ -1715,9 +1917,10 @@ def probability_to_position_size(
     signed_edge = np.sign(edge)
     effective = max(0.0, abs(edge) - float(dead_zone))
     scale = max(1e-9, 0.5 - float(dead_zone))
-    size = signed_edge * min(float(max_position), effective / scale * float(max_position))
+    size = signed_edge * min(
+        float(max_position), effective / scale * float(max_position)
+    )
     return float(size)
-
 
 
 def extract_feature_importance(base_model, feature_names):
@@ -1740,10 +1943,12 @@ def extract_feature_importance(base_model, feature_names):
 
     pairs = []
     for feat, imp in zip(feature_names, importances):
-        pairs.append({
-            "feature": str(feat),
-            "importance": float(imp),
-        })
+        pairs.append(
+            {
+                "feature": str(feat),
+                "importance": float(imp),
+            }
+        )
 
     pairs = sorted(pairs, key=lambda x: x["importance"], reverse=True)
     return {
