@@ -23,7 +23,7 @@ from predictive_model.model_xgb import train_model, MODEL_DIR
 from predictive_model.model_evaluation import promotion_decision
 from config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS, USE_TWO_STAGE_TARGETS
 
-INTRADAY_LOOKBACK_DAYS = 180
+INTRADAY_LOOKBACK_DAYS = 60
 INTRADAY_INTERVAL = "15m"
 USE_MULTICLASS = USE_MULTICLASS_MODELS
 USE_TWO_STAGE = USE_TWO_STAGE_TARGETS
