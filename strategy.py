@@ -1702,8 +1702,8 @@ def check_relative_momentum_entry(
         failures.append(f"session={values['session_return']:.2%} outside +0.50%..+2.00%")
     if values["relative_session_return"] < 0.005:
         failures.append(f"vs_SPY={values['relative_session_return']:.2%} < +0.50%")
-    if values["relative_return_4"] < 0.002:
-        failures.append(f"rel_60m={values['relative_return_4']:.2%} < +0.20%")
+    if values["relative_return_4"] < 0.001:
+        failures.append(f"rel_60m={values['relative_return_4']:.2%} < +0.10%")
     if values["relative_strength_accel"] < -0.001:
         failures.append(f"accel={values['relative_strength_accel']:.2%} < -0.10%")
     if values["vwap_distance"] <= 0.0:
