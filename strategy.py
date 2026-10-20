@@ -1710,8 +1710,8 @@ def check_relative_momentum_entry(
         failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
     if values["vwap_slope_2"] <= 0.0:
         failures.append(f"VWAP_slope_30m={values['vwap_slope_2']:.2%} <= 0")
-    if values["volume_time_ratio"] < 0.80:
-        failures.append(f"volume_time={values['volume_time_ratio']:.2f} < 0.80")
+    if values["volume_time_ratio"] < 0.65:
+        failures.append(f"volume_time={values['volume_time_ratio']:.2f} < 0.65")
     if not 0.0 < values["intraday_mom"] <= 0.010:
         failures.append(f"momentum={values['intraday_mom']:.2%} outside 0..+1.00%")
     if probability < 0.50:
