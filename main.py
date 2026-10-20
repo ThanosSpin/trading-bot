@@ -164,7 +164,7 @@ def verify_runtime_environment():
 # ===============================================================
 # ✅ FIXED: Signal history logger with new schema
 # ===============================================================
-def log_signal_snapshot(sym: str, sig: dict) -> None:
+def log_signal_snapshot(sym: str, sig: dict, final_prob=None, intraday_weight=None) -> None:
     """
     Log signal snapshot with flexible schema handling.
     Auto-creates headers based on signal dict keys.
@@ -201,8 +201,8 @@ def log_signal_snapshot(sym: str, sig: dict) -> None:
             "price": sig.get("price"),
             "dailyprob": sig.get("daily_prob"),
             "intradayprob": sig.get("intraday_prob"),
-            "finalprob": sig.get("final_prob"),
-            "intradayweight": sig.get("intraday_weight"),
+            "finalprob": final_prob if final_prob is not None else sig.get("final_prob"),
+            "intradayweight": intraday_weight if intraday_weight is not None else sig.get("intraday_weight"),
             "intradaymodelused": sig.get("intraday_model_used"),
             "intradayqualityscore": sig.get("intraday_quality_score"),
             "intradayvol": sig.get("intraday_vol"),
@@ -250,9 +250,6 @@ def get_predictions(symbols, debug=True):
             f"[MAIN] {sym} regime={sig.get('intraday_regime')} model={sig.get('intraday_model_used')} ip={sig.get('intraday_prob')}"
         )
 
-        # ✅ log signal history for dashboard
-        log_signal_snapshot(sym, sig)
-
         if debug:
             print(f"\n[DEBUG] {sym} Signals Summary")
             print("------------------------------------")
@@ -294,6 +291,20 @@ def get_predictions(symbols, debug=True):
             # If intraday not allowed or missing, fall back to daily-only
             w = 0.0
 
+        model_used = str(sig.get("intraday_model_used") or "").strip().lower()
+        symU = str(sym).upper().strip()
+
+        # Temporary production soft-guard:
+        # NVDA intraday_mr looked directionally useful but poorly calibrated,
+        # so cap its influence and let the daily model dominate.
+        if symU == "NVDA" and model_used == "intraday_mr":
+            old_w = float(w)
+            w = min(old_w, 0.20)
+            print(
+                f"[PROD GUARD] {symU}: intraday_mr weight capped "
+                f"{old_w:.3f} -> {w:.3f}"
+            )
+
         if daily_prob is None and intraday_prob is None:
             print(f"[WARN] Invalid prediction for {sym}, skipping.")
             continue
@@ -312,6 +323,9 @@ def get_predictions(symbols, debug=True):
             f"[COMBINE] {sym}: daily={daily_prob} intraday={intraday_prob} "
             f"q={q} allow_intraday={allow_intraday} w={w:.3f} -> final={final_prob:.3f}"
         )
+
+        # ✅ log signal history for dashboard using production-adjusted values
+        log_signal_snapshot(sym, sig, final_prob=final_prob, intraday_weight=w)
 
         predictions[sym] = final_prob
 
@@ -1417,9 +1431,27 @@ def verify_trading_config():
     """
     print_banner("🔧 TRADING CONFIGURATION")
 
-    print(f"\n📊 Global Mode: {'LIVE TRADING' if USE_LIVE_TRADING else 'SIMULATION'}")
+    bot_env = get_active_env()
+    if bot_env == "paper":
+        global_mode = "PAPER TRADING"
+    elif USE_LIVE_TRADING:
+        global_mode = "LIVE TRADING"
+    else:
+        global_mode = "SIMULATION"
 
-    if USE_LIVE_TRADING:
+    print(f"\n📊 Global Mode: {global_mode}")
+
+    if bot_env == "paper":
+        print(f"\n🧪 Paper Trading Symbols:")
+        for symbol in SYMBOL:
+            print(f"   🧪 {symbol} → PAPER")
+
+            if symbol in PAPER_TRADE_NOTES:
+                notes = PAPER_TRADE_NOTES[symbol]
+                print(f"      Reason: {notes.get('reason', 'N/A')}")
+                print(f"      Review: {notes.get('review_date', 'N/A')}")
+
+    elif USE_LIVE_TRADING:
         print(f"\n✅ Live Trading Symbols:")
         for symbol in SYMBOL:
             if symbol.upper() not in [s.upper() for s in PAPER_TRADE_SYMBOLS]:
@@ -1434,12 +1466,14 @@ def verify_trading_config():
                     notes = PAPER_TRADE_NOTES[symbol]
                     print(f"      Reason: {notes.get('reason', 'N/A')}")
                     print(f"      Review: {notes.get('review_date', 'N/A')}")
+
     else:
         print(f"\n📝 All symbols in simulation mode:")
         for symbol in SYMBOL:
             print(f"   📝 {symbol}")
 
     print_banner()
+
 
 
 # ===============================================================
