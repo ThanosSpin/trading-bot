@@ -220,19 +220,16 @@ def train_intraday_models(sym: str):
                 "lacks two classes in fit/calibration",
             )
 
-            if any(reason in msg for reason in expected_skip_reasons):
+            if (
+                any(reason in msg for reason in expected_skip_reasons)
+                or "walk-forward" in msg.lower()
+                or "fold" in msg.lower()
+            ):
                 print(f"⚠️ Skipped {sym}/{mode}: {msg}")
                 continue
 
             print(f"[ERROR] Failed to train {mode} for {sym}: {e}")
             import traceback
-
-            traceback.print_exc()
-
-        except Exception as e:
-            print(f"[ERROR] Failed to train {mode} for {sym}: {e}")
-            import traceback
-
             traceback.print_exc()
 
 

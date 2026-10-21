@@ -74,13 +74,6 @@ def select_features_with_shap(
     mode: str = "daily",
     correlation_prune_threshold: float = 0.97,
 ) -> tuple:
-    """
-    Use SHAP to select most important features.
-    IMPORTANT: selection is done on calibration data, not final test data.
-
-    Returns:
-    (top_features_list, shap_values_cal, X_train_reduced, X_cal_reduced, metadata)
-    """
     n_samples, n_features = X_train.shape
 
     if top_n is None:
@@ -103,82 +96,74 @@ def select_features_with_shap(
     model_dir = MODEL_DIR if MODEL_DIR else "models"
     os.makedirs(model_dir, exist_ok=True)
 
-    print(f"\n[PRUNE] Correlation pruning before SHAP...")
-    preserve = [c for c in X_train.columns if c.startswith("spy_") or c.startswith("is_")]
-    X_train_pruned, dropped_corr = prune_correlated_features(
-        X_train,
-        threshold=correlation_prune_threshold,
-        preserve=preserve,
-    )
-    X_cal_pruned = X_cal[X_train_pruned.columns].copy()
-
-    print(f"[PRUNE] Dropped {len(dropped_corr)} correlated features")
-    print(f"[PRUNE] Remaining features: {X_train_pruned.shape[1]}")
+    X_train_full = X_train.copy()
+    X_cal_full = X_cal[X_train_full.columns].copy()
 
     print(f"\n[SHAP] Creating TreeExplainer...")
     explainer = shap.TreeExplainer(model)
 
-    print(f"[SHAP] Computing SHAP values on {len(X_cal_pruned)} calibration samples...")
-    shap_values = explainer.shap_values(X_cal_pruned)
+    print(f"[SHAP] Computing SHAP values on {len(X_cal_full)} calibration samples...")
+    shap_values = explainer.shap_values(X_cal_full)
+
+    if isinstance(shap_values, list):
+        shap_array = np.mean([np.abs(sv) for sv in shap_values], axis=0)
+    else:
+        shap_array = np.abs(shap_values)
+
+    if shap_array.ndim == 3:
+        shap_importance_values = shap_array.mean(axis=(0, 2))
+    elif shap_array.ndim == 2:
+        shap_importance_values = shap_array.mean(axis=0)
+    else:
+        raise ValueError(f"Unexpected SHAP shape: {shap_array.shape}")
 
     feature_importance = pd.DataFrame({
-        "feature": X_cal_pruned.columns,
-        "shap_importance": np.abs(shap_values).mean(axis=0),
+        "feature": X_train_full.columns,
+        "shap_importance": shap_importance_values,
     }).sort_values("shap_importance", ascending=False)
 
-    top_features = feature_importance.head(top_n)["feature"].tolist()
+    print(f"\n[PRUNE] Correlation pruning after SHAP ranking...")
+    preserve = [c for c in X_train_full.columns if c.startswith("spy_") or c.startswith("is_")]
+    X_train_pruned, dropped_corr = prune_correlated_features(
+        X_train_full,
+        threshold=correlation_prune_threshold,
+        preserve=preserve,
+    )
+    allowed_features = set(X_train_pruned.columns)
+
+    ranked_features = feature_importance["feature"].tolist()
+    top_features = [f for f in ranked_features if f in allowed_features][:top_n]
+
+    if len(top_features) < 10:
+        top_features = ranked_features[:top_n]
 
     total_importance = feature_importance["shap_importance"].sum()
-    top_n_importance = feature_importance.head(top_n)["shap_importance"].sum()
+    top_n_importance = feature_importance[
+        feature_importance["feature"].isin(top_features)
+    ]["shap_importance"].sum()
     coverage = (top_n_importance / total_importance * 100) if total_importance > 1e-12 else 0.0
 
-    print(f"\n[SHAP] Selected Top {top_n} Features (covering {coverage:.1f}% of total importance)")
+    print(f"[PRUNE] Dropped {len(dropped_corr)} correlated features")
+    print(f"[PRUNE] Remaining features: {X_train_pruned.shape[1]}")
+
+    print(f"\n[SHAP] Selected Top {len(top_features)} Features (covering {coverage:.1f}% of total importance)")
     print("=" * 70)
     print(f"{'Rank':<6} {'Feature':<35} {'SHAP Importance':<15} {'Cumulative %'}")
     print("-" * 70)
 
     cumulative_importance = 0.0
-    for rank, (_, row) in enumerate(feature_importance.head(top_n).iterrows(), start=1):
+    selected_rows = feature_importance[feature_importance["feature"].isin(top_features)].copy()
+    selected_rows["rank_order"] = pd.Categorical(selected_rows["feature"], categories=top_features, ordered=True)
+    selected_rows = selected_rows.sort_values("rank_order")
+
+    for rank, (_, row) in enumerate(selected_rows.iterrows(), start=1):
         cumulative_importance += row["shap_importance"]
         cumulative_pct = (cumulative_importance / total_importance * 100) if total_importance > 1e-12 else 0.0
         print(f"{rank:<6} {row['feature']:<35} {row['shap_importance']:<15.6f} {cumulative_pct:>6.1f}%")
     print("=" * 70)
 
-    if plot:
-        try:
-            summary_filename = f"{symbol}_{mode}_shap_summary_top{top_n}.png"
-            importance_filename = f"{symbol}_{mode}_shap_importance_top{top_n}.png"
-            summary_path = os.path.join(model_dir, summary_filename)
-            importance_path = os.path.join(model_dir, importance_filename)
-
-            print(f"\n[SHAP] Generating plots...")
-            plt.figure(figsize=(12, 8))
-            shap.summary_plot(shap_values, X_cal_pruned, max_display=min(top_n, 30), show=False)
-            plt.title(f"SHAP Feature Summary - {symbol} {mode.upper()} (Top {top_n})", fontsize=14, fontweight="bold")
-            plt.tight_layout()
-            plt.savefig(summary_path, dpi=150, bbox_inches="tight")
-            plt.close()
-
-            fig, ax = plt.subplots(figsize=(12, 10))
-            display_count = min(30, top_n)
-            top_display = feature_importance.head(display_count)
-            colors = plt.cm.viridis(np.linspace(0, 1, len(top_display)))
-            bars = ax.barh(range(len(top_display)), top_display["shap_importance"], color=colors)
-            ax.set_yticks(range(len(top_display)))
-            ax.set_yticklabels(top_display["feature"], fontsize=9)
-            ax.set_xlabel("Mean |SHAP value|", fontsize=11)
-            ax.set_title(f"Feature Importance - {symbol} {mode.upper()} (Top {display_count})", fontsize=14, fontweight="bold")
-            ax.invert_yaxis()
-            for i, (bar, val) in enumerate(zip(bars, top_display["shap_importance"])):
-                ax.text(val, i, f" {val:.4f}", va="center", fontsize=8)
-            plt.tight_layout()
-            plt.savefig(importance_path, dpi=150, bbox_inches="tight")
-            plt.close()
-        except Exception as e:
-            print(f"[SHAP] Could not create plots: {e}")
-
-    X_train_reduced = X_train[top_features].copy()
-    X_cal_reduced = X_cal[top_features].copy()
+    X_train_reduced = X_train_full[top_features].copy()
+    X_cal_reduced = X_cal_full[top_features].copy()
 
     metadata = {
         "selection_window": "calibration",
@@ -190,8 +175,8 @@ def select_features_with_shap(
     }
 
     print(f"\n[SHAP] Feature Reduction Complete")
-    print(f" Original: {len(X_train.columns)} features")
-    print(f" Reduced: {len(top_features)} features ({len(top_features) / len(X_train.columns) * 100:.1f}%)")
+    print(f" Original: {len(X_train_full.columns)} features")
+    print(f" Reduced: {len(top_features)} features ({len(top_features) / len(X_train_full.columns) * 100:.1f}%)")
     print(f" Coverage: {coverage:.1f}% of total SHAP importance\n")
 
     return top_features, shap_values, X_train_reduced, X_cal_reduced, metadata

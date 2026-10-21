@@ -57,6 +57,12 @@ _calibrator_cache = {}
 
 warnings.filterwarnings("ignore", message=".*cv='prefit'.*")
 
+INTRADAY_TARGET_OVERRIDES = {
+    ("SPY", "intraday_mr"): {
+        "min_move": 0.0005,
+    },
+}
+
 
 # ---------------------------------------------------------
 # Utility
@@ -207,41 +213,109 @@ def _time_ordered_train_cal_test_split(
     return X_train, y_train, X_cal, y_cal, X_test, y_test
 
 
+def _chronological_class_counts(
+    y: pd.Series,
+    train_frac: float = 0.60,
+    cal_frac: float = 0.20,
+) -> Dict[str, Dict[int, int]]:
+    """
+    Return chronological class counts for train/cal/test windows without
+    requiring a full X matrix. Useful for pre-flight diagnostics before
+    walk-forward and split validation.
+    """
+    y = pd.Series(y).dropna().astype(int)
+    n = len(y)
+    if n <= 0:
+        return {
+            "train": {},
+            "cal": {},
+            "test": {},
+            "n": 0,
+        }
+
+    train_end = int(n * train_frac)
+    cal_end = int(n * (train_frac + cal_frac))
+
+    y_train = y.iloc[:train_end]
+    y_cal = y.iloc[train_end:cal_end]
+    y_test = y.iloc[cal_end:]
+
+    return {
+        "train": y_train.value_counts().sort_index().astype(int).to_dict(),
+        "cal": y_cal.value_counts().sort_index().astype(int).to_dict(),
+        "test": y_test.value_counts().sort_index().astype(int).to_dict(),
+        "n": int(n),
+    }
+
+
+def _print_chronological_class_counts(
+    label: str,
+    y: pd.Series,
+    train_frac: float = 0.60,
+    cal_frac: float = 0.20,
+) -> Dict[str, Dict[int, int]]:
+    counts = _chronological_class_counts(
+        y,
+        train_frac=train_frac,
+        cal_frac=cal_frac,
+    )
+    print(
+        f"[CLASS TIMELINE] {label}: "
+        f"n={counts['n']} "
+        f"train={counts['train']} "
+        f"cal={counts['cal']} "
+        f"test={counts['test']}"
+    )
+    return counts
+
+
 def _build_thresholded_binary_target(
     df_feat: pd.DataFrame,
     mode: str,
     use_two_stage: bool = False,
+    min_move_override: Optional[float] = None,
 ) -> pd.DataFrame:
     """
-    Binary target with a no-trade band to reduce micro-noise labels.
+    Create the binary training target and evaluation target.
+
+    Training target:
+      1 = forward return above +min_move
+      0 = forward return below -min_move
+      NaN = neutral/no-trade observation
+
+    Evaluation target:
+      1 = non-negative movement target
+      0 = otherwise, including neutral observations
     """
     df_feat = df_feat.copy()
+
     if "Close" not in df_feat.columns:
         raise ValueError("Close column is required for target creation")
 
     horizon_bars = 1 if mode == "daily" else (4 if use_two_stage else 1)
-    next_ret = df_feat["Close"].shift(-horizon_bars) / df_feat["Close"] - 1.0
-    # A four-bar intraday horizon needs a wider meaningful-move band than the
-    # legacy one-bar target; otherwise momentum-regime calibration windows can
-    # contain almost no neutral observations for the movement classifier.
-    min_move = 0.002 if mode == "daily" or use_two_stage else 0.0008
 
-    # Retain the realized next-bar return for cost-aware out-of-fold evaluation.
-    # It is explicitly excluded from the feature matrix below.
+    close = pd.to_numeric(df_feat["Close"], errors="coerce")
+    next_ret = close.shift(-horizon_bars) / close - 1.0
+
+    default_min_move = 0.002 if mode == "daily" or use_two_stage else 0.0008
+    min_move = (
+        float(min_move_override) if min_move_override is not None else default_min_move
+    )
+
     df_feat["forward_return"] = next_ret
 
-    # Training keeps a no-trade band, but deployment evaluation must include
-    # every eligible bar. Neutral moves are therefore negative evaluation
-    # outcomes even though they are excluded from model fitting.
+    valid_return = next_ret.notna()
+
     df_feat["evaluation_target"] = np.where(
-        next_ret.isna(),
+        valid_return,
+        (next_ret > 0.0).astype(int),
         np.nan,
-        (next_ret > min_move).astype(int),
     )
+
     df_feat["movement_target"] = np.where(
-        next_ret.isna(),
-        np.nan,
+        valid_return,
         (next_ret.abs() >= min_move).astype(int),
+        np.nan,
     )
 
     df_feat["target"] = np.where(
@@ -249,6 +323,27 @@ def _build_thresholded_binary_target(
         1,
         np.where(next_ret < -min_move, 0, np.nan),
     )
+
+    valid_count = int(valid_return.sum())
+    neutral_count = int((valid_return & (next_ret.abs() <= min_move)).sum())
+    labeled_count = int(df_feat["target"].notna().sum())
+
+    print(
+        f"[TARGET DIAGNOSTICS] mode={mode} "
+        f"horizon_bars={horizon_bars} "
+        f"min_move={min_move:.5f} "
+        f"eligible={valid_count} "
+        f"labeled={labeled_count} "
+        f"neutral={neutral_count} "
+        f"neutral_rate="
+        f"{neutral_count / valid_count:.2%}"
+        if valid_count
+        else f"[TARGET DIAGNOSTICS] mode={mode} "
+        f"horizon_bars={horizon_bars} "
+        f"min_move={min_move:.5f} "
+        f"eligible=0 labeled=0 neutral=0 neutral_rate=0.00%"
+    )
+
     return df_feat
 
 
@@ -360,6 +455,17 @@ def train_model(
 
     if use_two_stage is None:
         use_two_stage = bool(USE_TWO_STAGE_TARGETS)
+
+    spy_intraday_mr_force_two_stage = (
+        str(symbol).upper() == "SPY" and mode == "intraday_mr"
+    )
+    if spy_intraday_mr_force_two_stage and not use_multiclass:
+        use_two_stage = True
+        print(
+            "[TARGET CONFIG] SPY/intraday_mr forcing two-stage target "
+            "(4-bar / 60min horizon) for denser MR labels"
+        )
+
     if use_multiclass and use_two_stage:
         raise ValueError("multiclass and two-stage targets cannot be enabled together")
 
@@ -413,8 +519,29 @@ def train_model(
         print_target_distribution(df_feat, target_col)
     else:
         print("\n[TARGET] Creating thresholded binary target...")
+        target_override = INTRADAY_TARGET_OVERRIDES.get((symbol.upper(), mode))
+
+        min_move_override = None
+        if target_override:
+            min_move_override = target_override.get("min_move")
+
+        if spy_intraday_mr_force_two_stage:
+            print(
+                f"[TARGET CONFIG] {symbol}/{mode} "
+                f"force_two_stage=True horizon_bars=4 target_horizon=60min"
+            )
+
+        if target_override:
+            print(
+                f"[TARGET CONFIG] {symbol}/{mode} "
+                f"min_move_override={min_move_override}"
+            )
+
         df_feat = _build_thresholded_binary_target(
-            df_feat, mode=mode, use_two_stage=use_two_stage
+            df_feat,
+            mode=mode,
+            use_two_stage=use_two_stage,
+            min_move_override=min_move_override,
         )
         binary_evaluation_frame = df_feat.copy()
         target_col = "target"
@@ -556,13 +683,24 @@ def train_model(
     print(f"[SPLIT] Cal classes: {y_cal.value_counts().to_dict()}")
     print(f"[SPLIT] Test classes: {y_test.value_counts().to_dict()}")
 
+    _print_chronological_class_counts(
+        f"{symbol}/{mode} training_target",
+        y,
+    )
+
     if len(sorted(y_train.unique())) < 2:
         raise ValueError("Train set has fewer than 2 classes.")
-    if num_classes == 2 and len(sorted(y_cal.unique())) < 2:
-        raise ValueError("Calibration set has fewer than 2 classes.")
-    if len(sorted(y_test.unique())) < 2:
-        print(
-            "[WARN] Final test set has one class; ROC AUC and some calibration metrics may be unavailable."
+    if num_classes == 2 and evaluation_target is not None:
+        _print_chronological_class_counts(
+            f"{symbol}/{mode} evaluation_target",
+            evaluation_target,
+        )
+
+    if num_classes == 2 and evaluation_training_target is not None:
+        eval_labeled = evaluation_training_target.dropna().astype(int)
+        _print_chronological_class_counts(
+            f"{symbol}/{mode} wf_labeled_training_target",
+            eval_labeled,
         )
 
     print("\n[CLASS BALANCE] Analyzing train-set class distribution...")
@@ -620,7 +758,15 @@ def train_model(
     selected_feature_metadata = None
     selected_features = feature_list
 
-    if num_classes == 2 and len(X_train.columns) >= 25 and len(X_cal) >= 50:
+    print(
+        "[FEATURE SELECTION] Eligibility: "
+        f"num_classes={num_classes}, "
+        f"use_two_stage={use_two_stage}, "
+        f"train_features={len(X_train.columns)}, "
+        f"cal_rows={len(X_cal)}"
+    )
+
+    if num_classes == 2 and len(X_train.columns) >= 25 and len(X_cal.columns) >= 50:
         try:
             print(f"\n[FEATURE SELECTION] Running calibration-window SHAP selection...")
             top_features, _shap_values, X_train_sel, X_cal_sel, fs_meta = (
@@ -653,9 +799,8 @@ def train_model(
                     f"[FEATURE SELECTION] Too few features selected; keeping full schema"
                 )
         except Exception as e:
-            # print(f"[FEATURE SELECTION] Skipping due to error: {e}")
             print(
-                "[FEATURE SELECTION] Skipping SHAP feature selection due to XGBoost shape mismatch."
+                f"[FEATURE SELECTION] Skipping SHAP feature selection due to error: {type(e).__name__}: {e}"
             )
 
     walk_forward_evaluation = None
@@ -664,6 +809,23 @@ def train_model(
         # Give every fold the full pre-selection schema. When the final model
         # selected a smaller schema, each fold independently selects the same
         # number of features using only its own fit window.
+        eval_counts = _print_chronological_class_counts(
+            f"{symbol}/{mode} walk_forward_eval_target",
+            evaluation_target,
+        )
+
+        min_eval_classes = min(
+            len(eval_counts["train"]),
+            len(eval_counts["cal"]),
+            len(eval_counts["test"]),
+        )
+        if min_eval_classes < 2:
+            raise ValueError(
+                f"walk-forward precheck failed for {symbol}/{mode}: "
+                f"evaluation target lacks class diversity across chronological windows "
+                f"(train={eval_counts['train']}, cal={eval_counts['cal']}, test={eval_counts['test']})"
+            )
+
         walk_forward_evaluation = evaluate_walk_forward(
             X=evaluation_X,
             y=evaluation_target,
@@ -675,8 +837,8 @@ def train_model(
             gap_bars=MODEL_EVAL_GAP_BARS,
             cost_bps=MODEL_EVAL_TRANSACTION_COST_BPS,
             max_features=len(feature_list),
-            movement_target=(evaluation_movement_target if use_two_stage else None),
-            holding_period_bars=(4 if use_two_stage and mode != "daily" else 1),
+            movement_target=evaluation_movement_target if use_two_stage else None,
+            holding_period_bars=4 if use_two_stage and mode != "daily" else 1,
         )
         wf_metrics = walk_forward_evaluation["aggregate"]
         print(
@@ -818,7 +980,9 @@ def train_model(
             wf_trade_count = None
             if walk_forward_evaluation:
                 wf_threshold = walk_forward_evaluation.get("decision_threshold")
-                wf_trade_count = (walk_forward_evaluation.get("aggregate") or {}).get("trade_count")
+                wf_trade_count = (walk_forward_evaluation.get("aggregate") or {}).get(
+                    "trade_count"
+                )
 
             print(
                 f"[THRESHOLD CONSISTENCY] {symbol}/{mode} "
@@ -1034,17 +1198,18 @@ def train_model(
         "movement_model": movement_model,
         "movement_threshold": movement_threshold,
         "base_model": base_model,
-        "features": feature_list,
+        # Features actually expected by the trained final model.
+        "features": list(selected_features),
+        # Canonical inference schema for the final model.
         "feature_schema": {
-            "features": feature_list,
-            "feature_count": len(feature_list),
-            "target_type": (
-                "multiclass"
-                if use_multiclass
-                else ("two_stage" if use_two_stage else "binary")
-            ),
+            "features": list(selected_features),
+            "feature_count": len(selected_features),
         },
-        "full_feature_schema": full_feature_schema,
+        # Original schema before SHAP selection.
+        "full_feature_schema": {
+            "features": list(full_feature_schema["features"]),
+            "feature_count": int(full_feature_schema["feature_count"]),
+        },
         "selected_feature_metadata": selected_feature_metadata,
         "split_metadata": {
             "train_samples": len(X_train),
@@ -1075,7 +1240,7 @@ def train_model(
             if use_multiclass
             else ("two_stage" if use_two_stage else "binary")
         ),
-        "target_horizon_bars": 1 if mode == "daily" else (4 if use_two_stage else 1),
+        "target_horizon_bars": (1 if mode == "daily" else (4 if use_two_stage else 1)),
         "target_horizon": (
             "next_trading_session"
             if mode == "daily"
@@ -1123,16 +1288,26 @@ def predict_from_model(model_dict, df_features: pd.DataFrame):
 
     try:
         model = model_dict["model"]
-        feat_cols = model_dict.get("feature_schema", {}).get(
-            "features", model_dict["features"]
-        )
+
+        schema = model_dict.get("feature_schema")
+        if isinstance(schema, dict):
+            featcols = schema.get("features", [])
+        else:
+            featcols = schema or model_dict.get("features", [])
+
+        if not featcols:
+            raise ValueError("Model artifact has no selected feature schema")
+
         num_classes = model_dict.get("num_classes", 2)
         target_type = model_dict.get("target_type", "binary")
 
         latest = df_features.tail(1).copy()
-        latest = _validate_exact_feature_schema(latest, feat_cols, allow_extra=True)
-        X = latest.loc[:, feat_cols].copy()
-
+        latest = _validate_exact_feature_schema(
+            latest,
+            featcols,
+            allow_extra=True,
+        )
+        X = latest.loc[:, featcols].copy()
         proba = model.predict_proba(X)[0]
 
         if target_type == "two_stage":

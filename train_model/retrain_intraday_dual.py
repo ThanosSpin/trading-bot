@@ -30,7 +30,7 @@ USE_TWO_STAGE = USE_TWO_STAGE_TARGETS
 FORCE_RETRAIN = True
 
 
-def _save_artifact(artifact, symbol: str, mode: str) -> bool:
+def _save_artifact(artifact, symbol: str, mode: str) -> dict:
     """Promote a challenger only when it passes the shared evaluation gate."""
     model_dir = MODEL_DIR if MODEL_DIR else "models"
     os.makedirs(model_dir, exist_ok=True)
@@ -42,12 +42,15 @@ def _save_artifact(artifact, symbol: str, mode: str) -> bool:
         champion = joblib.load(path) if os.path.exists(path) else None
         decision = promotion_decision(artifact, champion)
         artifact["promotion_evaluation"] = decision
+
         if not decision["accepted"]:
-            print(
-                f"[PROMOTION REJECTED] {symbol}/{mode}: "
-                + "; ".join(decision["reasons"])
-            )
-            return False
+            reason = "; ".join(decision["reasons"])
+            print(f"[PROMOTION REJECTED] {symbol}/{mode}: {reason}")
+            return {
+                "success": False,
+                "status": "rejected",
+                "reason": reason,
+            }
 
         temporary_path = f"{path}.challenger"
         joblib.dump(artifact, temporary_path)
@@ -59,24 +62,64 @@ def _save_artifact(artifact, symbol: str, mode: str) -> bool:
                 f"✅ Promoted {symbol} {mode}: {abs_path} ({file_size_kb:.1f} KB) "
                 f"({decision['kind']}, overlap={decision['overlap_samples']})"
             )
-            return True
+            return {
+                "success": True,
+                "status": "promoted",
+                "reason": "Saved successfully",
+            }
 
         print(f"❌ Failed to save {symbol} {mode} - file not found after save")
-        return False
+        return {
+            "success": False,
+            "status": "save_error",
+            "reason": "File not found after save",
+        }
 
     except Exception as e:
         print(f"❌ Error saving {symbol} {mode}: {e}")
         traceback.print_exc()
-        return False
+        return {
+            "success": False,
+            "status": "save_error",
+            "reason": f"{type(e).__name__}: {e}",
+        }
 
 
 def _print_artifact_summary(artifact: dict, symbol: str, mode: str) -> None:
-    """Print concise summary from patched artifact."""
-    metrics = artifact.get("metrics", {}) or {}
-    split_metadata = artifact.get("split_metadata", {}) or {}
-    threshold_info = artifact.get("threshold_optimization", {}) or {}
-    features = artifact.get("features", []) or []
-    full_feature_schema = artifact.get("full_feature_schema", []) or []
+    """Print concise summary from a trained model artifact."""
+    metrics = artifact.get("metrics") or {}
+    split_metadata = artifact.get("split_metadata") or {}
+    feature_schema = artifact.get("feature_schema") or {}
+    full_feature_schema = artifact.get("full_feature_schema") or {}
+
+    selected_features = []
+    if isinstance(feature_schema, dict):
+        selected_features = feature_schema.get("features", []) or []
+    if not selected_features:
+        selected_features = artifact.get("features", []) or []
+        if isinstance(selected_features, dict):
+            selected_features = selected_features.get("features", []) or []
+
+    if isinstance(full_feature_schema, dict):
+        full_features = full_feature_schema.get("features", []) or []
+        full_feature_count = full_feature_schema.get("feature_count", len(full_features))
+    else:
+        full_features = full_feature_schema or []
+        full_feature_count = len(full_features)
+
+    if not isinstance(split_metadata, dict):
+        split_metadata = {}
+
+    train_rows = split_metadata.get("train_samples", split_metadata.get("train_rows"))
+    cal_rows = split_metadata.get("calibration_samples", split_metadata.get("cal_rows"))
+    test_rows = split_metadata.get("test_samples", split_metadata.get("test_rows"))
+
+    selected_count = len(selected_features)
+
+    try:
+        full_feature_count = int(full_feature_count)
+    except (TypeError, ValueError):
+        full_feature_count = len(full_features)
 
     print("\n📊 Model Summary")
     print(f"   Symbol: {symbol}")
@@ -84,27 +127,30 @@ def _print_artifact_summary(artifact: dict, symbol: str, mode: str) -> None:
     print(f"   Calibrated: {artifact.get('calibrated', False)}")
     print(f"   Target type: {artifact.get('target_type', 'binary')}")
     print(f"   Num classes: {artifact.get('num_classes', 2)}")
-    print(f"   Selected features: {len(features)}")
-    print(f"   Full feature schema: {len(full_feature_schema)}")
+    print(f"   Selected features: {selected_count}")
+    print(f"   Full feature schema: {full_feature_count}")
+    print(f"   Split sizes: train={train_rows} cal={cal_rows} test={test_rows}")
 
-    if split_metadata:
-        print(
-            "   Split sizes: "
-            f"train={split_metadata.get('train_rows')} "
-            f"cal={split_metadata.get('cal_rows')} "
-            f"test={split_metadata.get('test_rows')}"
-        )
+    threshold = artifact.get("decision_threshold")
+    if threshold is not None:
+        print(f"   Threshold: {float(threshold):.2f}")
 
-    if threshold_info:
-        print(
-            "   Threshold: "
-            f"{threshold_info.get('best_threshold', artifact.get('decision_threshold', 0.5))}"
-        )
+    metric_aliases = {
+        "accuracy": "accuracy",
+        "logloss": "logloss",
+        "f1": "f1",
+        "precision": "precision",
+        "recall": "recall",
+        "brier_score": "brier_score",
+    }
 
-    for key in ["accuracy", "logloss", "rocauc", "f1", "precision", "recall", "brier_score"]:
-        val = metrics.get(key)
-        if val is not None:
-            print(f"   {key}: {val:.4f}")
+    for label, key in metric_aliases.items():
+        value = metrics.get(key)
+        if value is not None:
+            try:
+                print(f"   {label}: {float(value):.4f}")
+            except (TypeError, ValueError):
+                print(f"   {label}: {value}")
 
 
 def _train_regime_model(df, symbol: str, mode: str, use_multiclass: bool = True):
@@ -153,17 +199,33 @@ def _train_regime_model(df, symbol: str, mode: str, use_multiclass: bool = True)
         return artifact
 
     except ValueError as e:
-        error_msg = str(e)
+        msg = str(e)
+
+        expected_skip_reasons = (
+            "Insufficient class diversity",
+            "not enough filtered data",
+            "Not enough rows for robust train/cal/test split",
+            "At least 100 chronological rows are required",
+            "Invalid chronological split boundaries",
+            "Train set has fewer than 2 classes",
+            "Calibration set has fewer than 2 classes",
+            "Two-stage movement model requires two train/calibration classes",
+            "No valid regime rows",
+            "Insufficient pre-split rows to fit regime thresholds",
+            "Regime thresholds are not finite",
+            "lacks two classes in fit/calibration",
+        )
+
         if (
-            "Insufficient class diversity" in error_msg
-            or "not enough filtered data" in error_msg
-            or "insufficient rows" in error_msg.lower()
+            any(reason in msg for reason in expected_skip_reasons)
+            or "walk-forward" in msg.lower()
+            or "fold" in msg.lower()
+            or "insufficient rows" in msg.lower()
         ):
-            print(f"⚠️ Expected training skip for {symbol} {mode}:")
-            print(f"   {error_msg}")
-            print("   This can be normal when regime-filtered data is too small.")
-        else:
-            print(f"⚠️ ValueError for {symbol} {mode}: {e}")
+            print(f"⚠️ Skipped {symbol}/{mode}: {msg}")
+            return None
+
+        print(f"⚠️ ValueError for {symbol}/{mode}: {e}")
         return None
 
     except Exception as e:
@@ -180,21 +242,32 @@ def _print_summary(results: dict) -> None:
     print(f"{'=' * 60}")
 
     total_models = len(results)
-    successful = sum(1 for v in results.values() if v["success"])
-    failed = total_models - successful
+    successful = sum(1 for v in results.values() if v.get("status") == "promoted")
+    rejected = sum(1 for v in results.values() if v.get("status") == "rejected")
+    failed = sum(
+        1 for v in results.values()
+        if v.get("status") in ("training_failed", "save_error")
+    )
 
     print(f"Total models: {total_models}")
     print(f"Successful: {successful} ({(successful / total_models * 100):.1f}%)" if total_models else "Successful: 0")
+    print(f"Rejected: {rejected} ({(rejected / total_models * 100):.1f}%)" if total_models else "Rejected: 0")
     print(f"Failed: {failed} ({(failed / total_models * 100):.1f}%)" if total_models else "Failed: 0")
 
     print("\nDetailed Results:")
-    print(f"{'Symbol':<8} {'Mode':<15} {'Status':<10} {'Reason'}")
-    print(f"{'-' * 70}")
+    print(f"{'Symbol':<8} {'Mode':<15} {'Status':<12} {'Reason'}")
+    print(f"{'-' * 80}")
 
     for (sym, mode), info in sorted(results.items()):
-        status = "✅ Success" if info["success"] else "❌ Failed"
+        status_map = {
+            "promoted": "✅ Success",
+            "rejected": "⛔ Rejected",
+            "training_failed": "❌ Failed",
+            "save_error": "❌ SaveErr",
+        }
+        status = status_map.get(info.get("status"), "❌ Failed")
         reason = info.get("reason", "")
-        print(f"{sym:<8} {mode:<15} {status:<10} {reason}")
+        print(f"{sym:<8} {mode:<15} {status:<12} {reason}")
 
     print(f"{'=' * 60}\n")
 
@@ -249,14 +322,12 @@ def main():
             use_multiclass=USE_MULTICLASS,
         )
         if artifact_mr:
-            success = _save_artifact(artifact_mr, sym, "intraday_mr")
-            results[(sym, "intraday_mr")] = {
-                "success": success,
-                "reason": "Saved successfully" if success else "Save failed",
-            }
+            save_result = _save_artifact(artifact_mr, sym, "intraday_mr")
+            results[(sym, "intraday_mr")] = save_result
         else:
             results[(sym, "intraday_mr")] = {
                 "success": False,
+                "status": "training_failed",
                 "reason": "Training failed",
             }
 
@@ -267,14 +338,12 @@ def main():
             use_multiclass=USE_MULTICLASS,
         )
         if artifact_mom:
-            success = _save_artifact(artifact_mom, sym, "intraday_mom")
-            results[(sym, "intraday_mom")] = {
-                "success": success,
-                "reason": "Saved successfully" if success else "Save failed",
-            }
+            save_result = _save_artifact(artifact_mom, sym, "intraday_mom")
+            results[(sym, "intraday_mom")] = save_result
         else:
             results[(sym, "intraday_mom")] = {
                 "success": False,
+                "status": "training_failed",
                 "reason": "Training failed",
             }
 
