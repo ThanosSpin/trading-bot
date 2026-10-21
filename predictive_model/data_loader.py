@@ -278,18 +278,35 @@ def fetch_intraday_history_alpaca(
 ) -> Optional[pd.DataFrame]:
     """
     Fetch intraday bars from Alpaca IEX feed at the requested interval.
+    Sizes requests by bars needed, with extra calendar-day cushion for
+    weekends and market holidays.
     """
     try:
+        import math
+
         timeframe = _alpaca_timeframe_from_str(interval)
         now_utc = datetime.now(pytz.UTC)
-        
-        buffer_days = max(2, int((lookback_minutes / 390) + 2))
+        interval_key = str(interval).lower().replace("mins", "min").replace(" ", "")
+
+        if timeframe == "15Min" or interval_key in ("15m", "15min", "15t"):
+            bars_needed = math.ceil(lookback_minutes / 15) + 10
+            bars_per_trading_day = 26
+        elif timeframe == "5Min" or interval_key in ("5m", "5min", "5t"):
+            bars_needed = math.ceil(lookback_minutes / 5) + 20
+            bars_per_trading_day = 78
+        else:
+            bars_needed = int(lookback_minutes) + 50
+            bars_per_trading_day = 390
+
+        trading_days_needed = max(1, math.ceil(bars_needed / bars_per_trading_day))
+        buffer_days = max(7, math.ceil(trading_days_needed * 1.7) + 3)
         start_utc = now_utc - timedelta(days=buffer_days)
-        limit = _estimate_limit(lookback_minutes, timeframe)
-        
+        limit = max(bars_needed * 2, _estimate_limit(lookback_minutes, timeframe))
+
         logger.debug(
             f"Fetching Alpaca intraday for {symbol}: "
-            f"timeframe={timeframe}, lookback={lookback_minutes}min, limit={limit}"
+            f"timeframe={timeframe}, lookback={lookback_minutes}min, "
+            f"bars_needed={bars_needed}, buffer_days={buffer_days}, limit={limit}"
         )
 
         api = get_trading_api()
@@ -321,18 +338,9 @@ def fetch_intraday_history_alpaca(
             return None
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        df = df.set_index("timestamp").sort_index()
+        df = df.set_index("timestamp").sort_index().tail(bars_needed)
 
-        # Trim by bars
-        if timeframe == "15Min":
-            bars_needed = int(lookback_minutes / 15) + 10
-        elif timeframe == "5Min":
-            bars_needed = int(lookback_minutes / 5) + 20
-        else:
-            bars_needed = int(lookback_minutes) + 50
-
-        df = df.tail(bars_needed)
-        logger.info(f"Alpaca intraday data for {symbol}: {len(df)} bars")
+        logger.info(f"Alpaca intraday data for {symbol}: {len(df)} bars (target {bars_needed})")
         return df
 
     except Exception as e:
@@ -350,32 +358,52 @@ def fetch_intraday_history(
 ) -> Optional[pd.DataFrame]:
     """
     Wrapper used by compute_signals(). Tries Alpaca first, then yfinance fallback.
+    Normalizes both providers to return the requested number of bars rather than
+    trimming by wall-clock minutes.
     """
-    df = fetch_intraday_history_alpaca(symbol, lookback_minutes=lookback_minutes, interval=interval)
+    import math
+
+    interval_key = str(interval).lower().replace("mins", "min").replace(" ", "")
+    if interval_key in ("15m", "15min", "15t"):
+        bars_needed = math.ceil(lookback_minutes / 15) + 10
+    elif interval_key in ("5m", "5min", "5t"):
+        bars_needed = math.ceil(lookback_minutes / 5) + 20
+    else:
+        bars_needed = int(lookback_minutes) + 50
+
+    df = fetch_intraday_history_alpaca(
+        symbol,
+        lookback_minutes=lookback_minutes,
+        interval=interval,
+    )
     if df is not None and not df.empty:
-        return df
+        return df.tail(bars_needed)
 
-    # Fallback to yfinance
     try:
-        yf_interval = "15m" if str(interval).lower() in ("15m", "15min", "15mins") else "1m"
+        yf_interval = "15m" if interval_key in ("15m", "15min", "15t") else "1m"
         yf_period = "60d" if yf_interval == "15m" else "7d"
-        
-        logger.debug(f"Falling back to yfinance for {symbol}: period={yf_period}, interval={yf_interval}")
 
-        df_y = yf.download(symbol, period=yf_period, interval=yf_interval,
-                           progress=False, auto_adjust=True)
+        logger.debug(
+            f"Falling back to yfinance for {symbol}: "
+            f"period={yf_period}, interval={yf_interval}, bars_needed={bars_needed}"
+        )
+
+        df_y = yf.download(
+            symbol,
+            period=yf_period,
+            interval=yf_interval,
+            progress=False,
+            auto_adjust=True,
+        )
         if df_y is None or df_y.empty:
             logger.warning(f"yfinance intraday returned empty for {symbol}")
             return None
 
         df_y = df_y.copy()
         df_y.index = pd.to_datetime(df_y.index, utc=True, errors="coerce")
-        df_y = df_y.sort_index()
+        df_y = df_y.sort_index().tail(bars_needed)
 
-        cutoff = df_y.index.max() - pd.Timedelta(minutes=lookback_minutes)
-        df_y = df_y.loc[df_y.index >= cutoff]
-        
-        logger.info(f"yfinance intraday data for {symbol}: {len(df_y)} bars")
+        logger.info(f"yfinance intraday data for {symbol}: {len(df_y)} bars (target {bars_needed})")
         return df_y
 
     except Exception as e:

@@ -24,7 +24,14 @@ import joblib
 from predictive_model.data_loader import fetch_historical_data, fetch_intraday_history
 from predictive_model.model_xgb import train_model, MODEL_DIR
 from predictive_model.model_evaluation import promotion_decision
-from config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS, USE_TWO_STAGE_TARGETS, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
+from config import (
+    TRAIN_SYMBOLS,
+    USE_MULTICLASS_MODELS,
+    USE_TWO_STAGE_TARGETS,
+    EMAIL_SENDER,
+    EMAIL_PASSWORD,
+    EMAIL_RECEIVER,
+)
 
 MAX_BACKUPS = 6
 USE_MULTICLASS = USE_MULTICLASS_MODELS
@@ -33,7 +40,7 @@ USE_TWO_STAGE = USE_TWO_STAGE_TARGETS
 DAILY_PERIOD = "3y"
 DAILY_INTERVAL = "1d"
 
-INTRADAY_LOOKBACK = 2400
+INTRADAY_LOOKBACK = 14400
 INTRADAY_INTERVAL = "15m"
 
 
@@ -47,8 +54,7 @@ def save_model_with_backup(artifact, symbol: str, mode: str = "daily"):
     artifact["promotion_evaluation"] = decision
     if not decision["accepted"]:
         print(
-            f"[PROMOTION REJECTED] {symbol}/{mode}: "
-            + "; ".join(decision["reasons"])
+            f"[PROMOTION REJECTED] {symbol}/{mode}: " + "; ".join(decision["reasons"])
         )
         return False
 
@@ -59,7 +65,9 @@ def save_model_with_backup(artifact, symbol: str, mode: str = "daily"):
         shutil.copy2(active_path, backup_path)
         print(f"📦 Monthly backup created: {backup_path}")
     else:
-        print(f"ℹ️ Monthly backup for {symbol} ({mode}) in {month_tag} already exists — skipping.")
+        print(
+            f"ℹ️ Monthly backup for {symbol} ({mode}) in {month_tag} already exists — skipping."
+        )
 
     temporary_path = f"{active_path}.challenger"
     joblib.dump(artifact, temporary_path)
@@ -105,9 +113,10 @@ def print_model_summary(artifact: dict, symbol: str, mode: str):
 
     if split_metadata:
         print(
-            f" Split sizes: train={split_metadata.get('train_rows')} "
-            f"cal={split_metadata.get('cal_rows')} "
-            f"test={split_metadata.get('test_rows')}"
+            f" Split sizes: "
+            f"train={split_metadata.get('train_samples', metrics.get('train_samples', 'N/A'))} "
+            f"cal={split_metadata.get('calibration_samples', metrics.get('calibration_samples', 'N/A'))} "
+            f"test={split_metadata.get('test_samples', metrics.get('test_samples', 'N/A'))}"
         )
 
     best_threshold = artifact.get("decision_threshold")
@@ -116,7 +125,15 @@ def print_model_summary(artifact: dict, symbol: str, mode: str):
     if best_threshold is not None:
         print(f" Decision threshold: {best_threshold:.3f}")
 
-    for key in ["accuracy", "logloss", "rocauc", "f1", "precision", "recall", "brier_score"]:
+    for key in [
+        "accuracy",
+        "logloss",
+        "roc_auc",
+        "f1",
+        "precision",
+        "recall",
+        "brier_score",
+    ]:
         val = metrics.get(key)
         if val is not None:
             print(f" {key}: {val:.3f}")
@@ -151,6 +168,7 @@ def train_daily_model(sym: str):
     except Exception as e:
         print(f"[ERROR] Failed to train daily model for {sym}: {e}")
         import traceback
+
         traceback.print_exc()
 
 
@@ -186,25 +204,40 @@ def train_intraday_models(sym: str):
 
         except ValueError as e:
             msg = str(e)
-            if (
-                "Insufficient class diversity" in msg
-                or "not enough filtered data" in msg
-                or "Not enough rows for robust train/cal/test split" in msg
-            ):
+
+            expected_skip_reasons = (
+                "Insufficient class diversity",
+                "not enough filtered data",
+                "Not enough rows for robust train/cal/test split",
+                "At least 100 chronological rows are required",
+                "Invalid chronological split boundaries",
+                "Train set has fewer than 2 classes",
+                "Calibration set has fewer than 2 classes",
+                "Two-stage movement model requires two train/calibration classes",
+                "No valid regime rows",
+                "Insufficient pre-split rows to fit regime thresholds",
+                "Regime thresholds are not finite",
+                "lacks two classes in fit/calibration",
+            )
+
+            if any(reason in msg for reason in expected_skip_reasons):
                 print(f"⚠️ Skipped {sym}/{mode}: {msg}")
                 continue
-            else:
-                print(f"[ERROR] Failed to train {mode} for {sym}: {e}")
-                import traceback
-                traceback.print_exc()
+
+            print(f"[ERROR] Failed to train {mode} for {sym}: {e}")
+            import traceback
+
+            traceback.print_exc()
 
         except Exception as e:
             print(f"[ERROR] Failed to train {mode} for {sym}: {e}")
             import traceback
+
             traceback.print_exc()
 
 
 # ---------------- email helper (mirroring balance_monitor) ----------------
+
 
 def send_status_email(success: bool, details: str) -> None:
     """
@@ -240,6 +273,7 @@ def send_status_email(success: bool, details: str) -> None:
 
 # ---------------- main with success/failure email ----------------
 
+
 def main() -> int:
     symbols = TRAIN_SYMBOLS if isinstance(TRAIN_SYMBOLS, list) else [TRAIN_SYMBOLS]
 
@@ -248,7 +282,9 @@ def main() -> int:
     print("=" * 80)
     print(f"📌 Symbols: {symbols}")
     print(f"📂 MODEL_DIR: {os.path.abspath(MODEL_DIR)}")
-    print(f"🎯 Target: {'Multi-class (5 classes)' if USE_MULTICLASS else 'Binary (2 classes)'}")
+    print(
+        f"🎯 Target: {'Multi-class (5 classes)' if USE_MULTICLASS else 'Binary (2 classes)'}"
+    )
     print(f"🕒 {datetime.now().isoformat()}\n")
 
     try:
@@ -267,6 +303,7 @@ def main() -> int:
 
     except Exception as e:
         import traceback
+
         tb = traceback.format_exc()
         print(f"[ERROR] Fatal error in retrain_model.main(): {e}")
         print(tb)

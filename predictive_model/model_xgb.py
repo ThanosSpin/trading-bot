@@ -690,6 +690,15 @@ def train_model(
             f"brier={wf_metrics.get('brier_score')}"
         )
 
+        print(
+            "[WALK-FORWARD DIAGNOSTICS] "
+            f"{symbol}/{mode} "
+            f"evaluation_rows={len(evaluation_X)} "
+            f"evaluation_positive_rate={float(np.mean(evaluation_target)):.2%} "
+            f"wf_threshold={walk_forward_evaluation.get('decision_threshold')} "
+            f"wf_trade_count={wf_metrics.get('trade_count')}"
+        )
+
     base_model = model
     final_model = model
     calibrated = False
@@ -792,10 +801,7 @@ def train_model(
             raw_cal_proba = base_model.predict_proba(X_cal)[:, 1]
             calibrated_cal_proba = final_model.predict_proba(X_cal)[:, 1]
 
-            if mode.startswith("intraday"):
-                threshold_proba_cal = raw_cal_proba
-            else:
-                threshold_proba_cal = calibrated_cal_proba
+            threshold_proba_cal = calibrated_cal_proba
 
             threshold_opt = optimize_binary_decision_threshold(
                 y_cal,
@@ -807,6 +813,22 @@ def train_model(
             )
 
             best_threshold = float(threshold_opt["best_threshold"])
+
+            wf_threshold = None
+            wf_trade_count = None
+            if walk_forward_evaluation:
+                wf_threshold = walk_forward_evaluation.get("decision_threshold")
+                wf_trade_count = (walk_forward_evaluation.get("aggregate") or {}).get("trade_count")
+
+            print(
+                f"[THRESHOLD CONSISTENCY] {symbol}/{mode} "
+                f"artifact_threshold={best_threshold:.4f} "
+                f"walk_forward_threshold="
+                f"{'None' if wf_threshold is None else f'{float(wf_threshold):.4f}'} "
+                f"artifact_test_rows={len(X_test)} "
+                f"walk_forward_rows={len(evaluation_X) if evaluation_X is not None else 0} "
+                f"walk_forward_trades={wf_trade_count}"
+            )
 
             if best_threshold <= 0.3500001:
                 print(
@@ -823,7 +845,7 @@ def train_model(
 
             print(
                 f"[THRESHOLD OPTIMIZATION] {symbol}/{mode} "
-                f"source={'raw' if mode.startswith('intraday') else 'calibrated'} "
+                f"source=calibrated "
                 f"cal_min={threshold_proba_cal.min():.4f} "
                 f"cal_median={np.median(threshold_proba_cal):.4f} "
                 f"cal_max={threshold_proba_cal.max():.4f} "
@@ -843,14 +865,20 @@ def train_model(
             raw_test_proba = base_model.predict_proba(X_test)[:, 1]
             calibrated_test_proba = final_model.predict_proba(X_test)[:, 1]
 
-            if mode.startswith("intraday"):
-                y_pred_proba = raw_test_proba
-            else:
-                y_pred_proba = calibrated_test_proba
+            y_pred_proba = calibrated_test_proba
 
             positive_count = int((y_pred_proba >= best_threshold).sum())
             total_count = len(y_pred_proba)
             positive_rate = positive_count / total_count if total_count else 0.0
+
+            print(
+                f"[TRADE FUNNEL] {symbol}/{mode} "
+                f"evaluation_rows={len(evaluation_X) if evaluation_X is not None else 0} "
+                f"test_rows={len(X_test)} "
+                f"test_positive_predictions={positive_count} "
+                f"test_positive_rate={positive_rate:.2%} "
+                f"walk_forward_trades={wf_trade_count}"
+            )
 
             print(
                 f"[PROBABILITY DIAGNOSTICS] {symbol}/{mode} "
@@ -860,7 +888,7 @@ def train_model(
                 f"calibrated_min={calibrated_test_proba.min():.4f} "
                 f"calibrated_median={np.median(calibrated_test_proba):.4f} "
                 f"calibrated_max={calibrated_test_proba.max():.4f} "
-                f"decision_source={'raw' if mode.startswith('intraday') else 'calibrated'} "
+                f"decision_source=calibrated "
                 f"positive_predictions={positive_count}/{total_count} "
                 f"positive_rate={positive_rate:.2%} "
                 f"threshold={best_threshold:.4f}"
