@@ -2,7 +2,7 @@
 import os
 import traceback
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple, Union
 from pathlib import Path
 
@@ -433,6 +433,31 @@ def _filter_intraday_rows_by_mode(
         f"| train-only mom={mom_threshold:.6f} vol={vol_threshold:.6f}"
     )
     return filtered, regime_config
+
+def _artifact_age_days(artifact: dict):
+    if not artifact:
+        return None
+
+    trained_at = artifact.get("trained_at")
+    if not trained_at:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(str(trained_at).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return (now - dt).total_seconds() / 86400.0
+    except Exception as e:
+        print(f"[WARN] Could not parse trained_at={trained_at!r}: {e}")
+        return None
+
+
+def _artifact_is_fresh(artifact: dict, max_age_days: int = 30) -> bool:
+    age = _artifact_age_days(artifact)
+    if age is None:
+        return False
+    return age <= float(max_age_days)
 
 
 # ---------------------------------------------------------
@@ -1850,6 +1875,26 @@ def compute_signals(
     model_intra_mr = load_model(symU, mode="intraday_mr")
     model_intra_mom = load_model(symU, mode="intraday_mom")
     model_intraday_legacy = load_model(symU, mode="intraday")
+
+    for mode_name, model_obj in [
+        ("intraday_mr", model_intra_mr),
+        ("intraday_mom", model_intra_mom),
+        ("intraday", model_intraday_legacy),
+    ]:
+        age = _artifact_age_days(model_obj)
+        if age is None:
+            print(f"[STALE] {symU} {mode_name} skipped: missing/invalid trained_at")
+        elif age > 30:
+            print(f"[STALE] {symU} {mode_name} skipped: age={age:.1f}d > 30d")
+
+    if not _artifact_is_fresh(model_intra_mr, max_age_days=30):
+        model_intra_mr = None
+
+    if not _artifact_is_fresh(model_intra_mom, max_age_days=30):
+        model_intra_mom = None
+
+    if not _artifact_is_fresh(model_intraday_legacy, max_age_days=30):
+        model_intraday_legacy = None
 
     vix_level = fetch_vix_level()
     results["vix_level"] = vix_level
