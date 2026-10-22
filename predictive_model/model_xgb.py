@@ -47,12 +47,16 @@ from config import (
     MODEL_EVAL_TRANSACTION_COST_BPS,
     MODEL_EVAL_WALK_FORWARD_FOLDS,
     MODEL_TRAIN_N_JOBS,
+    MODEL_DIR as CONFIG_MODEL_DIR,
     USE_TWO_STAGE_TARGETS,
 )
 
-MODEL_DIR = "models"
-os.makedirs(MODEL_DIR, exist_ok=True)
-CALIBRATOR_DIR = Path("models") / "calibrators"
+# Resolve artifacts from the checkout, independent of the caller's current
+# working directory.  Retraining and promotion code use config.MODEL_DIR too,
+# so inference must read from that same location.
+MODEL_DIR = Path(CONFIG_MODEL_DIR).resolve()
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+CALIBRATOR_DIR = MODEL_DIR / "calibrators"
 _calibrator_cache = {}
 
 warnings.filterwarnings("ignore", message=".*cv='prefit'.*")
@@ -1361,7 +1365,7 @@ def load_model(symbol: str, mode: str):
     path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
     if not os.path.exists(path):
         print(f"[WARN] Missing model artifact: {path}")
-    return None
+        return None
     try:
         return joblib.load(path)
     except Exception as e:
