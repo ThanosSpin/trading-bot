@@ -30,59 +30,40 @@ USE_TWO_STAGE = USE_TWO_STAGE_TARGETS
 FORCE_RETRAIN = True
 
 
-def _save_artifact(artifact, symbol: str, mode: str) -> bool:
+def _save_artifact(artifact, symbol: str, mode: str) -> tuple[bool, str, str]:
     model_dir = MODEL_DIR if MODEL_DIR else "models"
     os.makedirs(model_dir, exist_ok=True)
 
-    active_path = os.path.join(
-        model_dir,
-        f"{symbol}_{mode}_xgb.pkl",
-    )
-    challenger_path = os.path.join(
-        model_dir,
-        f"{symbol}_{mode}_xgb_challenger.pkl",
-    )
+    path = os.path.join(model_dir, f"{symbol}_{mode}_xgb.pkl")
+    abs_path = os.path.abspath(path)
 
     try:
-        champion = (
-            joblib.load(active_path)
-            if os.path.exists(active_path)
-            else None
-        )
-
+        champion = joblib.load(path) if os.path.exists(path) else None
         decision = promotion_decision(artifact, champion)
         artifact["promotion_evaluation"] = decision
 
         if not decision["accepted"]:
-            challenger_path = os.path.join(
-                model_dir,
-                f"{symbol}_{mode}_xgb_rejected.pkl",
-            )
+            msg = "; ".join(decision["reasons"])
+            print(f"[PROMOTION REJECTED] {symbol}/{mode}: {msg}")
+            return False, "rejected", msg
 
-            joblib.dump(artifact, challenger_path)
-
-            print(
-                f"[PROMOTION REJECTED] {symbol}/{mode}: "
-                + "; ".join(decision["reasons"])
-            )
-            print(f"Rejected challenger saved to: {challenger_path}")
-            return False
-
-        temporary_path = f"{active_path}.challenger"
+        temporary_path = f"{path}.challenger"
         joblib.dump(artifact, temporary_path)
-        os.replace(temporary_path, active_path)
+        os.replace(temporary_path, path)
 
-        print(
-            f"✅ Promoted {symbol} {mode}: {active_path} "
-            f"({decision['kind']}, "
-            f"overlap={decision['overlap_samples']})"
-        )
-        return True
+        if os.path.exists(path):
+            file_size_kb = os.path.getsize(path) / 1024.0
+            msg = f"Promoted ({decision['kind']}, overlap={decision['overlap_samples']})"
+            print(f"✅ Promoted {symbol} {mode}: {abs_path} ({file_size_kb:.1f} KB) {msg}")
+            return True, "promoted", msg
+
+        print(f"❌ Failed to save {symbol} {mode} - file not found after save")
+        return False, "save_error", "File not found after save"
 
     except Exception as e:
         print(f"❌ Error saving {symbol} {mode}: {e}")
         traceback.print_exc()
-        return False
+        return False, "save_error", str(e)
 
 
 def _print_artifact_summary(artifact: dict, symbol: str, mode: str) -> None:
@@ -323,16 +304,16 @@ def main():
             use_multiclass=USE_MULTICLASS,
         )
         if artifact_mr:
-            promoted = _save_artifact(artifact_mr, sym, "intraday_mr")
+            success, status, reason = _save_artifact(artifact_mr, sym, "intraday_mr")
             results[(sym, "intraday_mr")] = {
-                "success": bool(promoted),
-                "status": "Promoted" if promoted else "Promotion rejected",
-                "reason": "Promoted" if promoted else "Promotion rejected",
+                "success": success,
+                "status": status,
+                "reason": reason,
             }
         else:
             results[(sym, "intraday_mr")] = {
                 "success": False,
-                "status": "Training failed",
+                "status": "training_failed",
                 "reason": "Training failed",
             }
 
@@ -343,16 +324,16 @@ def main():
             use_multiclass=USE_MULTICLASS,
         )
         if artifact_mom:
-            promoted = _save_artifact(artifact_mom, sym, "intraday_mom")
+            success, status, reason = _save_artifact(artifact_mom, sym, "intraday_mom")
             results[(sym, "intraday_mom")] = {
-                "success": bool(promoted),
-                "status": "Promoted" if promoted else "Promotion rejected",
-                "reason": "Promoted" if promoted else "Promotion rejected",
+                "success": success,
+                "status": status,
+                "reason": reason,
             }
         else:
             results[(sym, "intraday_mom")] = {
                 "success": False,
-                "status": "Training failed",
+                "status": "training_failed",
                 "reason": "Training failed",
             }
 
