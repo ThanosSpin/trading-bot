@@ -2080,7 +2080,6 @@ def compute_signals(
                     print(f"[STALE] {symU} {mode_name} stale: age={age:.1f}d > 30d")
                     stale_models.append((mode_name, model_obj, age))
                     print(
-                        f"[STALE APPEND DEBUG] {symU} appended={mode_name} "
                         f"stale_now={[name for name, _, _ in stale_models]}"
                     )
 
@@ -2140,7 +2139,6 @@ def compute_signals(
                     candidate_models.append((name, obj))
 
             print(
-                f"[CANDIDATES DEBUG] {symU} preferred_order={preferred_order} "
                 f"fresh={[name for name, _, _ in fresh_models]} "
                 f"stale={[name for name, _, _ in stale_models]} "
                 f"candidate_pre={[name for name, _ in candidate_models]}"
