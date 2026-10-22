@@ -46,14 +46,14 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 # Trading Strategy
 # ============================================================
 
-SYMBOL = ["NVDA", "AAPL", "PLTR"]
+SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]
 PAPER_TRADE_SYMBOLS = []
 PAPER_TRADE_NOTES = {}
 
 # Keep the complete universe monitored while limiting which symbols may open
 # new positions in each environment. SELL and risk-exit eligibility is not
 # controlled by these lists.
-LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL", "ABBV", "PLTR"]
+LIVE_ENTRY_SYMBOLS = ["NVDA", "AAPL", "PLTR"]
 PAPER_ENTRY_SYMBOLS = list(SYMBOL) + ["SPY"]
 
 BUY_THRESHOLD = 0.55
