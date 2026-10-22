@@ -1876,16 +1876,28 @@ def compute_signals(
     model_intra_mom = load_model(symU, mode="intraday_mom")
     model_intraday_legacy = load_model(symU, mode="intraday")
 
+    fresh_models = []
+    stale_models = []
+
     for mode_name, model_obj in [
         ("intraday_mr", model_intra_mr),
         ("intraday_mom", model_intra_mom),
         ("intraday", model_intraday_legacy),
     ]:
+        if model_obj is None:
+            continue
+
         age = _artifact_age_days(model_obj)
+
         if age is None:
             print(f"[STALE] {symU} {mode_name} skipped: missing/invalid trained_at")
-        elif age > 30:
-            print(f"[STALE] {symU} {mode_name} skipped: age={age:.1f}d > 30d")
+            continue
+
+        if age <= 30:
+            fresh_models.append((mode_name, model_obj, age))
+        else:
+            print(f"[STALE] {symU} {mode_name} stale: age={age:.1f}d > 30d")
+            stale_models.append((mode_name, model_obj, age))
 
     if not _artifact_is_fresh(model_intra_mr, max_age_days=30):
         model_intra_mr = None
@@ -2095,28 +2107,97 @@ def compute_signals(
                     f"hold_bars={regime_decision['bars_since_switch']}"
                 )
 
-                if results["intraday_regime"] == "mom":
-                    candidate_models = [
-                        ("intraday_mom", model_intra_mom),
-                        ("intraday_mr", model_intra_mr),
-                        ("intraday", model_intraday_legacy),
-                    ]
-                else:
-                    candidate_models = [
-                        ("intraday_mr", model_intra_mr),
-                        ("intraday_mom", model_intra_mom),
-                        ("intraday", model_intraday_legacy),
-                    ]
-            else:
-                candidate_models = [
-                    ("intraday_mom", model_intra_mom),
-                    ("intraday_mr", model_intra_mr),
-                    ("intraday", model_intraday_legacy),
-                ]
+            fresh_models = []
+            stale_models = []
 
-            candidate_models = [
-                (name, mdl) for name, mdl in candidate_models if mdl is not None
-            ]
+            for mode_name, model_obj in [
+                ("intraday_mr", model_intra_mr),
+                ("intraday_mom", model_intra_mom),
+                ("intraday", model_intraday_legacy),
+            ]:
+                if model_obj is None:
+                    continue
+
+                age = _artifact_age_days(model_obj)
+
+                if age is None:
+                    print(f"[STALE] {symU} {mode_name} skipped: missing/invalid trained_at")
+                    continue
+                elif age <= 30:
+                    fresh_models.append((mode_name, model_obj, age))
+                else:
+                    print(f"[STALE] {symU} {mode_name} stale: age={age:.1f}d > 30d")
+                    stale_models.append((mode_name, model_obj, age))
+
+            if vol is not None and mom1h is not None:
+                raw_regime = "mom" if (abs(mom1h) >= MOMTRIG or vol >= VOLTRIG) else "mr"
+                latest_bar_time = df_intra_resampled.index[-1] if len(df_intra_resampled) else None
+
+                regime_decision = _resolve_intraday_regime_with_confirmation(
+                    symbol=symU,
+                    bar_time=latest_bar_time,
+                    raw_regime=raw_regime,
+                    mom_value=float(mom1h),
+                    vol_value=float(vol),
+                    mom_trig=float(MOMTRIG),
+                    vol_trig=float(VOLTRIG),
+                    confirm_bars=2,
+                    min_hold_bars=2,
+                    hysteresis_enter_mult=1.00,
+                    hysteresis_exit_mult=0.85,
+                )
+
+                results["intraday_regime_raw"] = raw_regime
+                results["intraday_regime_hysteresis"] = regime_decision["hysteresis_regime"]
+                results["intraday_regime"] = regime_decision["active_regime"]
+                results["intraday_regime_pending_count"] = regime_decision["pending_count"]
+                results["intraday_regime_bars_since_switch"] = regime_decision["bars_since_switch"]
+                results["intraday_regime_switched"] = regime_decision["switched"]
+                results["intraday_regime_confirm_bars"] = 2
+                results["intraday_regime_min_hold_bars"] = 2
+                results["intraday_regime_hysteresis_enter_mult"] = 1.00
+                results["intraday_regime_hysteresis_exit_mult"] = 0.85
+
+                print(
+                    f"[REGIME ROUTER] {symU} "
+                    f"mom1h={float(mom1h):+.4%} vol12={float(vol):.6f} "
+                    f"raw={raw_regime} hysteresis={regime_decision['hysteresis_regime']} "
+                    f"active={regime_decision['active_regime']} "
+                    f"pending={regime_decision['pending_count']} "
+                    f"hold_bars={regime_decision['bars_since_switch']}"
+                )
+
+                if results["intraday_regime"] == "mom":
+                    preferred_order = ["intraday_mom", "intraday_mr", "intraday"]
+                else:
+                    preferred_order = ["intraday_mr", "intraday_mom", "intraday"]
+            else:
+                preferred_order = ["intraday_mom", "intraday_mr", "intraday"]
+
+            fresh_by_name = {name: (obj, age) for name, obj, age in fresh_models}
+            stale_by_name = {name: (obj, age) for name, obj, age in stale_models}
+
+            candidate_models = []
+
+            for name in preferred_order:
+                if name in fresh_by_name:
+                    obj, age = fresh_by_name[name]
+                    candidate_models.append((name, obj))
+
+            if not candidate_models:
+                for name in preferred_order:
+                    if name in stale_by_name:
+                        obj, age = stale_by_name[name]
+                        candidate_models.append((name, obj))
+
+                if candidate_models:
+                    print(
+                        f"[STALE-FALLBACK] {symU}: no fresh intraday model available; "
+                        f"using stale candidates in preferred order "
+                        f"{[(name, round(stale_by_name[name][1], 1)) for name, _ in candidate_models]}"
+                    )
+
+            results["intraday_candidate_order"] = [name for name, _ in candidate_models]
 
             if not candidate_models:
                 results["allow_intraday"] = False
