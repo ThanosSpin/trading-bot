@@ -567,7 +567,13 @@ def promotion_decision(candidate: dict, champion: Optional[dict]) -> dict:
     evaluation = candidate.get("walk_forward_evaluation") or {}
     aggregate = evaluation.get("aggregate") or {}
     mode = str(candidate.get("mode", ""))
-    minimum_trades = 8 if mode == "daily" else 20
+    minimum_trades_by_mode = {
+        "daily": 20,
+        "intraday": 15,
+        "intraday_mr": 10,
+        "intraday_mom": 10,
+    }
+    minimum_trades = minimum_trades_by_mode.get(mode, 15)
     reasons = []
 
     if evaluation.get("version") != EVALUATION_VERSION:
@@ -614,7 +620,13 @@ def promotion_decision(candidate: dict, champion: Optional[dict]) -> dict:
         on="timestamp",
         suffixes=("_candidate", "_champion"),
     )
-    minimum_overlap = 30 if mode == "daily" else 80
+    minimum_overlap_by_mode = {
+        "daily": 30,
+        "intraday": 80,
+        "intraday_mr": 40,
+        "intraday_mom": 40,
+    }
+    minimum_overlap = minimum_overlap_by_mode.get(mode, 50)
     if len(overlap) < minimum_overlap:
         result["reasons"] = [
             f"only {len(overlap)} overlapping observations; need {minimum_overlap}"
