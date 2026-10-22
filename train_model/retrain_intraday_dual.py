@@ -31,6 +31,7 @@ FORCE_RETRAIN = True
 
 
 def _save_artifact(artifact, symbol: str, mode: str):
+    """Promote a challenger and return success, status, and reason."""
     model_dir = MODEL_DIR if MODEL_DIR else "models"
     os.makedirs(model_dir, exist_ok=True)
 
@@ -39,31 +40,45 @@ def _save_artifact(artifact, symbol: str, mode: str):
 
     try:
         champion = joblib.load(path) if os.path.exists(path) else None
+
         decision = promotion_decision(artifact, champion)
         artifact["promotion_evaluation"] = decision
 
         reasons = decision.get("reasons", []) or []
-        reason_text = "; ".join(reasons) if reasons else ""
+        reason_text = "; ".join(str(x) for x in reasons)
 
         if not decision.get("accepted", False):
-            print(f"[PROMOTION REJECTED] {symbol}/{mode}: {reason_text}")
-            return False, "rejected", reason_text or "Promotion rejected"
+            print(
+                f"[PROMOTION REJECTED] {symbol}/{mode}: "
+                f"{reason_text or 'Promotion rejected'}"
+            )
+            return (
+                False,
+                "rejected",
+                reason_text or "Promotion rejected",
+            )
 
         temporary_path = f"{path}.challenger"
         joblib.dump(artifact, temporary_path)
         os.replace(temporary_path, path)
 
-        if os.path.exists(path):
-            file_size_kb = os.path.getsize(path) / 1024.0
-            print(
-                f"✅ Promoted {symbol} {mode}: {abs_path} ({file_size_kb:.1f} KB) "
-                f"({decision.get('kind')}, overlap={decision.get('overlap_samples')})"
-            )
-            promoted_reason = reason_text or f"Promoted ({decision.get('kind', 'accepted')})"
-            return True, "promoted", promoted_reason
+        if not os.path.exists(path):
+            return False, "save_error", "File not found after save"
 
-        print(f"❌ Failed to save {symbol} {mode} - file not found after save")
-        return False, "save_error", "File not found after save"
+        file_size_kb = os.path.getsize(path) / 1024.0
+
+        print(
+            f"✅ Promoted {symbol} {mode}: {abs_path} "
+            f"({file_size_kb:.1f} KB) "
+            f"({decision.get('kind', 'accepted')}, "
+            f"overlap={decision.get('overlap_samples', 0)})"
+        )
+
+        return (
+            True,
+            "promoted",
+            reason_text or "Promotion accepted",
+        )
 
     except Exception as e:
         print(f"❌ Error saving {symbol} {mode}: {e}")
@@ -244,17 +259,16 @@ def _print_summary(results: dict) -> None:
     print(f"{'-' * 90}")
 
     status_map = {
-        "promoted": "✅ Success",
+        "promoted": "✅ Promoted",
         "rejected": "⛔ Rejected",
-        "training_failed": "❌ Failed",
-        "save_error": "❌ SaveErr",
+        "training_failed": "❌ Training failed",
+        "save_error": "❌ Save error",
     }
 
     for (sym, mode), info in sorted(results.items()):
-        raw_status = info.get("status")
-        status = status_map.get(raw_status, f"⚠️ Unknown({raw_status})")
+        label = status_map.get(info.get("status"), f"⚠️ {info.get('status')}")
         reason = info.get("reason", "")
-        print(f"{sym:<8} {mode:<15} {status:<18} {reason}")
+        print(f"{sym:<8} {mode:<15} {label:<18} {reason}")
 
     print(f"{'=' * 60}\n")
 
