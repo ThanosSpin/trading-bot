@@ -30,7 +30,7 @@ USE_TWO_STAGE = USE_TWO_STAGE_TARGETS
 FORCE_RETRAIN = True
 
 
-def _save_artifact(artifact, symbol: str, mode: str) -> tuple[bool, str, str]:
+def _save_artifact(artifact, symbol: str, mode: str):
     model_dir = MODEL_DIR if MODEL_DIR else "models"
     os.makedirs(model_dir, exist_ok=True)
 
@@ -42,10 +42,12 @@ def _save_artifact(artifact, symbol: str, mode: str) -> tuple[bool, str, str]:
         decision = promotion_decision(artifact, champion)
         artifact["promotion_evaluation"] = decision
 
-        if not decision["accepted"]:
-            msg = "; ".join(decision["reasons"])
-            print(f"[PROMOTION REJECTED] {symbol}/{mode}: {msg}")
-            return False, "rejected", msg
+        reasons = decision.get("reasons", []) or []
+        reason_text = "; ".join(reasons) if reasons else ""
+
+        if not decision.get("accepted", False):
+            print(f"[PROMOTION REJECTED] {symbol}/{mode}: {reason_text}")
+            return False, "rejected", reason_text or "Promotion rejected"
 
         temporary_path = f"{path}.challenger"
         joblib.dump(artifact, temporary_path)
@@ -53,9 +55,12 @@ def _save_artifact(artifact, symbol: str, mode: str) -> tuple[bool, str, str]:
 
         if os.path.exists(path):
             file_size_kb = os.path.getsize(path) / 1024.0
-            msg = f"Promoted ({decision['kind']}, overlap={decision['overlap_samples']})"
-            print(f"✅ Promoted {symbol} {mode}: {abs_path} ({file_size_kb:.1f} KB) {msg}")
-            return True, "promoted", msg
+            print(
+                f"✅ Promoted {symbol} {mode}: {abs_path} ({file_size_kb:.1f} KB) "
+                f"({decision.get('kind')}, overlap={decision.get('overlap_samples')})"
+            )
+            promoted_reason = reason_text or f"Promoted ({decision.get('kind', 'accepted')})"
+            return True, "promoted", promoted_reason
 
         print(f"❌ Failed to save {symbol} {mode} - file not found after save")
         return False, "save_error", "File not found after save"
@@ -217,36 +222,36 @@ def _train_regime_model(df, symbol: str, mode: str, use_multiclass: bool = True)
 
 
 def _print_summary(results: dict) -> None:
-    """Print overall training summary."""
     print(f"\n{'=' * 60}")
     print("TRAINING SUMMARY")
     print(f"{'=' * 60}")
 
     total_models = len(results)
-    successful = sum(1 for v in results.values() if v.get("status") == "promoted")
+    promoted = sum(1 for v in results.values() if v.get("status") == "promoted")
     rejected = sum(1 for v in results.values() if v.get("status") == "rejected")
     failed = sum(
         1 for v in results.values()
-        if v.get("status") in ("training_failed", "save_error")
+        if v.get("status") in {"training_failed", "save_error"}
     )
 
     print(f"Total models: {total_models}")
-    print(f"Successful: {successful} ({(successful / total_models * 100):.1f}%)" if total_models else "Successful: 0")
+    print(f"Successful: {promoted} ({(promoted / total_models * 100):.1f}%)" if total_models else "Successful: 0")
     print(f"Rejected: {rejected} ({(rejected / total_models * 100):.1f}%)" if total_models else "Rejected: 0")
     print(f"Failed: {failed} ({(failed / total_models * 100):.1f}%)" if total_models else "Failed: 0")
 
     print("\nDetailed Results:")
-    print(f"{'Symbol':<8} {'Mode':<15} {'Status':<12} {'Reason'}")
-    print(f"{'-' * 80}")
+    print(f"{'Symbol':<8} {'Mode':<15} {'Status':<18} {'Reason'}")
+    print(f"{'-' * 90}")
+
+    status_map = {
+        "promoted": "✅ Success",
+        "rejected": "⛔ Rejected",
+        "training_failed": "❌ Failed",
+        "save_error": "❌ SaveErr",
+    }
 
     for (sym, mode), info in sorted(results.items()):
         raw_status = info.get("status")
-        status_map = {
-            "promoted": "✅ Success",
-            "rejected": "⛔ Rejected",
-            "training_failed": "❌ Failed",
-            "save_error": "❌ SaveErr",
-        }
         status = status_map.get(raw_status, f"⚠️ Unknown({raw_status})")
         reason = info.get("reason", "")
         print(f"{sym:<8} {mode:<15} {status:<18} {reason}")
