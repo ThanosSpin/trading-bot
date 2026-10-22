@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from predictive_model.features import add_advanced_features
+from predictive_model.model_xgb import _validate_exact_feature_schema
 from predictive_model.time_features import add_intraday_market_features
 
 
@@ -51,6 +52,30 @@ class FeatureCompatibilityTests(unittest.TestCase):
 
         self.assertTrue(result["relative_return_1"].iloc[1:].notna().all())
         self.assertTrue((result["relative_market_available"] == 1).all())
+
+    def test_known_legacy_indicator_capitalization_is_aliased(self):
+        current = pd.DataFrame(
+            {
+                "rsi": [55.0],
+                "macd_signal": [0.25],
+                "ema_14": [101.0],
+            }
+        )
+
+        aligned = _validate_exact_feature_schema(
+            current,
+            ["Rsi", "Macd_signal", "Ema_14"],
+        )
+
+        self.assertEqual(list(aligned.columns), ["Rsi", "Macd_signal", "Ema_14"])
+        self.assertEqual(aligned.iloc[0].tolist(), [55.0, 0.25, 101.0])
+
+    def test_unrelated_missing_feature_remains_an_error(self):
+        with self.assertRaisesRegex(ValueError, "Feature schema mismatch"):
+            _validate_exact_feature_schema(
+                pd.DataFrame({"signal": [1.0]}),
+                ["Unknown_legacy_feature"],
+            )
 
 
 if __name__ == "__main__":

@@ -69,6 +69,52 @@ INTRADAY_TARGET_OVERRIDES = {
 
 _intraday_regime_state = {}
 
+# Artifacts produced by the former enhanced-indicator pipeline stored these
+# column names with an initial capital letter.  Current feature generation
+# correctly keeps them lowercase.  Inference may provide these exact aliases
+# for old artifacts without weakening schema checks for unrelated features.
+_LEGACY_CAPITALIZED_INDICATORS = {
+    "adx",
+    "adx_neg",
+    "adx_pos",
+    "adx_strong_trend",
+    "adx_weak_trend",
+    "aroon_down",
+    "aroon_indicator",
+    "aroon_up",
+    "atr",
+    "atr_pct",
+    "bb_lower",
+    "bb_mid",
+    "bb_pct",
+    "bb_upper",
+    "bb_width",
+    "cmf",
+    "ema14_above_ema50",
+    "ema_14",
+    "ema_50",
+    "keltner_lower",
+    "keltner_mid",
+    "keltner_upper",
+    "macd",
+    "macd_hist",
+    "macd_signal",
+    "obv",
+    "price_above_bb_upper",
+    "price_below_bb_lower",
+    "roc",
+    "rsi",
+    "rsi_overbought",
+    "rsi_oversold",
+    "sma_20",
+    "stoch_d",
+    "stoch_k",
+    "stoch_overbought",
+    "stoch_oversold",
+    "volume_ratio",
+    "volume_sma_20",
+}
+
 # ---------------------------------------------------------
 # Utility
 # ---------------------------------------------------------
@@ -143,6 +189,21 @@ def _validate_exact_feature_schema(
 
     if not expected_features:
         raise ValueError("Expected feature schema is empty.")
+
+    # Compatibility is deliberately restricted to the known capitalization
+    # change above.  Missing unrelated columns still reject the artifact.
+    compatibility_aliases = {}
+    for lowercase_name in _LEGACY_CAPITALIZED_INDICATORS:
+        legacy_name = lowercase_name.capitalize()
+        if (
+            legacy_name in expected_features
+            and legacy_name not in df_features.columns
+            and lowercase_name in df_features.columns
+        ):
+            compatibility_aliases[legacy_name] = df_features[lowercase_name]
+
+    if compatibility_aliases:
+        df_features = df_features.assign(**compatibility_aliases)
 
     actual = list(df_features.columns)
     missing = [c for c in expected_features if c not in actual]
