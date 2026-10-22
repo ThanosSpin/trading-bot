@@ -17,72 +17,72 @@ from datetime import datetime
 import traceback
 import joblib
 
-from predictive_model.data_loader import fetch_historical_data
+from predictive_model.data_loader import fetch_intraday_history
 from predictive_model.features import _clean_columns
 from predictive_model.model_xgb import train_model, MODEL_DIR
 from predictive_model.model_evaluation import promotion_decision
 from config import TRAIN_SYMBOLS, USE_MULTICLASS_MODELS, USE_TWO_STAGE_TARGETS
 
-INTRADAY_LOOKBACK_DAYS = 60
+INTRADAY_LOOKBACK = 40000
 INTRADAY_INTERVAL = "15m"
 USE_MULTICLASS = USE_MULTICLASS_MODELS
 USE_TWO_STAGE = USE_TWO_STAGE_TARGETS
 FORCE_RETRAIN = True
 
 
-def _save_artifact(artifact, symbol: str, mode: str) -> dict:
-    """Promote a challenger only when it passes the shared evaluation gate."""
+def _save_artifact(artifact, symbol: str, mode: str) -> bool:
     model_dir = MODEL_DIR if MODEL_DIR else "models"
     os.makedirs(model_dir, exist_ok=True)
 
-    path = os.path.join(model_dir, f"{symbol}_{mode}_xgb.pkl")
-    abs_path = os.path.abspath(path)
+    active_path = os.path.join(
+        model_dir,
+        f"{symbol}_{mode}_xgb.pkl",
+    )
+    challenger_path = os.path.join(
+        model_dir,
+        f"{symbol}_{mode}_xgb_challenger.pkl",
+    )
 
     try:
-        champion = joblib.load(path) if os.path.exists(path) else None
+        champion = (
+            joblib.load(active_path)
+            if os.path.exists(active_path)
+            else None
+        )
+
         decision = promotion_decision(artifact, champion)
         artifact["promotion_evaluation"] = decision
 
         if not decision["accepted"]:
-            reason = "; ".join(decision["reasons"])
-            print(f"[PROMOTION REJECTED] {symbol}/{mode}: {reason}")
-            return {
-                "success": False,
-                "status": "rejected",
-                "reason": reason,
-            }
-
-        temporary_path = f"{path}.challenger"
-        joblib.dump(artifact, temporary_path)
-        os.replace(temporary_path, path)
-
-        if os.path.exists(path):
-            file_size_kb = os.path.getsize(path) / 1024.0
-            print(
-                f"✅ Promoted {symbol} {mode}: {abs_path} ({file_size_kb:.1f} KB) "
-                f"({decision['kind']}, overlap={decision['overlap_samples']})"
+            challenger_path = os.path.join(
+                model_dir,
+                f"{symbol}_{mode}_xgb_rejected.pkl",
             )
-            return {
-                "success": True,
-                "status": "promoted",
-                "reason": "Saved successfully",
-            }
 
-        print(f"❌ Failed to save {symbol} {mode} - file not found after save")
-        return {
-            "success": False,
-            "status": "save_error",
-            "reason": "File not found after save",
-        }
+            joblib.dump(artifact, challenger_path)
+
+            print(
+                f"[PROMOTION REJECTED] {symbol}/{mode}: "
+                + "; ".join(decision["reasons"])
+            )
+            print(f"Rejected challenger saved to: {challenger_path}")
+            return False
+
+        temporary_path = f"{active_path}.challenger"
+        joblib.dump(artifact, temporary_path)
+        os.replace(temporary_path, active_path)
+
+        print(
+            f"✅ Promoted {symbol} {mode}: {active_path} "
+            f"({decision['kind']}, "
+            f"overlap={decision['overlap_samples']})"
+        )
+        return True
 
     except Exception as e:
         print(f"❌ Error saving {symbol} {mode}: {e}")
         traceback.print_exc()
-        return {
-            "success": False,
-            "status": "save_error",
-            "reason": f"{type(e).__name__}: {e}",
-        }
+        return False
 
 
 def _print_artifact_summary(artifact: dict, symbol: str, mode: str) -> None:
@@ -259,15 +259,16 @@ def _print_summary(results: dict) -> None:
     print(f"{'-' * 80}")
 
     for (sym, mode), info in sorted(results.items()):
+        raw_status = info.get("status")
         status_map = {
             "promoted": "✅ Success",
             "rejected": "⛔ Rejected",
             "training_failed": "❌ Failed",
             "save_error": "❌ SaveErr",
         }
-        status = status_map.get(info.get("status"), "❌ Failed")
+        status = status_map.get(raw_status, f"⚠️ Unknown({raw_status})")
         reason = info.get("reason", "")
-        print(f"{sym:<8} {mode:<15} {status:<12} {reason}")
+        print(f"{sym:<8} {mode:<15} {status:<18} {reason}")
 
     print(f"{'=' * 60}\n")
 
@@ -291,12 +292,12 @@ def main():
         print(f"# SYMBOL {i}/{len(symbols)}: {sym}")
         print(f"{'#' * 70}")
 
-        print(f"\n[DATA] Fetching {INTRADAY_LOOKBACK_DAYS}d of {INTRADAY_INTERVAL} data for {sym}...")
+        print(f"\n[DATA] Fetching {INTRADAY_LOOKBACK}m of {INTRADAY_INTERVAL} data for {sym}...")
 
         try:
-            df = fetch_historical_data(
+            df = fetch_intraday_history(
                 sym,
-                period=f"{INTRADAY_LOOKBACK_DAYS}d",
+                lookback_minutes=INTRADAY_LOOKBACK,
                 interval=INTRADAY_INTERVAL,
             )
         except Exception as e:
@@ -322,12 +323,16 @@ def main():
             use_multiclass=USE_MULTICLASS,
         )
         if artifact_mr:
-            save_result = _save_artifact(artifact_mr, sym, "intraday_mr")
-            results[(sym, "intraday_mr")] = save_result
+            promoted = _save_artifact(artifact_mr, sym, "intraday_mr")
+            results[(sym, "intraday_mr")] = {
+                "success": bool(promoted),
+                "status": "Promoted" if promoted else "Promotion rejected",
+                "reason": "Promoted" if promoted else "Promotion rejected",
+            }
         else:
             results[(sym, "intraday_mr")] = {
                 "success": False,
-                "status": "training_failed",
+                "status": "Training failed",
                 "reason": "Training failed",
             }
 
@@ -338,12 +343,16 @@ def main():
             use_multiclass=USE_MULTICLASS,
         )
         if artifact_mom:
-            save_result = _save_artifact(artifact_mom, sym, "intraday_mom")
-            results[(sym, "intraday_mom")] = save_result
+            promoted = _save_artifact(artifact_mom, sym, "intraday_mom")
+            results[(sym, "intraday_mom")] = {
+                "success": bool(promoted),
+                "status": "Promoted" if promoted else "Promotion rejected",
+                "reason": "Promoted" if promoted else "Promotion rejected",
+            }
         else:
             results[(sym, "intraday_mom")] = {
                 "success": False,
-                "status": "training_failed",
+                "status": "Training failed",
                 "reason": "Training failed",
             }
 

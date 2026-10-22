@@ -63,6 +63,7 @@ INTRADAY_TARGET_OVERRIDES = {
     },
 }
 
+_intraday_regime_state = {}
 
 # ---------------------------------------------------------
 # Utility
@@ -757,6 +758,9 @@ def train_model(
 
     selected_feature_metadata = None
     selected_features = feature_list
+    walk_forward_evaluation = None
+    walk_forward_threshold = None
+    artifact_decision_threshold = None
 
     print(
         "[FEATURE SELECTION] Eligibility: "
@@ -766,7 +770,7 @@ def train_model(
         f"cal_rows={len(X_cal)}"
     )
 
-    if num_classes == 2 and len(X_train.columns) >= 25 and len(X_cal.columns) >= 50:
+    if num_classes == 2 and len(X_train.columns) >= 25 and len(X_cal) >= 50:
         try:
             print(f"\n[FEATURE SELECTION] Running calibration-window SHAP selection...")
             top_features, _shap_values, X_train_sel, X_cal_sel, fs_meta = (
@@ -791,6 +795,25 @@ def train_model(
                 selected_feature_metadata = fs_meta
                 feature_list = top_features
 
+                if len(feature_list) != len(set(feature_list)):
+                    raise ValueError("Selected feature list contains duplicates.")
+
+                missing_selected = [
+                    col for col in feature_list if col not in X_train.columns
+                ]
+                if missing_selected:
+                    raise ValueError(
+                        f"Selected features missing from training schema: {missing_selected[:10]}"
+                    )
+
+                print(
+                    f"[FEATURE SELECTION] Final schema: "
+                    f"{len(feature_list)} features | "
+                    f"X_train={X_train.shape} | "
+                    f"X_cal={X_cal.shape} | "
+                    f"X_test={X_test.shape}"
+                )
+
                 model = XGBClassifier(**params)
                 model.fit(X_train, y_train, eval_set=[(X_cal, y_cal)], verbose=False)
                 print(f"[FEATURE SELECTION] Retrained selected-feature model")
@@ -803,12 +826,11 @@ def train_model(
                 f"[FEATURE SELECTION] Skipping SHAP feature selection due to error: {type(e).__name__}: {e}"
             )
 
-    walk_forward_evaluation = None
     if num_classes == 2:
         print("\n[WALK-FORWARD] Running expanding-fold evaluation with embargo gaps...")
-        # Give every fold the full pre-selection schema. When the final model
-        # selected a smaller schema, each fold independently selects the same
-        # number of features using only its own fit window.
+        # Walk-forward receives the complete evaluation schema.
+        # Each fold performs feature selection using only that fold's training window,
+        # capped at the final model's selected-feature count.
         eval_counts = _print_chronological_class_counts(
             f"{symbol}/{mode} walk_forward_eval_target",
             evaluation_target,
@@ -826,8 +848,21 @@ def train_model(
                 f"(train={eval_counts['train']}, cal={eval_counts['cal']}, test={eval_counts['test']})"
             )
 
+        evaluation_feature_columns = list(feature_list)
+
+        evaluation_X_for_walk_forward = evaluation_X.loc[
+            :, evaluation_feature_columns
+        ].copy()
+
+        print(
+            f"[WALK-FORWARD SCHEMA] "
+            f"evaluation_features={evaluation_X.shape[1]} "
+            f"max_features={len(feature_list)} "
+            f"selected_features={len(selected_features)}"
+        )
+
         walk_forward_evaluation = evaluate_walk_forward(
-            X=evaluation_X,
+            X=evaluation_X_for_walk_forward,
             y=evaluation_target,
             forward_returns=evaluation_returns,
             training_target=evaluation_training_target,
@@ -841,6 +876,10 @@ def train_model(
             holding_period_bars=4 if use_two_stage and mode != "daily" else 1,
         )
         wf_metrics = walk_forward_evaluation["aggregate"]
+        walk_forward_threshold = float(
+            walk_forward_evaluation.get("decision_threshold", 0.5)
+        )
+
         print(
             "[WALK-FORWARD] "
             f"folds={walk_forward_evaluation['n_splits']} "
@@ -891,6 +930,11 @@ def train_model(
     if use_two_stage and num_classes == 2:
         print("\n[TWO-STAGE] Training meaningful-move gate...")
         movement_X = evaluation_X.loc[:, feature_list].copy()
+        print(
+            f"[TWO-STAGE SCHEMA] "
+            f"movement_X={movement_X.shape} "
+            f"feature_list={len(feature_list)}"
+        )
         movement_y = evaluation_movement_target.loc[movement_X.index].astype(int)
         (
             move_X_train,
@@ -975,6 +1019,7 @@ def train_model(
             )
 
             best_threshold = float(threshold_opt["best_threshold"])
+            artifact_decision_threshold = best_threshold
 
             wf_threshold = None
             wf_trade_count = None
@@ -1193,6 +1238,27 @@ def train_model(
 
     feature_importance = extract_feature_importance(base_model, feature_list)
 
+    selected_features = list(feature_list)
+    full_features = list(full_feature_schema["features"])
+
+    if selected_features != list(
+        full_feature_schema.get("selected_features", selected_features)
+    ):
+        pass
+
+    if len(selected_features) != len(feature_list):
+        raise RuntimeError(
+            "Selected feature list and feature_list length diverged"
+        )
+
+    if set(selected_features) - set(full_features):
+        raise RuntimeError(
+            "Selected features contain columns absent from full feature schema"
+        )
+
+    full_feature_schema["selected_features"] = selected_features
+    full_feature_schema["selected_feature_count"] = len(selected_features)
+
     return {
         "model": final_model,
         "movement_model": movement_model,
@@ -1221,6 +1287,12 @@ def train_model(
         "metrics": metrics,
         "walk_forward_evaluation": walk_forward_evaluation,
         "decision_threshold": metrics.get("decision_threshold", 0.5),
+        "artifact_decision_threshold": artifact_decision_threshold,
+        "walk_forward_decision_threshold": (
+            float(walk_forward_evaluation.get("decision_threshold"))
+            if walk_forward_evaluation is not None
+            else None
+        ),
         "threshold_optimization": {
             "best_threshold": metrics.get("decision_threshold", 0.5),
             "metric": metrics.get("threshold_metric"),
@@ -1610,6 +1682,134 @@ def detect_contradiction(
     return {"contradiction": False, "reason": "Mild disagreement", "severity": "low"}
 
 
+def _get_intraday_regime_state(symbol: str) -> dict:
+    key = str(symbol).upper().strip()
+    state = _intraday_regime_state.get(key)
+    if state is None:
+        state = {
+            "active_regime": None,
+            "active_since": None,
+            "pending_regime": None,
+            "pending_count": 0,
+            "last_bar_time": None,
+        }
+        _intraday_regime_state[key] = state
+    return state
+
+
+def _resolve_intraday_regime_with_confirmation(
+    symbol: str,
+    bar_time,
+    raw_regime: str,
+    mom_value: float,
+    vol_value: float,
+    mom_trig: float,
+    vol_trig: float,
+    confirm_bars: int = 2,
+    min_hold_bars: int = 2,
+    hysteresis_enter_mult: float = 1.00,
+    hysteresis_exit_mult: float = 0.85,
+) -> dict:
+    state = _get_intraday_regime_state(symbol)
+
+    current_bar_ts = pd.Timestamp(bar_time) if bar_time is not None else None
+    if current_bar_ts is not None and state.get("last_bar_time") is not None:
+        if current_bar_ts == pd.Timestamp(state["last_bar_time"]):
+            bars_since_switch = 0
+            if state["active_since"] is not None:
+                try:
+                    bars_since_switch = max(
+                        0,
+                        int((current_bar_ts - pd.Timestamp(state["active_since"])) / pd.Timedelta(minutes=15))
+                    )
+                except Exception:
+                    bars_since_switch = 0
+            return {
+                "active_regime": state["active_regime"],
+                "raw_regime": raw_regime,
+                "hysteresis_regime": state["active_regime"],
+                "pending_count": state["pending_count"],
+                "bars_since_switch": bars_since_switch,
+                "switched": False,
+            }
+
+    enter_mom = (
+        abs(mom_value) >= mom_trig * hysteresis_enter_mult
+        or vol_value >= vol_trig * hysteresis_enter_mult
+    )
+    stay_mom = (
+        abs(mom_value) >= mom_trig * hysteresis_exit_mult
+        or vol_value >= vol_trig * hysteresis_exit_mult
+    )
+
+    hysteresis_regime = "mom" if enter_mom else "mr"
+    if state["active_regime"] == "mom" and stay_mom:
+        hysteresis_regime = "mom"
+
+    if state["active_regime"] is None:
+        state["active_regime"] = hysteresis_regime
+        state["active_since"] = bar_time
+        state["pending_regime"] = None
+        state["pending_count"] = 0
+        state["last_bar_time"] = bar_time
+        return {
+            "active_regime": state["active_regime"],
+            "raw_regime": raw_regime,
+            "hysteresis_regime": hysteresis_regime,
+            "pending_count": 0,
+            "bars_since_switch": 0,
+            "switched": True,
+        }
+
+    bars_since_switch = 0
+    if state["active_since"] is not None and bar_time is not None:
+        try:
+            bars_since_switch = max(
+                0,
+                int((pd.Timestamp(bar_time) - pd.Timestamp(state["active_since"])) / pd.Timedelta(minutes=15))
+            )
+        except Exception:
+            bars_since_switch = 0
+
+    if hysteresis_regime == state["active_regime"]:
+        state["pending_regime"] = None
+        state["pending_count"] = 0
+    else:
+        if bars_since_switch < min_hold_bars:
+            state["pending_regime"] = hysteresis_regime
+            state["pending_count"] = 0
+        else:
+            if state["pending_regime"] == hysteresis_regime:
+                state["pending_count"] += 1
+            else:
+                state["pending_regime"] = hysteresis_regime
+                state["pending_count"] = 1
+
+            if state["pending_count"] >= confirm_bars:
+                state["active_regime"] = hysteresis_regime
+                state["active_since"] = bar_time
+                state["pending_regime"] = None
+                state["pending_count"] = 0
+                state["last_bar_time"] = bar_time
+                return {
+                    "active_regime": state["active_regime"],
+                    "raw_regime": raw_regime,
+                    "hysteresis_regime": hysteresis_regime,
+                    "pending_count": 0,
+                    "bars_since_switch": bars_since_switch,
+                    "switched": True,
+                }
+
+    state["last_bar_time"] = bar_time
+    return {
+        "active_regime": state["active_regime"],
+        "raw_regime": raw_regime,
+        "hysteresis_regime": hysteresis_regime,
+        "pending_count": state["pending_count"],
+        "bars_since_switch": bars_since_switch,
+        "switched": False,
+    }
+
 # ---------------------------------------------------------
 # COMPUTE SIGNALS (kept compatible; inference now uses strict schema)
 # ---------------------------------------------------------
@@ -1813,15 +2013,50 @@ def compute_signals(
             candidate_models = []
 
             if vol is not None and mom1h is not None:
-                if abs(mom1h) >= MOMTRIG or vol >= VOLTRIG:
-                    results["intraday_regime"] = "mom"
+                raw_regime = "mom" if (abs(mom1h) >= MOMTRIG or vol >= VOLTRIG) else "mr"
+                latest_bar_time = df_intra_resampled.index[-1] if len(df_intra_resampled) else None
+
+                regime_decision = _resolve_intraday_regime_with_confirmation(
+                    symbol=symU,
+                    bar_time=latest_bar_time,
+                    raw_regime=raw_regime,
+                    mom_value=float(mom1h),
+                    vol_value=float(vol),
+                    mom_trig=float(MOMTRIG),
+                    vol_trig=float(VOLTRIG),
+                    confirm_bars=2,
+                    min_hold_bars=2,
+                    hysteresis_enter_mult=1.00,
+                    hysteresis_exit_mult=0.85,
+                )
+
+                results["intraday_regime_raw"] = raw_regime
+                results["intraday_regime_hysteresis"] = regime_decision["hysteresis_regime"]
+                results["intraday_regime"] = regime_decision["active_regime"]
+                results["intraday_regime_pending_count"] = regime_decision["pending_count"]
+                results["intraday_regime_bars_since_switch"] = regime_decision["bars_since_switch"]
+                results["intraday_regime_switched"] = regime_decision["switched"]
+                results["intraday_regime_confirm_bars"] = 2
+                results["intraday_regime_min_hold_bars"] = 2
+                results["intraday_regime_hysteresis_enter_mult"] = 1.00
+                results["intraday_regime_hysteresis_exit_mult"] = 0.85
+
+                print(
+                    f"[REGIME ROUTER] {symU} "
+                    f"mom1h={float(mom1h):+.4%} vol12={float(vol):.6f} "
+                    f"raw={raw_regime} hysteresis={regime_decision['hysteresis_regime']} "
+                    f"active={regime_decision['active_regime']} "
+                    f"pending={regime_decision['pending_count']} "
+                    f"hold_bars={regime_decision['bars_since_switch']}"
+                )
+
+                if results["intraday_regime"] == "mom":
                     candidate_models = [
                         ("intraday_mom", model_intra_mom),
                         ("intraday_mr", model_intra_mr),
                         ("intraday", model_intraday_legacy),
                     ]
                 else:
-                    results["intraday_regime"] = "mr"
                     candidate_models = [
                         ("intraday_mr", model_intra_mr),
                         ("intraday_mom", model_intra_mom),
@@ -1904,8 +2139,8 @@ def compute_signals(
                     else:
                         results["intraday_model_used"] = model_used
                     results["intraday_prediction"] = intraday_prediction
-                    results["intraday_model_used"] = model_used
                     results["intraday_signal"] = get_signal_details(intraday_prediction)
+                    results["intraday_candidate_order"] = [name for name, _ in candidate_models]
                     ip = get_final_prob(intraday_prediction)
                     if ip is not None:
                         results["intraday_prob"] = float(ip)

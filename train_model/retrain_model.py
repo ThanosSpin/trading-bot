@@ -45,17 +45,28 @@ INTRADAY_INTERVAL = "15m"
 
 
 def save_model_with_backup(artifact, symbol: str, mode: str = "daily"):
-    """Promote an accepted challenger and maintain rolling monthly backups."""
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     active_path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
+    challenger_path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb_rejected.pkl")
+
     champion = joblib.load(active_path) if os.path.exists(active_path) else None
     decision = promotion_decision(artifact, champion)
     artifact["promotion_evaluation"] = decision
+
     if not decision["accepted"]:
-        print(
-            f"[PROMOTION REJECTED] {symbol}/{mode}: " + "; ".join(decision["reasons"])
+        challenger_path = os.path.join(
+            MODEL_DIR,
+            f"{symbol}_{mode}_xgb_rejected.pkl",
         )
+
+        joblib.dump(artifact, challenger_path)
+
+        print(
+            f"[PROMOTION REJECTED] {symbol}/{mode}: "
+            + "; ".join(decision["reasons"])
+        )
+        print(f"Rejected challenger saved to: {challenger_path}")
         return False
 
     month_tag = datetime.now().strftime("%Y-%m")
@@ -65,9 +76,7 @@ def save_model_with_backup(artifact, symbol: str, mode: str = "daily"):
         shutil.copy2(active_path, backup_path)
         print(f"📦 Monthly backup created: {backup_path}")
     else:
-        print(
-            f"ℹ️ Monthly backup for {symbol} ({mode}) in {month_tag} already exists — skipping."
-        )
+        print(f"ℹ️ Monthly backup for {symbol} ({mode}) in {month_tag} already exists — skipping.")
 
     temporary_path = f"{active_path}.challenger"
     joblib.dump(artifact, temporary_path)
@@ -76,7 +85,6 @@ def save_model_with_backup(artifact, symbol: str, mode: str = "daily"):
         f"✅ Active {mode} model promoted: {active_path} "
         f"({decision['kind']}, overlap={decision['overlap_samples']})"
     )
-
     cleanup_old_backups(symbol, mode)
     return True
 
