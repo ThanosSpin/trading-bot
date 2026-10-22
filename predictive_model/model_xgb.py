@@ -2088,6 +2088,10 @@ def compute_signals(
                 else:
                     print(f"[STALE] {symU} {mode_name} stale: age={age:.1f}d > 30d")
                     stale_models.append((mode_name, model_obj, age))
+                    print(
+                        f"[STALE APPEND DEBUG] {symU} appended={mode_name} "
+                        f"stale_now={[name for name, _, _ in stale_models]}"
+                    )
 
             if vol is not None and mom1h is not None:
                 raw_regime = "mom" if (abs(mom1h) >= MOMTRIG or vol >= VOLTRIG) else "mr"
