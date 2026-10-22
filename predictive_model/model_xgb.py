@@ -2144,6 +2144,13 @@ def compute_signals(
                     obj, age = fresh_by_name[name]
                     candidate_models.append((name, obj))
 
+            print(
+                f"[CANDIDATES DEBUG] {symU} preferred_order={preferred_order} "
+                f"fresh={[name for name, _, _ in fresh_models]} "
+                f"stale={[name for name, _, _ in stale_models]} "
+                f"candidate_pre={[name for name, _ in candidate_models]}"
+            )
+
             if not candidate_models:
                 for name in preferred_order:
                     if name in stale_by_name:
