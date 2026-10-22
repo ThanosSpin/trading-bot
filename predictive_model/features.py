@@ -525,7 +525,9 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 # 🆕 SPY REGIME FEATURES (MACRO CONTEXT)
 # ============================================================================
 def add_spy_regime_features(
-    df: pd.DataFrame, benchmark_df: pd.DataFrame | None = None, spy_symbol: str = "SPY"
+    df: pd.DataFrame,
+    benchmark_df: Optional[pd.DataFrame] = None,
+    spy_symbol: str = "SPY",
 ) -> pd.DataFrame:
     """
     Add SPY market regime features (most predictive exogenous signal).
