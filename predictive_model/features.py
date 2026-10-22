@@ -300,7 +300,13 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
         if f"sma_{win}" not in df.columns:
             df[f"sma_{win}"] = sma(df["Close"], win)
 
-    # ✅ REMOVED: RSI, MACD, Stochastic, Bollinger - now from indicators.py
+    # Retain the exact RSI feature names used by deployed artifacts.  The
+    # enhanced indicator set exposes only ``rsi``; removing these two columns
+    # made otherwise valid daily artifacts fail strict schema validation.
+    if "rsi_6" not in df.columns:
+        df["rsi_6"] = rsi(df["Close"], 6)
+    if "rsi_14" not in df.columns:
+        df["rsi_14"] = rsi(df["Close"], 14)
 
     # -----------------------------
     # ATR + volatility (if not already present)

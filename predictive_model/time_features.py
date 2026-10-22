@@ -244,13 +244,16 @@ def add_intraday_market_features(
             volume / volume.groupby(session_key).transform("mean").replace(0, np.nan)
         )
 
-        elapsed = (
-            idx.hour * 60
-            + idx.minute
-            - (9 * 60 + 30)
+        # DatetimeIndex arithmetic returns an Index, and Index does not expose
+        # Series.clip().  Keep this indexed so the later volume arithmetic is
+        # aligned to the frame rather than relying on positional broadcasting.
+        elapsed = pd.Series(
+            idx.hour * 60 + idx.minute - (9 * 60 + 30),
+            index=df.index,
+            dtype=float,
         ).clip(lower=0, upper=390)
 
-        expected_progress = np.maximum(elapsed.to_numpy() / 390.0, 1 / 390)
+        expected_progress = elapsed.div(390.0).clip(lower=1 / 390)
         cumulative_session_volume = volume.groupby(session_key).cumsum()
 
         session_total_estimate = (
@@ -289,13 +292,14 @@ def add_intraday_market_features(
         ).dropna()
 
         if isinstance(df.index, pd.DatetimeIndex):
-            target_index = df.index
+            output_index = df.index
+            target_index = output_index
             bench_index = benchmark_close.index
 
             if target_index.tz is not None:
-                target_index = target_index.tz_localize(None)
+                target_index = target_index.tz_convert("UTC").tz_localize(None)
             if bench_index.tz is not None:
-                bench_index = bench_index.tz_localize(None)
+                bench_index = bench_index.tz_convert("UTC").tz_localize(None)
 
             benchmark_close = benchmark_close.copy()
             benchmark_close.index = bench_index
@@ -308,6 +312,10 @@ def add_intraday_market_features(
                 target_index,
                 method="ffill",
             )
+            # Matching is performed on timezone-normalized timestamps, but all
+            # derived Series must use the asset frame's original index or
+            # pandas will align aware and naive timestamps into all-NaN data.
+            aligned_benchmark.index = output_index
 
             for period in (1, 2, 4):
                 asset_return = close.pct_change(period)
@@ -321,7 +329,7 @@ def add_intraday_market_features(
             df["spy_return_2"] = aligned_benchmark.pct_change(2)
 
             asset_session = pd.Series(
-                target_index.date,
+                output_index.date,
                 index=df.index,
             )
             asset_session_return = (
