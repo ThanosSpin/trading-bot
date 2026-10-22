@@ -1523,9 +1523,13 @@ def main():
     debug_market()
 
     # Optional market-hours guard
-    if not is_market_open():
+    force_run_closed = os.getenv("FORCE_RUN_CLOSED", "0") == "1"
+    if not force_run_closed and not is_market_open():
         print("⏳ Market is closed. Exiting.")
         return
+
+    if force_run_closed:
+        print("⚠️ FORCE_RUN_CLOSED=1 -> bypassing market-hours guard for this run")
 
     # margin Display
     try:
