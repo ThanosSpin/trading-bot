@@ -307,6 +307,9 @@ def get_predictions(symbols, debug=True):
 
         if daily_prob is None and intraday_prob is None:
             print(f"[WARN] Invalid prediction for {sym}, skipping.")
+            f"reasons={sig.get('failure_reasons')} "
+            f"daily_rows={sig.get('daily_rows')} intraday_rows={sig.get('intraday_rows')} "
+            f"model_used={sig.get('intraday_model_used')}"
             continue
 
         # Fallbacks if one side missing

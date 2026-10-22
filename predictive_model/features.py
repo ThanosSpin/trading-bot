@@ -1,7 +1,7 @@
 # features.py
 import pandas as pd
 import numpy as np
-from predictive_model.time_features import add_time_features
+from predictive_model.time_features import add_time_features,add_intraday_compatibility_features, add_intraday_market_features
 from predictive_model.data_loader import fetch_historical_data
 from typing import Optional
 
@@ -427,6 +427,12 @@ def build_intraday_features(
 
     if isinstance(df.index, pd.DatetimeIndex):
         df = add_time_features(df)
+        df = add_intraday_compatibility_features(df)
+
+    df = add_intraday_market_features(
+        df,
+        benchmark_df=benchmark_df,
+    )
 
     df = add_spy_regime_features(
         df,

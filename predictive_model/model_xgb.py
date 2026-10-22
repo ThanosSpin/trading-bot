@@ -1360,7 +1360,8 @@ def load_model(symbol: str, mode: str):
     """Load saved model artifact. Returns None if missing."""
     path = os.path.join(MODEL_DIR, f"{symbol}_{mode}_xgb.pkl")
     if not os.path.exists(path):
-        return None
+        print(f"[WARN] Missing model artifact: {path}")
+    return None
     try:
         return joblib.load(path)
     except Exception as e:

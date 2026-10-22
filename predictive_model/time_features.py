@@ -6,7 +6,8 @@ Captures market microstructure patterns that repeat daily.
 
 import pandas as pd
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional
+
 
 ######## Helper  functions ########
 NY_TZ = "America/New_York"
@@ -175,6 +176,180 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
+def add_intraday_compatibility_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add legacy time/session fields retained for artifact compatibility."""
+    df = df.copy()
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return df
+
+    idx = df.index
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+
+    clock_minute = idx.hour * 60 + idx.minute
+    market_open = 9 * 60 + 30
+    market_close = 16 * 60
+
+    df["clock_minute"] = clock_minute.astype(float)
+    df["is_regular_session"] = (
+        (clock_minute >= market_open)
+        & (clock_minute <= market_close)
+    ).astype(int)
+
+    minutes_since_open = clock_minute - market_open
+
+    df["is_first_15min"] = (
+        (minutes_since_open >= 0)
+        & (minutes_since_open < 15)
+    ).astype(int)
+
+    df["is_last_15min"] = (
+        (minutes_since_open >= 375)
+        & (minutes_since_open <= 390)
+    ).astype(int)
+
+    return df
+
+
+def add_intraday_market_features(
+    df: pd.DataFrame,
+    benchmark_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Add session, VWAP, relative-strength, and benchmark-return features."""
+    df = df.copy()
+
+    close = pd.to_numeric(df["Close"], errors="coerce")
+    high = pd.to_numeric(df["High"], errors="coerce")
+    low = pd.to_numeric(df["Low"], errors="coerce")
+    volume = pd.to_numeric(df["Volume"], errors="coerce").fillna(0.0)
+
+    typical_price = (high + low + close) / 3.0
+
+    if isinstance(df.index, pd.DatetimeIndex):
+        idx = df.index
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+
+        session_key = pd.Series(idx.date, index=df.index)
+        cumulative_pv = (typical_price * volume).groupby(session_key).cumsum()
+        cumulative_volume = volume.groupby(session_key).cumsum()
+
+        vwap = cumulative_pv / cumulative_volume.replace(0, np.nan)
+        df["vwap_distance"] = close / vwap.replace(0, np.nan) - 1.0
+        df["above_vwap"] = (close >= vwap).astype(int)
+
+        df["session_volume_pace"] = (
+            volume / volume.groupby(session_key).transform("mean").replace(0, np.nan)
+        )
+
+        elapsed = (
+            idx.hour * 60
+            + idx.minute
+            - (9 * 60 + 30)
+        ).clip(lower=0, upper=390)
+
+        expected_progress = np.maximum(elapsed.to_numpy() / 390.0, 1 / 390)
+        cumulative_session_volume = volume.groupby(session_key).cumsum()
+
+        session_total_estimate = (
+            volume.groupby(session_key).transform("mean") * 26
+        )
+
+        expected_volume = session_total_estimate * expected_progress
+        df["volume_time_ratio"] = (
+            cumulative_session_volume / expected_volume.replace(0, np.nan)
+        )
+
+        df["vwap_slope_2"] = df["vwap_distance"].diff(2)
+        df["vwap_slope_4"] = df["vwap_distance"].diff(4)
+    else:
+        df["vwap_distance"] = np.nan
+        df["above_vwap"] = 0
+        df["session_volume_pace"] = np.nan
+        df["volume_time_ratio"] = np.nan
+        df["vwap_slope_2"] = np.nan
+        df["vwap_slope_4"] = np.nan
+
+    for period in (1, 2, 4):
+        df[f"relative_return_{period}"] = np.nan
+
+    df["relative_session_return"] = np.nan
+    df["relative_strength_accel"] = np.nan
+    df["relative_vwap_strength"] = np.nan
+    df["relative_market_available"] = 0
+    df["spy_return_1"] = np.nan
+    df["spy_return_2"] = np.nan
+
+    if benchmark_df is not None and not benchmark_df.empty:
+        benchmark = benchmark_df
+        benchmark_close = pd.to_numeric(
+            benchmark["Close"], errors="coerce"
+        ).dropna()
+
+        if isinstance(df.index, pd.DatetimeIndex):
+            target_index = df.index
+            bench_index = benchmark_close.index
+
+            if target_index.tz is not None:
+                target_index = target_index.tz_localize(None)
+            if bench_index.tz is not None:
+                bench_index = bench_index.tz_localize(None)
+
+            benchmark_close = benchmark_close.copy()
+            benchmark_close.index = bench_index
+            benchmark_close = (
+                benchmark_close[~benchmark_close.index.duplicated(keep="last")]
+                .sort_index()
+            )
+
+            aligned_benchmark = benchmark_close.reindex(
+                target_index,
+                method="ffill",
+            )
+
+            for period in (1, 2, 4):
+                asset_return = close.pct_change(period)
+                benchmark_return = aligned_benchmark.pct_change(period)
+
+                df[f"relative_return_{period}"] = (
+                    asset_return - benchmark_return
+                )
+
+            df["spy_return_1"] = aligned_benchmark.pct_change(1)
+            df["spy_return_2"] = aligned_benchmark.pct_change(2)
+
+            asset_session = pd.Series(
+                target_index.date,
+                index=df.index,
+            )
+            asset_session_return = (
+                close / close.groupby(asset_session).transform("first") - 1.0
+            )
+            benchmark_session_return = (
+                aligned_benchmark
+                / aligned_benchmark.groupby(asset_session).transform("first")
+                - 1.0
+            )
+
+            df["relative_session_return"] = (
+                asset_session_return - benchmark_session_return
+            )
+
+            df["relative_strength_accel"] = (
+                df["relative_return_2"].diff()
+            )
+
+            df["relative_vwap_strength"] = (
+                df["vwap_distance"] - df["relative_session_return"]
+            )
+
+            df["relative_market_available"] = (
+                aligned_benchmark.notna().astype(int)
+            )
+
+    return df
 
 def get_time_feature_stats(df: pd.DataFrame) -> Dict[str, any]:
     """
