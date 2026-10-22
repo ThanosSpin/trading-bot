@@ -205,6 +205,36 @@ def _validate_exact_feature_schema(
     if compatibility_aliases:
         df_features = df_features.assign(**compatibility_aliases)
 
+    legacy_clock_features = {
+        "hour_sin",
+        "hour_cos",
+        "minute_sin",
+        "minute_cos",
+    }
+    required_clock_features = legacy_clock_features.intersection(expected_features)
+    missing_clock_features = required_clock_features.difference(df_features.columns)
+    if missing_clock_features:
+        if not isinstance(df_features.index, pd.DatetimeIndex):
+            raise ValueError(
+                "Legacy clock features require a DatetimeIndex. "
+                f"Missing={sorted(missing_clock_features)}"
+            )
+
+        hour = df_features.index.hour.astype(float)
+        minute = df_features.index.minute.astype(float)
+        clock_aliases = {
+            "hour_sin": np.sin(2 * np.pi * hour / 24.0),
+            "hour_cos": np.cos(2 * np.pi * hour / 24.0),
+            "minute_sin": np.sin(2 * np.pi * minute / 60.0),
+            "minute_cos": np.cos(2 * np.pi * minute / 60.0),
+        }
+        df_features = df_features.assign(
+            **{
+                name: clock_aliases[name]
+                for name in missing_clock_features
+            }
+        )
+
     actual = list(df_features.columns)
     missing = [c for c in expected_features if c not in actual]
     extra = [c for c in actual if c not in expected_features]

@@ -77,6 +77,26 @@ class FeatureCompatibilityTests(unittest.TestCase):
                 ["Unknown_legacy_feature"],
             )
 
+    def test_legacy_clock_features_are_derived_only_when_required(self):
+        index = pd.DatetimeIndex(["2026-10-22 09:30:00"], tz="America/New_York")
+        current = pd.DataFrame({"signal": [1.0]}, index=index)
+
+        aligned = _validate_exact_feature_schema(
+            current,
+            [
+                "signal",
+                "hour_sin",
+                "hour_cos",
+                "minute_sin",
+                "minute_cos",
+            ],
+        )
+
+        self.assertAlmostEqual(aligned.iloc[0]["hour_sin"], np.sin(2 * np.pi * 9 / 24))
+        self.assertAlmostEqual(aligned.iloc[0]["hour_cos"], np.cos(2 * np.pi * 9 / 24))
+        self.assertAlmostEqual(aligned.iloc[0]["minute_sin"], 0.0)
+        self.assertAlmostEqual(aligned.iloc[0]["minute_cos"], -1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
