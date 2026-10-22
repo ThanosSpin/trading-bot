@@ -2067,46 +2067,6 @@ def compute_signals(
                         VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
                     results["intraday_regime_source"] = "legacy_config"
 
-            candidate_models = []
-
-            if vol is not None and mom1h is not None:
-                raw_regime = "mom" if (abs(mom1h) >= MOMTRIG or vol >= VOLTRIG) else "mr"
-                latest_bar_time = df_intra_resampled.index[-1] if len(df_intra_resampled) else None
-
-                regime_decision = _resolve_intraday_regime_with_confirmation(
-                    symbol=symU,
-                    bar_time=latest_bar_time,
-                    raw_regime=raw_regime,
-                    mom_value=float(mom1h),
-                    vol_value=float(vol),
-                    mom_trig=float(MOMTRIG),
-                    vol_trig=float(VOLTRIG),
-                    confirm_bars=2,
-                    min_hold_bars=2,
-                    hysteresis_enter_mult=1.00,
-                    hysteresis_exit_mult=0.85,
-                )
-
-                results["intraday_regime_raw"] = raw_regime
-                results["intraday_regime_hysteresis"] = regime_decision["hysteresis_regime"]
-                results["intraday_regime"] = regime_decision["active_regime"]
-                results["intraday_regime_pending_count"] = regime_decision["pending_count"]
-                results["intraday_regime_bars_since_switch"] = regime_decision["bars_since_switch"]
-                results["intraday_regime_switched"] = regime_decision["switched"]
-                results["intraday_regime_confirm_bars"] = 2
-                results["intraday_regime_min_hold_bars"] = 2
-                results["intraday_regime_hysteresis_enter_mult"] = 1.00
-                results["intraday_regime_hysteresis_exit_mult"] = 0.85
-
-                print(
-                    f"[REGIME ROUTER] {symU} "
-                    f"mom1h={float(mom1h):+.4%} vol12={float(vol):.6f} "
-                    f"raw={raw_regime} hysteresis={regime_decision['hysteresis_regime']} "
-                    f"active={regime_decision['active_regime']} "
-                    f"pending={regime_decision['pending_count']} "
-                    f"hold_bars={regime_decision['bars_since_switch']}"
-                )
-
             fresh_models = []
             stale_models = []
 
