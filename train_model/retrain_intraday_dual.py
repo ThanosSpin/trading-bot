@@ -154,7 +154,7 @@ def _print_artifact_summary(artifact: dict, symbol: str, mode: str) -> None:
                 print(f"   {label}: {value}")
 
 
-def _train_regime_model(df, symbol: str, mode: str, use_multiclass: bool = True):
+def _train_regime_model(df, symbol: str, mode: str, use_multiclass: bool = True, benchmark_df=None,):
     """
     Train a single regime model using patched train_model().
 
@@ -179,6 +179,7 @@ def _train_regime_model(df, symbol: str, mode: str, use_multiclass: bool = True)
             mode=mode,
             use_multiclass=use_multiclass,
             use_two_stage=USE_TWO_STAGE,
+            benchmark_df=benchmark_df,
         )
 
         if artifact is None:
@@ -300,6 +301,13 @@ def main():
                 lookback_minutes=INTRADAY_LOOKBACK,
                 interval=INTRADAY_INTERVAL,
             )
+            spy_df = fetch_intraday_history(
+                "SPY",
+                lookback_minutes=INTRADAY_LOOKBACK,
+                interval=INTRADAY_INTERVAL,
+            )
+            if spy_df is not None and not spy_df.empty:
+                spy_df = _clean_columns(spy_df)
         except Exception as e:
             print(f"❌ Data fetch failed for {sym}: {e}")
             results[(sym, "intraday_mr")] = {"success": False, "reason": "Data fetch failed"}
@@ -321,6 +329,7 @@ def main():
             symbol=sym,
             mode="intraday_mr",
             use_multiclass=USE_MULTICLASS,
+            benchmark_df=spy_df,
         )
         if artifact_mr:
             success, status, reason = _save_artifact(artifact_mr, sym, "intraday_mr")
@@ -341,6 +350,7 @@ def main():
             symbol=sym,
             mode="intraday_mom",
             use_multiclass=USE_MULTICLASS,
+            benchmark_df=spy_df,
         )
         if artifact_mom:
             success, status, reason = _save_artifact(artifact_mom, sym, "intraday_mom")
