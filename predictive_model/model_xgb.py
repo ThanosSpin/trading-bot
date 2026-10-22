@@ -1899,15 +1899,6 @@ def compute_signals(
             print(f"[STALE] {symU} {mode_name} stale: age={age:.1f}d > 30d")
             stale_models.append((mode_name, model_obj, age))
 
-    if not _artifact_is_fresh(model_intra_mr, max_age_days=30):
-        model_intra_mr = None
-
-    if not _artifact_is_fresh(model_intra_mom, max_age_days=30):
-        model_intra_mom = None
-
-    if not _artifact_is_fresh(model_intraday_legacy, max_age_days=30):
-        model_intraday_legacy = None
-
     vix_level = fetch_vix_level()
     results["vix_level"] = vix_level
     print(f"[VIX] {symU} Current VIX: {vix_level:.1f}")
