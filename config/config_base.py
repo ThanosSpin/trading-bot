@@ -46,7 +46,7 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 # Trading Strategy
 # ============================================================
 
-SYMBOL = ["NVDA", "AAPL", "ABBV", "PLTR"]
+SYMBOL = ["NVDA", "AAPL", "PLTR"]
 PAPER_TRADE_SYMBOLS = []
 PAPER_TRADE_NOTES = {}
 
