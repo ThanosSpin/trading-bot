@@ -364,6 +364,84 @@ class ExecutionGuardTests(unittest.TestCase):
             qty = strategy.apply_position_limits(1000, 100.0, 100000.0, "NVDA")
         self.assertEqual(qty, 250)
 
+    def test_confirmed_mr_reversal_enters_small_before_momentum_crosses_zero(self):
+        pm = SimpleNamespace(
+            data={"shares": 0, "cash": 100000.0},
+            refresh_live=lambda: None,
+        )
+        diagnostics = {
+            "ABBV": {
+                "decision_threshold": 0.55,
+                "movement_expected": True,
+                "session_return": -0.001,
+                "intraday_regime": "mr",
+                "intraday_mom": -0.002,
+                "relative_strength_accel": 0.0015,
+                "relative_return_4": 0.001,
+                "vwap_distance": 0.002,
+                "vwap_slope_2": 0.001,
+                "volume_time_ratio": 0.9,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=100.0
+        ), patch.object(
+            strategy.account_cache,
+            "get_account",
+            return_value={"equity": 100000.0},
+        ):
+            first = strategy.should_trade("ABBV", 0.70, diagnostics=diagnostics)
+            second = strategy.should_trade("ABBV", 0.70, diagnostics=diagnostics)
+
+        self.assertEqual(first["action"], "hold")
+        self.assertIn("reversal confirmation 1/2", first["explain"])
+        self.assertEqual(second["action"], "buy")
+        self.assertEqual(second["qty"], 125)
+        self.assertTrue(second["mr_reversal"])
+        self.assertIn("MR REVERSAL BUY", second["explain"])
+
+    def test_momentum_regime_cannot_use_early_reversal_entry(self):
+        pm = SimpleNamespace(
+            data={"shares": 0, "cash": 100000.0},
+            refresh_live=lambda: None,
+        )
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "movement_expected": True,
+                "session_return": 0.001,
+                "intraday_regime": "mom",
+                "intraday_mom": -0.001,
+                "relative_strength_accel": 0.002,
+                "relative_return_4": 0.002,
+                "vwap_distance": 0.002,
+                "vwap_slope_2": 0.001,
+                "volume_time_ratio": 1.0,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=100.0
+        ):
+            decision = strategy.should_trade("NVDA", 0.70, diagnostics=diagnostics)
+
+        self.assertEqual(decision["action"], "hold")
+        self.assertNotIn("reversal confirmation", decision["explain"])
+
+    def test_explicit_small_initial_exposure_can_be_below_default(self):
+        with patch.object(
+            strategy.account_cache,
+            "get_account",
+            return_value={"equity": 100000.0},
+        ):
+            qty = strategy.apply_position_limits(
+                1000,
+                100.0,
+                100000.0,
+                "ABBV",
+                initial_exposure_pct=0.125,
+            )
+        self.assertEqual(qty, 125)
+
     def test_exceptional_confirmed_entry_can_start_at_thirty_five_percent(self):
         diagnostics = {
             "NVDA": {

@@ -91,6 +91,17 @@ AAPL_MODEL_MIN_CLASS_BOUNDARY = 0.55
 # from the previous close. This prevents buying a brief bounce in a weak day.
 BUY_SESSION_RETURN_FLOOR = -0.005
 
+# A mean-reversion entry may begin before the one-hour momentum measure crosses
+# above zero, but only after shorter-horizon market evidence confirms a turn.
+MR_REVERSAL_ENTRY_ENABLED = True
+MR_REVERSAL_PROB_BUFFER = 0.05
+MR_REVERSAL_MIN_MOMENTUM = -0.0035
+MR_REVERSAL_MIN_RELATIVE_ACCEL = 0.0010
+MR_REVERSAL_MIN_RELATIVE_60M = 0.0
+MR_REVERSAL_MIN_VOLUME_TIME_RATIO = 0.80
+MR_REVERSAL_CONFIRM_CYCLES = 2
+MR_REVERSAL_INITIAL_POSITION_EQUITY_PCT = 0.125
+
 SPY_USE_ARTIFACT_THRESHOLDS = True
 SPY_MODEL_ENTRY_BUFFER = 0.03
 SPY_MODEL_EXIT_BUFFER = 0.02

@@ -65,6 +65,14 @@ from config import (
     MODEL_MIN_CLASS_BOUNDARY,
     AAPL_MODEL_MIN_CLASS_BOUNDARY,
     BUY_SESSION_RETURN_FLOOR,
+    MR_REVERSAL_ENTRY_ENABLED,
+    MR_REVERSAL_PROB_BUFFER,
+    MR_REVERSAL_MIN_MOMENTUM,
+    MR_REVERSAL_MIN_RELATIVE_ACCEL,
+    MR_REVERSAL_MIN_RELATIVE_60M,
+    MR_REVERSAL_MIN_VOLUME_TIME_RATIO,
+    MR_REVERSAL_CONFIRM_CYCLES,
+    MR_REVERSAL_INITIAL_POSITION_EQUITY_PCT,
     SPY_USE_ARTIFACT_THRESHOLDS,
     SPY_MODEL_ENTRY_BUFFER,
     SPY_MODEL_EXIT_BUFFER,
@@ -101,6 +109,7 @@ _session_state: dict = {
     "pyramid_counts": {},
     "last_pyramid_times": {},
     "stop_exits": {},
+    "mr_reversal_counts": {},
 }
 
 SESSION_ENV = str(BOT_ENV).strip().lower()
@@ -127,6 +136,7 @@ def reset_session_state():
     _session_state["pyramid_counts"].clear()
     _session_state["last_pyramid_times"].clear()
     _session_state["stop_exits"].clear()
+    _session_state["mr_reversal_counts"].clear()
     print("[SESSION] Session state reset for new trading day.")
 
 
@@ -175,6 +185,10 @@ def load_session_state():
                 for k, v in data.get("last_pyramid_times", {}).items()
             }
             _session_state["stop_exits"] = data.get("stop_exits", {})
+            _session_state["mr_reversal_counts"] = {
+                str(k).upper(): int(v)
+                for k, v in data.get("mr_reversal_counts", {}).items()
+            }
             print(f"[SESSION] Loaded state from {SESSION_STATE_PATH}")
     except Exception as e:
         print(f"[WARN] Failed to load session_state: {e}")
@@ -206,6 +220,7 @@ def save_session_state():
                 for k, v in _session_state["last_pyramid_times"].items()
             },
             "stop_exits": _session_state["stop_exits"],
+            "mr_reversal_counts": _session_state["mr_reversal_counts"],
         }
         with open(SESSION_STATE_PATH, "w") as f:
             json.dump(data, f)
@@ -537,11 +552,13 @@ def apply_position_limits(
     else:
         requested_pct = _safe_float(initial_exposure_pct, None)
         exposure_pct = (
-            min(float(EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT), requested_pct)
+            min(
+                float(EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT),
+                max(0.0, requested_pct),
+            )
             if requested_pct is not None
             else float(INITIAL_POSITION_EQUITY_PCT)
         )
-        exposure_pct = max(float(INITIAL_POSITION_EQUITY_PCT), exposure_pct)
 
     remaining_exposure = max(
         0.0,
@@ -788,6 +805,57 @@ def exceptional_initial_exposure_pct(
     if all(checks):
         return float(EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT)
     return default
+
+
+def _confirmed_mr_reversal_entry(
+    sym: str,
+    probability: float,
+    buy_threshold: float,
+    diagnostics: Dict[str, dict] = None,
+):
+    """Confirm an early mean-reversion turn across consecutive bot cycles."""
+    sym = sym.upper()
+    diag = ((diagnostics or {}).get(sym, {}) or {})
+    state = _session_state["mr_reversal_counts"]
+
+    momentum = _safe_float(diag.get("intraday_mom"), None)
+    values = {
+        "probability": _safe_float(probability, 0.0),
+        "relative_accel": _safe_float(diag.get("relative_strength_accel"), None),
+        "relative_60m": _safe_float(diag.get("relative_return_4"), None),
+        "vwap_distance": _safe_float(diag.get("vwap_distance"), None),
+        "vwap_slope_2": _safe_float(diag.get("vwap_slope_2"), None),
+        "volume_time_ratio": _safe_float(diag.get("volume_time_ratio"), None),
+    }
+
+    checks = (
+        bool(MR_REVERSAL_ENTRY_ENABLED),
+        str(diag.get("intraday_regime", "")).lower() == "mr",
+        momentum is not None
+        and float(MR_REVERSAL_MIN_MOMENTUM) <= momentum <= 0.0,
+        values["probability"]
+        >= float(buy_threshold) + float(MR_REVERSAL_PROB_BUFFER),
+        values["relative_accel"] is not None
+        and values["relative_accel"] >= float(MR_REVERSAL_MIN_RELATIVE_ACCEL),
+        values["relative_60m"] is not None
+        and values["relative_60m"] > float(MR_REVERSAL_MIN_RELATIVE_60M),
+        values["vwap_distance"] is not None and values["vwap_distance"] > 0.0,
+        values["vwap_slope_2"] is not None and values["vwap_slope_2"] > 0.0,
+        values["volume_time_ratio"] is not None
+        and values["volume_time_ratio"]
+        >= float(MR_REVERSAL_MIN_VOLUME_TIME_RATIO),
+    )
+
+    if not all(checks):
+        state.pop(sym, None)
+        return False, 0
+
+    confirmation_count = min(
+        int(state.get(sym, 0)) + 1,
+        int(MR_REVERSAL_CONFIRM_CYCLES),
+    )
+    state[sym] = confirmation_count
+    return confirmation_count >= int(MR_REVERSAL_CONFIRM_CYCLES), confirmation_count
 
 
 def _effective_spy_entry_threshold(diagnostics: Dict[str, dict] = None) -> float:
@@ -1291,6 +1359,9 @@ def should_trade(
     effective_sell_threshold = _effective_sell_threshold(symbol, diagnostics)
     effective_pyramid_threshold = _effective_pyramid_threshold(symbol, diagnostics)
 
+    if shares > 0 or prob_up < effective_buy_threshold:
+        _session_state["mr_reversal_counts"].pop(symbol.upper(), None)
+
     # ---------------------------------------------------------
     # Explanation prefix
     # ---------------------------------------------------------
@@ -1485,15 +1556,34 @@ def should_trade(
     # ---------------------------------------------------------
     if prob_up >= effective_buy_threshold:
 
-        # If we have intraday_mom and it's not positive, block the buy
+        mr_reversal_entry = False
+
+        # A confirmed mean-reversion turn may enter before the slower one-hour
+        # momentum measure crosses zero. Momentum-regime entries retain the
+        # original positive-momentum requirement.
         if intraday_mom is not None and intraday_mom <= 0:
-            return make_decision(
-                "hold",
-                0,
-                explain + f"HOLD - final_prob>=BUY threshold but intraday momentum "
-                f"is non-positive ({intraday_mom:.3%}); waiting for "
-                f"price to turn up.",
+            reversal_confirmed, confirmation_count = _confirmed_mr_reversal_entry(
+                symbol,
+                prob_up,
+                effective_buy_threshold,
+                diagnostics,
             )
+            if not reversal_confirmed:
+                confirmation_detail = (
+                    f"; reversal confirmation {confirmation_count}/"
+                    f"{int(MR_REVERSAL_CONFIRM_CYCLES)}"
+                    if confirmation_count > 0
+                    else ""
+                )
+                return make_decision(
+                    "hold",
+                    0,
+                    explain
+                    + f"HOLD - final_prob>=BUY threshold but intraday momentum "
+                    f"is non-positive ({intraday_mom:.3%}); waiting for "
+                    f"price to turn up{confirmation_detail}.",
+                )
+            mr_reversal_entry = True
 
         # Check if this is a same-day rebuy
         if shares <= 0 and symbol.upper() in _session_state["buys"]:
@@ -1506,8 +1596,10 @@ def should_trade(
         affordable = int(cash // price)
         target = int(max_invest // price)
         qty = min(affordable, target)
-        initial_exposure_pct = exceptional_initial_exposure_pct(
-            symbol, prob_up, diagnostics
+        initial_exposure_pct = (
+            float(MR_REVERSAL_INITIAL_POSITION_EQUITY_PCT)
+            if mr_reversal_entry
+            else exceptional_initial_exposure_pct(symbol, prob_up, diagnostics)
         )
         qty = apply_position_limits(
             qty,
@@ -1518,6 +1610,15 @@ def should_trade(
         )
 
         if qty > 0:
+            if mr_reversal_entry:
+                return make_decision(
+                    "buy",
+                    qty,
+                    explain
+                    + "MR REVERSAL BUY - two-cycle turn confirmed while one-hour "
+                    f"momentum remains {intraday_mom:.3%}. qty={qty}",
+                    mr_reversal=True,
+                )
             return make_decision("buy", qty, explain + f"BUY. qty={qty}")
 
         return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
