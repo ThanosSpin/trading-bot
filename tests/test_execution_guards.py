@@ -227,20 +227,21 @@ class ExecutionGuardTests(unittest.TestCase):
             "NVDA": {**nvda, "cost_aware_threshold": True},
             "AAPL": {**aapl, "cost_aware_threshold": True},
         }
-        self.assertAlmostEqual(
-            strategy._effective_buy_threshold("NVDA", diagnostics), 0.56
-        )
+        with patch.object(strategy, "LAST_HOUR_BUY_BUFFER", 0.0), patch.object(
+            strategy, "FINAL_15_MIN_BUY_BUFFER", 0.0
+        ):
+            nvda_buy = strategy._effective_buy_threshold("NVDA", diagnostics)
+            aapl_buy = strategy._effective_buy_threshold("AAPL", diagnostics)
+        self.assertAlmostEqual(nvda_buy, 0.56)
         self.assertAlmostEqual(
             strategy._effective_sell_threshold("NVDA", diagnostics), 0.52
         )
         self.assertGreaterEqual(
-            strategy._effective_buy_threshold("NVDA", diagnostics)
+            nvda_buy
             - strategy._effective_sell_threshold("NVDA", diagnostics),
             0.04,
         )
-        self.assertAlmostEqual(
-            strategy._effective_buy_threshold("AAPL", diagnostics), 0.62
-        )
+        self.assertAlmostEqual(aapl_buy, 0.62)
         self.assertAlmostEqual(
             strategy._effective_sell_threshold("AAPL", diagnostics), 0.58
         )
@@ -250,9 +251,11 @@ class ExecutionGuardTests(unittest.TestCase):
             "NVDA", 0.40, 0.45, 0.50
         )
         diagnostics = {"NVDA": {**info, "cost_aware_threshold": False}}
-        self.assertAlmostEqual(
-            strategy._effective_buy_threshold("NVDA", diagnostics), 0.57
-        )
+        with patch.object(strategy, "LAST_HOUR_BUY_BUFFER", 0.0), patch.object(
+            strategy, "FINAL_15_MIN_BUY_BUFFER", 0.0
+        ):
+            threshold = strategy._effective_buy_threshold("NVDA", diagnostics)
+        self.assertAlmostEqual(threshold, 0.57)
 
     def test_invalid_artifact_threshold_uses_valid_daily_value(self):
         info = strategy.combine_artifact_decision_thresholds(
@@ -454,9 +457,12 @@ class ExecutionGuardTests(unittest.TestCase):
                 "volume_time_ratio": 1.1,
             }
         }
-        exposure_pct = strategy.exceptional_initial_exposure_pct(
-            "NVDA", 0.65, diagnostics
-        )
+        with patch.object(strategy, "LAST_HOUR_BUY_BUFFER", 0.0), patch.object(
+            strategy, "FINAL_15_MIN_BUY_BUFFER", 0.0
+        ):
+            exposure_pct = strategy.exceptional_initial_exposure_pct(
+                "NVDA", 0.65, diagnostics
+            )
         with patch.object(
             strategy.account_cache,
             "get_account",
