@@ -29,6 +29,7 @@ import pandas as pd
 
 import config
 from monthly_model_retrain import _artifact_summary, validate_artifact
+from model_outcome_store import load_outcome_history, outcome_history_path
 from predictive_model.data_loader import fetch_historical_data
 from predictive_model.model_monitor import _prediction_logs_dir
 from predictive_model.model_evaluation import promotion_decision
@@ -96,7 +97,14 @@ def _prediction_path(symbol: str) -> Path:
 def _daily_observations(symbol: str) -> pd.DataFrame:
     """Return one resolved daily prediction per New York trading date."""
     path = _prediction_path(symbol)
-    if not path.exists():
+    durable = load_outcome_history(symbol=symbol, mode="daily")
+    if not durable.empty:
+        frame = durable
+        print(
+            f"[MONITOR] {symbol}: using durable outcomes from "
+            f"{outcome_history_path()}"
+        )
+    elif not path.exists():
         print(f"[MONITOR] {symbol}: prediction log not found yet: {path}")
         return pd.DataFrame(
             columns=[
@@ -108,7 +116,8 @@ def _daily_observations(symbol: str) -> pd.DataFrame:
             ]
         )
 
-    frame = pd.read_csv(path)
+    else:
+        frame = pd.read_csv(path)
     required = {"timestamp", "mode", "predicted_prob"}
     missing = sorted(required.difference(frame.columns))
     if missing:

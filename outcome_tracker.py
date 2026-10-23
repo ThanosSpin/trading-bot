@@ -19,6 +19,8 @@ import numpy as np
 from datetime import datetime, time as dtime, timedelta, timezone
 import argparse
 
+from model_outcome_store import outcome_history_path, upsert_resolved_outcomes
+
 print("[DEBUG] Running outcome_tracker from:", __file__)
 
 # Import your existing modules
@@ -43,6 +45,7 @@ LOGS_DIR = (
 if not os.path.isabs(LOGS_DIR):
     LOGS_DIR = os.path.join(PROJECT_ROOT, LOGS_DIR)
 print("[DEBUG] Outcome logs directory:", LOGS_DIR)
+print("[DEBUG] Durable outcome history:", outcome_history_path())
 
 # SPY predictions are logged and evaluated alongside the configured core symbols.
 SYMBOL = list(SYMBOL) if isinstance(SYMBOL, (list, tuple, set)) else [SYMBOL]
@@ -270,6 +273,11 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
 
         if len(df_pending) == 0:
             df.to_csv(log_file, index=False)
+            archived = upsert_resolved_outcomes(df)
+            print(
+                f"[ARCHIVE] {symbol}: durable outcome history added "
+                f"{archived} new row(s)"
+            )
             print(f"[SKIP] {symbol} : No pending outcomes to update (columns ensured).")
             return 0
 
@@ -332,6 +340,11 @@ def update_outcomes_for_symbol(symbol: str, lookback_hours: int = None) -> int:
             updated_count += 1
 
         df.to_csv(log_file, index=False)
+        archived = upsert_resolved_outcomes(df)
+        print(
+            f"[ARCHIVE] {symbol}: durable outcome history added "
+            f"{archived} new row(s)"
+        )
         if updated_count > 0:
             print(f"[SUCCESS] {symbol} : Updated {updated_count} outcome(s)")
         else:

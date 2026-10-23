@@ -1,4 +1,5 @@
 import unittest
+import os
 from unittest.mock import patch
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -6,9 +7,41 @@ from pathlib import Path
 import pandas as pd
 
 import outcome_tracker
+from model_outcome_store import load_outcome_history
 
 
 class OutcomeTrackerCloseTests(unittest.TestCase):
+    def test_existing_resolved_rows_are_archived_durably(self):
+        with TemporaryDirectory() as directory:
+            log_file = Path(directory) / "predictions_TEST.csv"
+            history_file = Path(directory) / "durable" / "model_outcomes.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": "2026-10-01T15:00:00Z",
+                        "symbol": "TEST",
+                        "mode": "daily",
+                        "predicted_prob": 0.6,
+                        "price": 100.0,
+                        "actual_outcome": 1,
+                        "actual_price": 102.0,
+                        "return_pct": 2.0,
+                        "outcome_horizon": "next_trading_session",
+                    }
+                ]
+            ).to_csv(log_file, index=False)
+
+            with patch.object(outcome_tracker, "LOGS_DIR", directory), patch.dict(
+                os.environ,
+                {"MODEL_OUTCOME_HISTORY_PATH": str(history_file)},
+            ):
+                updated = outcome_tracker.update_outcomes_for_symbol("TEST")
+
+            self.assertEqual(updated, 0)
+            archived = load_outcome_history(path=history_file)
+            self.assertEqual(len(archived), 1)
+            self.assertEqual(archived.iloc[0]["actual_outcome"], 1)
+
     def test_mixed_legacy_and_iso_prediction_timestamps_are_retained(self):
         values = pd.Series(
             [
