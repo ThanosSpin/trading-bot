@@ -555,6 +555,23 @@ def _artifact_is_fresh(artifact: dict, max_age_days: int = 30) -> bool:
     return age <= float(max_age_days)
 
 
+def _order_intraday_model_candidates(preferred_order, fresh_models, stale_models):
+    """Keep regime preference ahead of cross-regime artifact freshness."""
+    fresh_by_name = {name: (obj, age) for name, obj, age in fresh_models}
+    stale_by_name = {name: (obj, age) for name, obj, age in stale_models}
+    candidates = []
+
+    for name in preferred_order:
+        if name in fresh_by_name:
+            obj, age = fresh_by_name[name]
+            candidates.append((name, obj, age, False))
+        elif name in stale_by_name:
+            obj, age = stale_by_name[name]
+            candidates.append((name, obj, age, True))
+
+    return candidates
+
+
 # ---------------------------------------------------------
 # TRAIN MODEL
 # ---------------------------------------------------------
@@ -2224,15 +2241,12 @@ def compute_signals(
             else:
                 preferred_order = ["intraday_mom", "intraday_mr", "intraday"]
 
-            fresh_by_name = {name: (obj, age) for name, obj, age in fresh_models}
-            stale_by_name = {name: (obj, age) for name, obj, age in stale_models}
-
-            candidate_models = []
-
-            for name in preferred_order:
-                if name in fresh_by_name:
-                    obj, age = fresh_by_name[name]
-                    candidate_models.append((name, obj))
+            ordered_candidates = _order_intraday_model_candidates(
+                preferred_order,
+                fresh_models,
+                stale_models,
+            )
+            candidate_models = [(name, obj) for name, obj, _, _ in ordered_candidates]
 
             print(
                 f"fresh={[name for name, _, _ in fresh_models]} "
@@ -2240,18 +2254,13 @@ def compute_signals(
                 f"candidate_pre={[name for name, _ in candidate_models]}"
             )
 
-            if not candidate_models:
-                for name in preferred_order:
-                    if name in stale_by_name:
-                        obj, age = stale_by_name[name]
-                        candidate_models.append((name, obj))
-
-                if candidate_models:
-                    print(
-                        f"[STALE-FALLBACK] {symU}: no fresh intraday model available; "
-                        f"using stale candidates in preferred order "
-                        f"{[(name, round(stale_by_name[name][1], 1)) for name, _ in candidate_models]}"
-                    )
+            if ordered_candidates and ordered_candidates[0][3]:
+                selected_name, _, selected_age, _ = ordered_candidates[0]
+                print(
+                    f"[STALE-REGIME-MATCH] {symU}: preferred {selected_name} artifact "
+                    f"is {selected_age:.1f}d old; keeping regime match ahead of "
+                    "opposite-regime fallbacks"
+                )
 
             results["intraday_candidate_order"] = [name for name, _ in candidate_models]
 
