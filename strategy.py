@@ -50,6 +50,12 @@ from config import (
     AAPL_MOMENTUM_MIN_RELATIVE_60M,
     AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO,
     AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER,
+    NVDA_GUARDED_MOMENTUM_ENTRY_ENABLED,
+    NVDA_MOMENTUM_FINAL_PROB_MIN,
+    NVDA_MOMENTUM_MIN_RELATIVE_SESSION,
+    NVDA_MOMENTUM_MIN_RELATIVE_60M,
+    NVDA_MOMENTUM_MIN_VOLUME_TIME_RATIO,
+    NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT,
     REBUY_THRESHOLD,
     REBUY_COOLDOWN_MINUTES,
     ALLOW_SAME_DAY_REBUY,
@@ -1733,6 +1739,16 @@ def check_relative_momentum_entry(
     """Return a guarded early relative-strength entry score and explanation."""
     d = (diagnostics or {}).get(sym, {}) or {}
 
+    # Allow the legacy NVDA momentum artifact to act below the ordinary blend
+    # floor only when current market evidence independently confirms the move.
+    # Existing positions remain subject to the normal pyramid path.
+    if sym.upper() == "NVDA":
+        nvda_result = _check_nvda_guarded_momentum_entry(
+            sym, diagnostics, preds, now_ny=now_ny
+        )
+        if nvda_result[0]:
+            return nvda_result
+
     # AAPL's ordinary entry threshold remains deliberately conservative. In a
     # confirmed momentum regime, allow the intraday model to identify an early
     # continuation even when a weak daily probability drags down the blend.
@@ -1806,6 +1822,97 @@ def check_relative_momentum_entry(
         f"VWAP={values['vwap_distance']:.2%}, "
         f"volume_time={values['volume_time_ratio']:.2f}, "
         f"model={probability:.3f}"
+    )
+    return True, float(score), reason
+
+
+def _check_nvda_guarded_momentum_entry(
+    sym: str,
+    diagnostics: dict,
+    preds: dict,
+    now_ny=None,
+) -> tuple:
+    """Allow a confirmed NVDA continuation entry below its ordinary floor."""
+    d = (diagnostics or {}).get(sym, {}) or {}
+    if not bool(NVDA_GUARDED_MOMENTUM_ENTRY_ENABLED):
+        return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: disabled"
+    if float(d.get("relative_market_available", 0.0) or 0.0) < 1.0:
+        return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: benchmark unavailable"
+    if d.get("movement_expected") is False:
+        return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: movement_expected=False"
+    if d.get("intraday_model_used") != "intraday_mom":
+        return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: momentum model inactive"
+
+    values = {}
+    for name in (
+        "session_return",
+        "relative_session_return",
+        "relative_return_4",
+        "vwap_distance",
+        "vwap_slope_2",
+        "volume_time_ratio",
+        "intraday_mom",
+    ):
+        try:
+            values[name] = float(d.get(name))
+        except (TypeError, ValueError):
+            return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: missing {name}"
+
+    probability = float((preds or {}).get(sym, 0.0) or 0.0)
+    now_ny = now_ny or _dt.now(NY_TZ)
+    minute = now_ny.hour * 60 + now_ny.minute
+    if not (9 * 60 + 45 <= minute < 15 * 60):
+        return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: outside entry window"
+
+    failures = []
+    if probability < float(NVDA_MOMENTUM_FINAL_PROB_MIN):
+        failures.append(
+            f"final_prob={probability:.3f} < "
+            f"{float(NVDA_MOMENTUM_FINAL_PROB_MIN):.3f}"
+        )
+    if values["intraday_mom"] <= 0.0:
+        failures.append(f"momentum={values['intraday_mom']:.2%} <= 0")
+    if values["session_return"] <= 0.0:
+        failures.append(f"session={values['session_return']:.2%} <= 0")
+    if values["relative_session_return"] <= float(
+        NVDA_MOMENTUM_MIN_RELATIVE_SESSION
+    ):
+        failures.append(
+            f"vs_SPY={values['relative_session_return']:.2%} <= "
+            f"{float(NVDA_MOMENTUM_MIN_RELATIVE_SESSION):.2%}"
+        )
+    if values["relative_return_4"] <= float(NVDA_MOMENTUM_MIN_RELATIVE_60M):
+        failures.append(
+            f"rel_60m={values['relative_return_4']:.2%} <= "
+            f"{float(NVDA_MOMENTUM_MIN_RELATIVE_60M):.2%}"
+        )
+    if values["vwap_distance"] <= 0.0:
+        failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
+    if values["vwap_slope_2"] <= 0.0:
+        failures.append(f"VWAP_slope_30m={values['vwap_slope_2']:.2%} <= 0")
+    if values["volume_time_ratio"] < float(NVDA_MOMENTUM_MIN_VOLUME_TIME_RATIO):
+        failures.append(
+            f"volume_time={values['volume_time_ratio']:.2f} < "
+            f"{float(NVDA_MOMENTUM_MIN_VOLUME_TIME_RATIO):.2f}"
+        )
+    if failures:
+        return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: " + "; ".join(failures)
+
+    score = (
+        probability
+        + 2.0 * values["relative_session_return"]
+        + values["relative_return_4"]
+    )
+    reason = (
+        f"[NVDA GUARDED MOMENTUM] {sym}: final_prob={probability:.3f}, "
+        f"session={values['session_return']:.2%}, "
+        f"vs_SPY={values['relative_session_return']:.2%}, "
+        f"rel_60m={values['relative_return_4']:.2%}, "
+        f"VWAP={values['vwap_distance']:.2%}, "
+        f"VWAP_slope_30m={values['vwap_slope_2']:.2%}, "
+        f"volume_time={values['volume_time_ratio']:.2f}, "
+        f"initial_exposure="
+        f"{float(NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT):.0%}"
     )
     return True, float(score), reason
 
@@ -2879,9 +2986,13 @@ def compute_strategy_decisions(
         if float(pms[sym].data.get("shares", 0.0) or 0.0) > 0:
             continue
         aapl_guarded_momentum = reason.startswith("[AAPL GUARDED MOMENTUM]")
+        nvda_guarded_momentum = reason.startswith("[NVDA GUARDED MOMENTUM]")
         if (
             _block_buy_on_pullback(sym)
-            or (not aapl_guarded_momentum and _block_buy_on_weak_volume(sym))
+            or (
+                not (aapl_guarded_momentum or nvda_guarded_momentum)
+                and _block_buy_on_weak_volume(sym)
+            )
             or _block_buy_overbought(sym)
         ):
             print(f"[RELATIVE MOMENTUM] {sym} blocked by existing entry guard")
@@ -2902,12 +3013,23 @@ def compute_strategy_decisions(
             )
             if volume_time_ratio < float(AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO):
                 size_multiplier = float(AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER)
-        relative_candidates.append((score, sym, reason, size_multiplier))
+        initial_exposure_pct = (
+            float(NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT)
+            if nvda_guarded_momentum
+            else None
+        )
+        relative_candidates.append(
+            (score, sym, reason, size_multiplier, initial_exposure_pct)
+        )
 
     if relative_candidates:
-        _score, relative_symbol, relative_reason, size_multiplier = max(
-            relative_candidates
-        )
+        (
+            _score,
+            relative_symbol,
+            relative_reason,
+            size_multiplier,
+            initial_exposure_pct,
+        ) = max(relative_candidates)
         cash = float(account_state.get("cash", 0.0) or 0.0)
         price = float(prices.get(relative_symbol, 0.0) or 0.0)
         buy_qty = (
@@ -2920,8 +3042,12 @@ def compute_strategy_decisions(
             price,
             cash,
             relative_symbol,
-            initial_exposure_pct=exceptional_initial_exposure_pct(
-                relative_symbol, preds.get(relative_symbol, 0.0), diagnostics
+            initial_exposure_pct=(
+                initial_exposure_pct
+                if initial_exposure_pct is not None
+                else exceptional_initial_exposure_pct(
+                    relative_symbol, preds.get(relative_symbol, 0.0), diagnostics
+                )
             ),
         )
         if buy_qty > 0:
@@ -2945,6 +3071,10 @@ def compute_strategy_decisions(
                 buy_qty,
                 relative_reason,
                 relative_momentum=True,
+                nvda_guarded_momentum=relative_reason.startswith(
+                    "[NVDA GUARDED MOMENTUM]"
+                ),
+                initial_exposure_pct=initial_exposure_pct,
                 size_multiplier=size_multiplier,
                 priority_rank=1,
             )

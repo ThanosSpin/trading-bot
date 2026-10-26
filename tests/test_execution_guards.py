@@ -49,6 +49,55 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertIn("MOMENTUM BREAKOUT", reason)
         fetch.assert_called_once_with("NVDA", period="3mo", interval="1d")
 
+    def test_nvda_guarded_momentum_entry_requires_full_confirmation(self):
+        diagnostics = {
+            "NVDA": {
+                "relative_market_available": 1.0,
+                "movement_expected": True,
+                "intraday_model_used": "intraday_mom",
+                "session_return": 0.01,
+                "relative_session_return": 0.003,
+                "relative_return_4": 0.002,
+                "vwap_distance": 0.004,
+                "vwap_slope_2": 0.001,
+                "volume_time_ratio": 1.1,
+                "intraday_mom": 0.008,
+            }
+        }
+        now_ny = datetime(2026, 10, 26, 11, 0, tzinfo=strategy.NY_TZ)
+
+        qualifies, _score, reason = strategy._check_nvda_guarded_momentum_entry(
+            "NVDA", diagnostics, {"NVDA": 0.55}, now_ny=now_ny
+        )
+
+        self.assertTrue(qualifies)
+        self.assertIn("NVDA GUARDED MOMENTUM", reason)
+        self.assertIn("initial_exposure=25%", reason)
+
+    def test_nvda_guarded_momentum_entry_rejects_weak_probability(self):
+        diagnostics = {
+            "NVDA": {
+                "relative_market_available": 1.0,
+                "movement_expected": True,
+                "intraday_model_used": "intraday_mom",
+                "session_return": 0.01,
+                "relative_session_return": 0.003,
+                "relative_return_4": 0.002,
+                "vwap_distance": 0.004,
+                "vwap_slope_2": 0.001,
+                "volume_time_ratio": 1.1,
+                "intraday_mom": 0.008,
+            }
+        }
+        now_ny = datetime(2026, 10, 26, 11, 0, tzinfo=strategy.NY_TZ)
+
+        qualifies, _score, reason = strategy._check_nvda_guarded_momentum_entry(
+            "NVDA", diagnostics, {"NVDA": 0.549}, now_ny=now_ny
+        )
+
+        self.assertFalse(qualifies)
+        self.assertIn("final_prob=0.549", reason)
+
     def test_pyramid_cooldown_and_cap_reset_when_position_closes(self):
         allowed, _ = strategy._pyramid_allowed("ABBV")
         self.assertTrue(allowed)

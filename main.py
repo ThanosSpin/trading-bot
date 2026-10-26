@@ -840,6 +840,8 @@ def execute_decisions(decisions, diagnostics=None):
 
     def _entry_reason(decision):
         explain = str(decision.get("explain", "")).lower()
+        if decision.get("nvda_guarded_momentum"):
+            return "nvda_guarded_momentum"
         if decision.get("relative_momentum"):
             return "relative_momentum"
         if decision.get("pyramid"):
@@ -1042,11 +1044,15 @@ def execute_decisions(decisions, diagnostics=None):
         # Flag-based recompute (preferred, no string matching)
         recalc_all_in = bool(decision.get("recalc_all_in", False))
         recalc_after_sells = bool(decision.get("recalc_after_sells", False))
-        initial_exposure_pct = exceptional_initial_exposure_pct(
-            sym,
-            (diagnostics.get(sym, {}) or {}).get("final_prob", 0.0),
-            diagnostics,
-        )
+        initial_exposure_pct = decision.get("initial_exposure_pct")
+        if initial_exposure_pct is None:
+            initial_exposure_pct = exceptional_initial_exposure_pct(
+                sym,
+                (diagnostics.get(sym, {}) or {}).get("final_prob", 0.0),
+                diagnostics,
+            )
+        else:
+            initial_exposure_pct = float(initial_exposure_pct)
 
         # If strategy expected SPY to be sold first but it didn't fill, skip flagged buys.
         if (recalc_all_in or recalc_after_sells) and spy_sell_failed:
