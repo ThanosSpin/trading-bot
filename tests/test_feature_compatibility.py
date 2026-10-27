@@ -42,6 +42,49 @@ class FeatureCompatibilityTests(unittest.TestCase):
         self.assertIn("volume_time_ratio", result.columns)
         self.assertTrue(result["volume_time_ratio"].notna().any())
 
+    def test_market_clock_features_match_for_new_york_and_utc_indexes(self):
+        new_york_frame = self._frame(periods=20)
+        utc_frame = new_york_frame.copy()
+        utc_frame.index = utc_frame.index.tz_convert("UTC")
+
+        new_york_result = add_intraday_market_features(new_york_frame)
+        utc_result = add_intraday_market_features(utc_frame)
+
+        for column in (
+            "session_volume_pace",
+            "volume_time_ratio",
+            "vwap_distance",
+            "vwap_slope_2",
+        ):
+            np.testing.assert_allclose(
+                new_york_result[column].to_numpy(),
+                utc_result[column].to_numpy(),
+                equal_nan=True,
+            )
+
+    def test_compatibility_clock_matches_for_new_york_and_utc_indexes(self):
+        new_york_frame = self._frame(periods=4)
+        utc_frame = new_york_frame.copy()
+        utc_frame.index = utc_frame.index.tz_convert("UTC")
+
+        from predictive_model.time_features import (
+            add_intraday_compatibility_features,
+        )
+
+        new_york_result = add_intraday_compatibility_features(new_york_frame)
+        utc_result = add_intraday_compatibility_features(utc_frame)
+
+        for column in (
+            "clock_minute",
+            "is_regular_session",
+            "is_first_15min",
+            "is_last_15min",
+        ):
+            np.testing.assert_array_equal(
+                new_york_result[column].to_numpy(),
+                utc_result[column].to_numpy(),
+            )
+
     def test_benchmark_features_keep_timezone_aware_asset_index(self):
         frame = self._frame(periods=20)
         benchmark = frame.copy()

@@ -31,6 +31,19 @@ def _ensure_ny_index(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _market_clock_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Return timestamps expressed as naive New York market-clock time.
+
+    Some compatibility and session features retain the caller's original
+    index, so they cannot replace it with a New York index.  Convert a
+    timezone-aware working copy before extracting dates, hours, or minutes.
+    Naive indexes keep their historical interpretation as New York time.
+    """
+    if index.tz is None:
+        return index
+    return index.tz_convert(NY_TZ).tz_localize(None)
+
+
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -184,9 +197,7 @@ def add_intraday_compatibility_features(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df.index, pd.DatetimeIndex):
         return df
 
-    idx = df.index
-    if idx.tz is not None:
-        idx = idx.tz_localize(None)
+    idx = _market_clock_index(df.index)
 
     clock_minute = idx.hour * 60 + idx.minute
     market_open = 9 * 60 + 30
@@ -228,9 +239,7 @@ def add_intraday_market_features(
     typical_price = (high + low + close) / 3.0
 
     if isinstance(df.index, pd.DatetimeIndex):
-        idx = df.index
-        if idx.tz is not None:
-            idx = idx.tz_localize(None)
+        idx = _market_clock_index(df.index)
 
         session_key = pd.Series(idx.date, index=df.index)
         cumulative_pv = (typical_price * volume).groupby(session_key).cumsum()
