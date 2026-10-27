@@ -92,7 +92,7 @@ COST_AWARE_BUY_FLOOR = 0.56
 COST_AWARE_SELL_CEILING = 0.52
 COST_AWARE_MIN_HYSTERESIS = 0.04
 MODEL_REBUY_BUFFER = 0.04
-MODEL_PYRAMID_BUFFER = 0.08
+MODEL_PYRAMID_BUFFER = 0.05
 # A trained, cost-aware artifact may lower the legacy entry floor, but never
 # below a neutral class boundary. AAPL retains a slightly higher safety floor.
 MODEL_MIN_CLASS_BOUNDARY = 0.50
@@ -187,13 +187,20 @@ MAX_POSITION_SIZE_PCT = 0.90
 MAX_POSITION_SIZE_DOLLARS = None
 # New positions start small enough to leave room for confirmation-based adds.
 INITIAL_POSITION_EQUITY_PCT = 0.25
-EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT = 0.35
+EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT = 0.25
 EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO = 0.80
-# NVDA and AAPL are the primary live symbols and may scale further only through
-# the guarded pyramid path. Research/secondary symbols retain a lower ceiling.
+# Every new position starts at no more than 25%. NVDA and AAPL may scale to
+# 80% only after the prediction and live confirmation features agree.
 CORE_CONFIRMED_POSITION_EQUITY_PCT = 0.80
 OTHER_CONFIRMED_POSITION_EQUITY_PCT = 0.50
 CORE_CONFIRMED_POSITION_SYMBOLS = ["NVDA", "AAPL"]
+CONFIRMED_PYRAMID_MIN_POSITION_RETURN = 0.002
+CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO = 0.80
+
+# A model-driven minimum holding period must never delay a confirmed loss exit.
+# Measure the loss from the broker average entry and require deteriorating
+# model or price evidence before exiting at this tighter threshold.
+CONFIRMED_LOSS_EXIT_PCT = -0.005
 MIN_RETURN_THRESHOLD = 0.002
 
 DIP_BUY_ENABLED = True

@@ -306,6 +306,27 @@ class ExecutionGuardTests(unittest.TestCase):
             threshold = strategy._effective_buy_threshold("NVDA", diagnostics)
         self.assertAlmostEqual(threshold, 0.57)
 
+    def test_reduced_pyramid_buffer_keeps_absolute_confidence_floor(self):
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.45,
+                "cost_aware_threshold": False,
+            },
+            "AAPL": {
+                "decision_threshold": 0.52,
+                "cost_aware_threshold": False,
+            },
+        }
+        with patch.object(strategy, "LAST_HOUR_BUY_BUFFER", 0.0), patch.object(
+            strategy, "FINAL_15_MIN_BUY_BUFFER", 0.0
+        ):
+            self.assertAlmostEqual(
+                strategy._effective_pyramid_threshold("NVDA", diagnostics), 0.65
+            )
+            self.assertAlmostEqual(
+                strategy._effective_pyramid_threshold("AAPL", diagnostics), 0.67
+            )
+
     def test_invalid_artifact_threshold_uses_valid_daily_value(self):
         info = strategy.combine_artifact_decision_thresholds(
             "NVDA", 0.61, float("nan"), float("nan")
@@ -373,6 +394,11 @@ class ExecutionGuardTests(unittest.TestCase):
                 "decision_threshold": 0.50,
                 "session_return": session_return,
                 "intraday_mom": intraday_mom,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.001,
+                "relative_session_return": 0.004,
+                "relative_return_4": 0.002,
+                "volume_time_ratio": 1.1,
             }
         }
         with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
@@ -389,7 +415,7 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_pyramid_requires_profitable_existing_position(self):
         decision = self._pyramid_decision(price=99.8, avg_price=100.0)
         self.assertEqual(decision["action"], "hold")
-        self.assertIn("requires a profitable position", decision["explain"])
+        self.assertIn("requires position return at least", decision["explain"])
 
     def test_pyramid_requires_positive_session_return(self):
         decision = self._pyramid_decision(session_return=0.0)
@@ -406,6 +432,37 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(decision["action"], "buy")
         self.assertTrue(decision["pyramid"])
         self.assertEqual(decision["qty"], 782)
+
+    def test_pyramid_requires_vwap_relative_strength_and_normalized_volume(self):
+        pm = SimpleNamespace(
+            data={
+                "shares": 10,
+                "cash": 100000.0,
+                "avg_price": 100.0,
+                "max_price": 101.0,
+            },
+            refresh_live=lambda: None,
+            save=lambda: None,
+        )
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "session_return": 0.01,
+                "intraday_mom": 0.005,
+                "vwap_distance": -0.001,
+                "vwap_slope_2": 0.001,
+                "relative_session_return": 0.004,
+                "relative_return_4": 0.002,
+                "volume_time_ratio": 1.1,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=101.0
+        ), patch.object(strategy, "fetch_historical_data", return_value=None):
+            decision = strategy.should_trade("NVDA", 0.90, diagnostics=diagnostics)
+
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("pyramid confirmation incomplete", decision["explain"])
 
     def test_initial_position_is_capped_at_twenty_five_percent_equity(self):
         with patch.object(
@@ -494,7 +551,7 @@ class ExecutionGuardTests(unittest.TestCase):
             )
         self.assertEqual(qty, 125)
 
-    def test_exceptional_confirmed_entry_can_start_at_thirty_five_percent(self):
+    def test_confirmed_initial_entry_remains_at_twenty_five_percent(self):
         diagnostics = {
             "NVDA": {
                 "decision_threshold": 0.50,
@@ -524,8 +581,86 @@ class ExecutionGuardTests(unittest.TestCase):
                 "NVDA",
                 initial_exposure_pct=exposure_pct,
             )
-        self.assertEqual(exposure_pct, 0.35)
-        self.assertEqual(qty, 350)
+        self.assertEqual(exposure_pct, 0.25)
+        self.assertEqual(qty, 250)
+
+    def test_confirmed_half_percent_loss_bypasses_minimum_hold(self):
+        pm = SimpleNamespace(
+            data={
+                "shares": 10,
+                "cash": 100000.0,
+                "avg_price": 100.0,
+                "max_price": 100.0,
+                "entry_time": datetime.utcnow().isoformat(),
+            },
+            refresh_live=lambda: None,
+            save=lambda: None,
+        )
+        diagnostics = {
+            "AAPL": {
+                "decision_threshold": 0.60,
+                "intraday_mom": -0.001,
+                "vwap_distance": -0.002,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=99.5
+        ):
+            decision = strategy.should_trade("AAPL", 0.50, diagnostics=diagnostics)
+
+        self.assertEqual(decision["action"], "sell")
+        self.assertEqual(decision["risk_exit"], "confirmed_loss_exit")
+        self.assertIn("CONFIRMED LOSS EXIT", decision["explain"])
+
+    def test_half_percent_loss_without_bearish_confirmation_does_not_force_exit(self):
+        decision = strategy._confirmed_loss_exit(
+            "AAPL",
+            10,
+            99.5,
+            100.0,
+            0.70,
+            0.58,
+            {
+                "AAPL": {
+                    "intraday_mom": 0.002,
+                    "vwap_distance": 0.001,
+                }
+            },
+        )
+        self.assertIsNone(decision)
+
+    def test_sell_probability_with_rising_price_defers_but_never_adds(self):
+        pm = SimpleNamespace(
+            data={
+                "shares": 10,
+                "cash": 100000.0,
+                "avg_price": 100.0,
+                "max_price": 101.0,
+                "entry_time": datetime.utcnow().isoformat(),
+            },
+            refresh_live=lambda: None,
+            save=lambda: None,
+        )
+        diagnostics = {
+            "AAPL": {
+                "decision_threshold": 0.60,
+                "session_return": 0.01,
+                "intraday_mom": 0.003,
+                "vwap_distance": 0.002,
+                "vwap_slope_2": 0.001,
+                "relative_session_return": 0.002,
+                "relative_return_4": 0.001,
+                "volume_time_ratio": 1.0,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=101.0
+        ):
+            decision = strategy.should_trade("AAPL", 0.50, diagnostics=diagnostics)
+
+        self.assertEqual(decision["action"], "hold")
+        self.assertNotIn("pyramid", decision)
+        self.assertIn("SELL deferred", decision["explain"])
 
     def test_exceptional_entry_falls_back_when_confirmation_is_incomplete(self):
         diagnostics = {

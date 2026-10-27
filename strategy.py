@@ -37,6 +37,9 @@ from config import (
     CORE_CONFIRMED_POSITION_EQUITY_PCT,
     OTHER_CONFIRMED_POSITION_EQUITY_PCT,
     CORE_CONFIRMED_POSITION_SYMBOLS,
+    CONFIRMED_PYRAMID_MIN_POSITION_RETURN,
+    CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO,
+    CONFIRMED_LOSS_EXIT_PCT,
     DIP_BUY_ENABLED,
     DIP_BUY_THRESHOLD,
     DIP_BUY_MIN_PROB,
@@ -789,7 +792,7 @@ def exceptional_initial_exposure_pct(
     probability: float,
     diagnostics: Dict[str, dict] = None,
 ) -> float:
-    """Return 35% only when an NVDA/AAPL entry has broad confirmation."""
+    """Keep initial exposure at 25%, including broadly confirmed entries."""
     sym = sym.upper()
     default = float(INITIAL_POSITION_EQUITY_PCT)
     core_symbols = {str(s).upper() for s in CORE_CONFIRMED_POSITION_SYMBOLS}
@@ -811,6 +814,55 @@ def exceptional_initial_exposure_pct(
     if all(checks):
         return float(EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT)
     return default
+
+
+def _confirmed_loss_exit(
+    sym: str,
+    shares: float,
+    price: float,
+    avg_cost: float,
+    probability: float,
+    sell_threshold: float,
+    diagnostics: Dict[str, dict] = None,
+):
+    """Exit a 0.5% losing position when model or price evidence deteriorates."""
+    if shares <= 0 or price <= 0 or avg_cost <= 0:
+        return None
+
+    position_return = (float(price) - float(avg_cost)) / float(avg_cost)
+    if position_return > float(CONFIRMED_LOSS_EXIT_PCT):
+        return None
+
+    diag = ((diagnostics or {}).get(str(sym).upper(), {}) or {})
+    confirmations = []
+    if _safe_float(probability, 1.0) <= float(sell_threshold):
+        confirmations.append(
+            f"prob={float(probability):.3f}<=SELL={float(sell_threshold):.3f}"
+        )
+
+    momentum = _safe_float(diag.get("intraday_mom"), None)
+    if momentum is not None and momentum <= 0.0:
+        confirmations.append(f"momentum={momentum:.3%}<=0")
+
+    vwap_distance = _safe_float(diag.get("vwap_distance"), None)
+    if vwap_distance is not None and vwap_distance < 0.0:
+        confirmations.append(f"VWAP={vwap_distance:.3%}<0")
+
+    if not confirmations:
+        return None
+
+    return make_decision(
+        "sell",
+        int(shares),
+        (
+            f"{str(sym).upper()}: CONFIRMED LOSS EXIT - position return "
+            f"{position_return:.2%} <= {float(CONFIRMED_LOSS_EXIT_PCT):.2%}; "
+            + "; ".join(confirmations)
+            + "."
+        ),
+        risk_exit="confirmed_loss_exit",
+        exit_reason="confirmed_loss_exit",
+    )
 
 
 def _confirmed_mr_reversal_entry(
@@ -1391,6 +1443,21 @@ def should_trade(
     no_meaningful_move = d_diag.get("movement_expected") is False
     session_return = _safe_float(d_diag.get("session_return"), None)
 
+    # A confirmed loss exit is risk-driven and therefore bypasses the
+    # 45-minute minimum hold used only for ordinary model exits.
+    if shares > 0:
+        confirmed_loss = _confirmed_loss_exit(
+            symbol,
+            shares,
+            price,
+            float(pm.data.get("avg_price", 0.0) or 0.0),
+            prob_up,
+            effective_sell_threshold,
+            diagnostics,
+        )
+        if confirmed_loss is not None:
+            return confirmed_loss
+
     # The movement gate and session-return filter suppress entries and pyramids.
     # They intentionally do not delay signal exits for an existing position.
     if prob_up >= effective_buy_threshold:
@@ -1425,8 +1492,9 @@ def should_trade(
                 0,
                 explain + "HOLD - pyramid blocked; average entry is unavailable.",
             )
-        if price <= avg_cost:
-            unrealized_pct = (price - avg_cost) / avg_cost
+        position_return = (price - avg_cost) / avg_cost
+        if position_return < float(CONFIRMED_PYRAMID_MIN_POSITION_RETURN):
+            unrealized_pct = position_return
             if price < avg_cost:
                 # Risk exits remain immediate even though adding is blocked.
                 stop_decision = check_stop_tp(
@@ -1442,7 +1510,8 @@ def should_trade(
             return make_decision(
                 "hold",
                 0,
-                explain + f"HOLD - pyramid requires a profitable position "
+                explain + f"HOLD - pyramid requires position return at least "
+                f"{float(CONFIRMED_PYRAMID_MIN_POSITION_RETURN):.2%} "
                 f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
                 f"return={unrealized_pct:.1%}).",
             )
@@ -1463,6 +1532,54 @@ def should_trade(
                 0,
                 explain + f"HOLD - pyramid requires positive intraday momentum "
                 f"(current={detail}).",
+            )
+
+        confirmation_checks = (
+            ("VWAP", _safe_float(d_diag.get("vwap_distance"), None), 0.0, False),
+            (
+                "VWAP slope",
+                _safe_float(d_diag.get("vwap_slope_2"), None),
+                0.0,
+                False,
+            ),
+            (
+                "relative session return",
+                _safe_float(d_diag.get("relative_session_return"), None),
+                0.0,
+                False,
+            ),
+            (
+                "60-minute relative strength",
+                _safe_float(d_diag.get("relative_return_4"), None),
+                0.0,
+                False,
+            ),
+            (
+                "time-normalized volume",
+                _safe_float(d_diag.get("volume_time_ratio"), None),
+                float(CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO),
+                True,
+            ),
+        )
+        failed_confirmations = []
+        for label, value, minimum, inclusive in confirmation_checks:
+            failed = value is None or (
+                value < minimum if inclusive else value <= minimum
+            )
+            if failed:
+                detail = "unavailable" if value is None else f"{value:.3%}"
+                operator = ">=" if inclusive else ">"
+                failed_confirmations.append(
+                    f"{label}={detail} (requires {operator}{minimum:.3%})"
+                )
+        if failed_confirmations:
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + "HOLD - pyramid confirmation incomplete: "
+                + "; ".join(failed_confirmations)
+                + ".",
             )
 
         # -- Guard 2b: don't chase - block pyramid if already up >2% from entry --
