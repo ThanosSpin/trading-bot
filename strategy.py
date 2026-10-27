@@ -40,6 +40,8 @@ from config import (
     CONFIRMED_PYRAMID_MIN_POSITION_RETURN,
     CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO,
     CONFIRMED_LOSS_EXIT_PCT,
+    TREND_PROTECTED_SELL_ENABLED,
+    TREND_PROTECTED_SELL_MIN_PROBABILITY,
     DIP_BUY_ENABLED,
     DIP_BUY_THRESHOLD,
     DIP_BUY_MIN_PROB,
@@ -862,6 +864,43 @@ def _confirmed_loss_exit(
         ),
         risk_exit="confirmed_loss_exit",
         exit_reason="confirmed_loss_exit",
+    )
+
+
+def _trend_protected_sell_reason(
+    sym: str,
+    price: float,
+    avg_cost: float,
+    probability: float,
+    diagnostics: Dict[str, dict] = None,
+):
+    """Explain why a profitable, rising position may defer a model SELL."""
+    if not bool(TREND_PROTECTED_SELL_ENABLED) or price <= 0 or avg_cost <= 0:
+        return None
+
+    position_return = (float(price) - float(avg_cost)) / float(avg_cost)
+    if position_return <= 0.0:
+        return None
+    if _safe_float(probability, 0.0) < float(TREND_PROTECTED_SELL_MIN_PROBABILITY):
+        return None
+
+    diag = ((diagnostics or {}).get(str(sym).upper(), {}) or {})
+    session_return = _safe_float(diag.get("session_return"), None)
+    momentum = _safe_float(diag.get("intraday_mom"), None)
+    vwap_distance = _safe_float(diag.get("vwap_distance"), None)
+    vwap_slope = _safe_float(diag.get("vwap_slope_2"), None)
+
+    if any(
+        value is None or value <= 0.0
+        for value in (session_return, momentum, vwap_distance, vwap_slope)
+    ):
+        return None
+
+    return (
+        f"SELL trend-protected - position return={position_return:.2%}, "
+        f"session={session_return:.2%}, momentum={momentum:.3%}, "
+        f"VWAP={vwap_distance:.3%}, VWAP_slope={vwap_slope:.3%}; "
+        f"prob={float(probability):.3f}."
     )
 
 
@@ -1765,6 +1804,21 @@ def should_trade(
                         )
                 except Exception:
                     pass
+
+            trend_protection = _trend_protected_sell_reason(
+                symbol,
+                price,
+                float(pm.data.get("avg_price", 0.0) or 0.0),
+                prob_up,
+                diagnostics,
+            )
+            if trend_protection is not None:
+                return make_decision(
+                    "hold",
+                    0,
+                    explain + trend_protection,
+                    trend_protected_sell=True,
+                )
 
             return make_decision(
                 "sell", int(shares), explain + f"SELL. qty={int(shares)}"

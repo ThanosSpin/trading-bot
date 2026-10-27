@@ -201,6 +201,11 @@ CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO = 0.80
 # Measure the loss from the broker average entry and require deteriorating
 # model or price evidence before exiting at this tighter threshold.
 CONFIRMED_LOSS_EXIT_PCT = -0.005
+
+# Defer an ordinary model SELL while an already-profitable position continues
+# to trend upward. Risk exits are evaluated first and always take precedence.
+TREND_PROTECTED_SELL_ENABLED = True
+TREND_PROTECTED_SELL_MIN_PROBABILITY = 0.50
 MIN_RETURN_THRESHOLD = 0.002
 
 DIP_BUY_ENABLED = True

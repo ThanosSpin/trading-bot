@@ -662,6 +662,65 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertNotIn("pyramid", decision)
         self.assertIn("SELL deferred", decision["explain"])
 
+    def test_profitable_rising_position_defers_sell_after_minimum_hold(self):
+        pm = SimpleNamespace(
+            data={
+                "shares": 10,
+                "cash": 100000.0,
+                "avg_price": 100.0,
+                "max_price": 101.0,
+                "entry_time": (datetime.utcnow() - timedelta(hours=1)).isoformat(),
+            },
+            refresh_live=lambda: None,
+            save=lambda: None,
+        )
+        diagnostics = {
+            "AAPL": {
+                "decision_threshold": 0.60,
+                "session_return": 0.01,
+                "intraday_mom": 0.0105,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.001,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=101.0
+        ):
+            decision = strategy.should_trade("AAPL", 0.513, diagnostics=diagnostics)
+
+        self.assertEqual(decision["action"], "hold")
+        self.assertTrue(decision["trend_protected_sell"])
+        self.assertIn("SELL trend-protected", decision["explain"])
+
+    def test_sell_executes_after_minimum_hold_when_momentum_turns_negative(self):
+        pm = SimpleNamespace(
+            data={
+                "shares": 10,
+                "cash": 100000.0,
+                "avg_price": 100.0,
+                "max_price": 101.0,
+                "entry_time": (datetime.utcnow() - timedelta(hours=1)).isoformat(),
+            },
+            refresh_live=lambda: None,
+            save=lambda: None,
+        )
+        diagnostics = {
+            "AAPL": {
+                "decision_threshold": 0.60,
+                "session_return": 0.01,
+                "intraday_mom": -0.001,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.001,
+            }
+        }
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=101.0
+        ):
+            decision = strategy.should_trade("AAPL", 0.513, diagnostics=diagnostics)
+
+        self.assertEqual(decision["action"], "sell")
+        self.assertNotIn("trend_protected_sell", decision)
+
     def test_exceptional_entry_falls_back_when_confirmation_is_incomplete(self):
         diagnostics = {
             "NVDA": {
