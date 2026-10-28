@@ -242,6 +242,16 @@ def add_intraday_market_features(
         idx = _market_clock_index(df.index)
 
         session_key = pd.Series(idx.date, index=df.index)
+        clock_minute = pd.Series(
+            idx.hour * 60 + idx.minute,
+            index=df.index,
+            dtype="int64",
+        )
+        regular_session = clock_minute.between(
+            MARKET_OPEN_MIN,
+            MARKET_CLOSE_MIN - 1,
+        )
+        regular_volume = volume.where(regular_session)
         cumulative_pv = (typical_price * volume).groupby(session_key).cumsum()
         cumulative_volume = volume.groupby(session_key).cumsum()
 
@@ -249,33 +259,42 @@ def add_intraday_market_features(
         df["vwap_distance"] = close / vwap.replace(0, np.nan) - 1.0
         df["above_vwap"] = (close >= vwap).astype(int)
 
-        df["session_volume_pace"] = (
-            volume / volume.groupby(session_key).transform("mean").replace(0, np.nan)
+        # Estimate each clock slot from earlier observations at that slot. The
+        # shift is essential: the current bar must never influence its own
+        # expected-volume baseline. A causal rolling mean supplies a fallback
+        # until at least one earlier session has the same clock slot.
+        expected_slot_volume = regular_volume.groupby(clock_minute).transform(
+            lambda values: values.shift(1).expanding(min_periods=1).mean()
         )
+        fallback_volume = regular_volume.shift(1).rolling(
+            20,
+            min_periods=1,
+        ).mean()
+        expected_volume = expected_slot_volume.fillna(fallback_volume)
 
-        # DatetimeIndex arithmetic returns an Index, and Index does not expose
-        # Series.clip().  Keep this indexed so the later volume arithmetic is
-        # aligned to the frame rather than relying on positional broadcasting.
-        elapsed = pd.Series(
-            idx.hour * 60 + idx.minute - (9 * 60 + 30),
-            index=df.index,
-            dtype=float,
-        ).clip(lower=0, upper=390)
-
-        expected_progress = elapsed.div(390.0).clip(lower=1 / 390)
-        cumulative_session_volume = volume.groupby(session_key).cumsum()
-
-        session_total_estimate = (
-            volume.groupby(session_key).transform("mean") * 26
-        )
-
-        expected_volume = session_total_estimate * expected_progress
+        volume_time_ratio = (
+            volume / expected_volume.replace(0.0, np.nan)
+        ).clip(lower=0.05, upper=20.0)
         df["volume_time_ratio"] = (
-            cumulative_session_volume / expected_volume.replace(0, np.nan)
+            volume_time_ratio.where(regular_session, 1.0).fillna(1.0)
         )
 
-        df["vwap_slope_2"] = df["vwap_distance"].diff(2)
-        df["vwap_slope_4"] = df["vwap_distance"].diff(4)
+        cumulative_session_volume = regular_volume.groupby(session_key).cumsum()
+        expected_cumulative_volume = (
+            expected_volume.where(regular_session).groupby(session_key).cumsum()
+        )
+        session_volume_pace = (
+            cumulative_session_volume
+            / expected_cumulative_volume.replace(0.0, np.nan)
+        )
+        df["session_volume_pace"] = (
+            session_volume_pace.clip(lower=0.05, upper=20.0)
+            .where(regular_session, 1.0)
+            .fillna(1.0)
+        )
+
+        df["vwap_slope_2"] = df["vwap_distance"].groupby(session_key).diff(2)
+        df["vwap_slope_4"] = df["vwap_distance"].groupby(session_key).diff(4)
     else:
         df["vwap_distance"] = np.nan
         df["above_vwap"] = 0

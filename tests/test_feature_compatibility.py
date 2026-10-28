@@ -29,6 +29,33 @@ class FeatureCompatibilityTests(unittest.TestCase):
             index=index,
         )
 
+    @staticmethod
+    def _two_session_volume_frame():
+        first = pd.date_range(
+            "2026-10-01 09:30",
+            periods=4,
+            freq="15min",
+            tz="America/New_York",
+        )
+        second = pd.date_range(
+            "2026-10-02 09:30",
+            periods=4,
+            freq="15min",
+            tz="America/New_York",
+        )
+        index = first.append(second)
+        close = np.linspace(100.0, 101.0, len(index))
+        return pd.DataFrame(
+            {
+                "Open": close,
+                "High": close + 0.5,
+                "Low": close - 0.5,
+                "Close": close,
+                "Volume": [100, 200, 300, 400, 200, 400, 600, 800],
+            },
+            index=index,
+        )
+
     def test_legacy_rsi_columns_are_preserved(self):
         result = add_advanced_features(self._frame(), mode="daily")
 
@@ -61,6 +88,31 @@ class FeatureCompatibilityTests(unittest.TestCase):
                 utc_result[column].to_numpy(),
                 equal_nan=True,
             )
+
+    def test_volume_ratio_uses_prior_session_same_clock_slot(self):
+        frame = self._two_session_volume_frame()
+        result = add_intraday_market_features(frame)
+
+        second_session = result.iloc[4:]
+        np.testing.assert_allclose(second_session["volume_time_ratio"], 2.0)
+        np.testing.assert_allclose(second_session["session_volume_pace"], 2.0)
+
+    def test_current_volume_does_not_change_its_own_baseline(self):
+        frame = self._two_session_volume_frame()
+        changed = frame.copy()
+        changed.iloc[-1, changed.columns.get_loc("Volume")] = 8000.0
+
+        baseline = add_intraday_market_features(frame)
+        result = add_intraday_market_features(changed)
+
+        self.assertAlmostEqual(baseline.iloc[-1]["volume_time_ratio"], 2.0)
+        self.assertAlmostEqual(result.iloc[-1]["volume_time_ratio"], 20.0)
+
+    def test_second_session_open_does_not_use_one_minute_progress(self):
+        result = add_intraday_market_features(self._two_session_volume_frame())
+
+        self.assertAlmostEqual(result.iloc[4]["volume_time_ratio"], 2.0)
+        self.assertLess(result.iloc[4]["volume_time_ratio"], 10.0)
 
     def test_compatibility_clock_matches_for_new_york_and_utc_indexes(self):
         new_york_frame = self._frame(periods=4)
