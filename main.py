@@ -840,6 +840,8 @@ def execute_decisions(decisions, diagnostics=None):
 
     def _entry_reason(decision):
         explain = str(decision.get("explain", "")).lower()
+        if decision.get("confirmed_rebuy"):
+            return "confirmed_rebuy"
         if decision.get("nvda_guarded_momentum"):
             return "nvda_guarded_momentum"
         if decision.get("relative_momentum"):
@@ -1073,6 +1075,7 @@ def execute_decisions(decisions, diagnostics=None):
                 price,
                 remaining_cash,
                 sym,
+                is_confirmed_rebuy=bool(decision.get("confirmed_rebuy", False)),
                 initial_exposure_pct=initial_exposure_pct,
             )
 
@@ -1091,6 +1094,7 @@ def execute_decisions(decisions, diagnostics=None):
                 price,
                 remaining_cash,
                 sym,
+                is_confirmed_rebuy=bool(decision.get("confirmed_rebuy", False)),
                 initial_exposure_pct=initial_exposure_pct,
             )
             print(
@@ -1103,6 +1107,7 @@ def execute_decisions(decisions, diagnostics=None):
                 price,
                 remaining_cash,
                 sym,
+                is_confirmed_rebuy=bool(decision.get("confirmed_rebuy", False)),
                 initial_exposure_pct=initial_exposure_pct,
             )
 

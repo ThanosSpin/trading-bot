@@ -189,9 +189,11 @@ MAX_POSITION_SIZE_DOLLARS = None
 INITIAL_POSITION_EQUITY_PCT = 0.25
 EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT = 0.25
 EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO = 0.80
-# Every new position starts at no more than 25%. NVDA and AAPL may scale to
-# 80% only after the prediction and live confirmation features agree.
-CORE_CONFIRMED_POSITION_EQUITY_PCT = 0.80
+# Every new position starts at no more than 25%. A confirmed, non-stop same-day
+# rebuy may restart at 50%; NVDA and AAPL may then scale to 85% only after the
+# prediction and live confirmation features continue to agree.
+CONFIRMED_REBUY_POSITION_EQUITY_PCT = 0.50
+CORE_CONFIRMED_POSITION_EQUITY_PCT = 0.85
 OTHER_CONFIRMED_POSITION_EQUITY_PCT = 0.50
 CORE_CONFIRMED_POSITION_SYMBOLS = ["NVDA", "AAPL"]
 CONFIRMED_PYRAMID_MIN_POSITION_RETURN = 0.002

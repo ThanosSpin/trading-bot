@@ -34,6 +34,7 @@ from config import (
     INITIAL_POSITION_EQUITY_PCT,
     EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT,
     EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO,
+    CONFIRMED_REBUY_POSITION_EQUITY_PCT,
     CORE_CONFIRMED_POSITION_EQUITY_PCT,
     OTHER_CONFIRMED_POSITION_EQUITY_PCT,
     CORE_CONFIRMED_POSITION_SYMBOLS,
@@ -526,6 +527,7 @@ def apply_position_limits(
     *,
     current_position_value: float = 0.0,
     is_pyramid: bool = False,
+    is_confirmed_rebuy: bool = False,
     initial_exposure_pct: float = None,
 ) -> int:
     """
@@ -560,6 +562,8 @@ def apply_position_limits(
             if symbol.upper() in core_symbols
             else float(OTHER_CONFIRMED_POSITION_EQUITY_PCT)
         )
+    elif is_confirmed_rebuy:
+        exposure_pct = float(CONFIRMED_REBUY_POSITION_EQUITY_PCT)
     else:
         requested_pct = _safe_float(initial_exposure_pct, None)
         exposure_pct = (
@@ -815,6 +819,43 @@ def exceptional_initial_exposure_pct(
     )
     if all(checks):
         return float(EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT)
+    return default
+
+
+def confirmed_rebuy_exposure_pct(
+    sym: str,
+    probability: float,
+    diagnostics: Dict[str, dict] = None,
+) -> float:
+    """Return a larger restart size only for a fully confirmed non-stop rebuy."""
+    sym = sym.upper()
+    default = float(INITIAL_POSITION_EQUITY_PCT)
+
+    if sym not in _session_state["buys"]:
+        return default
+    if _session_state.get("stop_exits", {}).get(sym):
+        return default
+    if sym in _session_state["flattened"]:
+        return default
+
+    diag = ((diagnostics or {}).get(sym, {}) or {})
+    required_probability = max(
+        _effective_rebuy_threshold(sym, diagnostics),
+        _effective_pyramid_threshold(sym, diagnostics),
+    )
+    checks = (
+        _safe_float(probability, 0.0) >= required_probability,
+        _safe_float(diag.get("session_return"), 0.0) > 0.0,
+        _safe_float(diag.get("intraday_mom"), 0.0) > 0.0,
+        _safe_float(diag.get("vwap_distance"), 0.0) > 0.0,
+        _safe_float(diag.get("vwap_slope_2"), 0.0) > 0.0,
+        _safe_float(diag.get("relative_session_return"), 0.0) > 0.0,
+        _safe_float(diag.get("relative_return_4"), 0.0) > 0.0,
+        _safe_float(diag.get("volume_time_ratio"), 0.0)
+        >= float(CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO),
+    )
+    if all(checks):
+        return float(CONFIRMED_REBUY_POSITION_EQUITY_PCT)
     return default
 
 
@@ -1748,7 +1789,8 @@ def should_trade(
             mr_reversal_entry = True
 
         # Check if this is a same-day rebuy
-        if shares <= 0 and symbol.upper() in _session_state["buys"]:
+        is_same_day_rebuy = shares <= 0 and symbol.upper() in _session_state["buys"]
+        if is_same_day_rebuy:
             allowed, reason = _rebuy_allowed(symbol, prob_up, diagnostics)
             if not allowed:
                 return make_decision("hold", 0, explain + reason)
@@ -1763,11 +1805,22 @@ def should_trade(
             if mr_reversal_entry
             else exceptional_initial_exposure_pct(symbol, prob_up, diagnostics)
         )
+        confirmed_rebuy = False
+        if is_same_day_rebuy and not mr_reversal_entry:
+            rebuy_exposure_pct = confirmed_rebuy_exposure_pct(
+                symbol,
+                prob_up,
+                diagnostics,
+            )
+            if rebuy_exposure_pct > float(INITIAL_POSITION_EQUITY_PCT):
+                initial_exposure_pct = rebuy_exposure_pct
+                confirmed_rebuy = True
         qty = apply_position_limits(
             qty,
             price,
             cash,
             symbol,
+            is_confirmed_rebuy=confirmed_rebuy,
             initial_exposure_pct=initial_exposure_pct,
         )
 
@@ -1780,6 +1833,16 @@ def should_trade(
                     + "MR REVERSAL BUY - two-cycle turn confirmed while one-hour "
                     f"momentum remains {intraday_mom:.3%}. qty={qty}",
                     mr_reversal=True,
+                )
+            if confirmed_rebuy:
+                return make_decision(
+                    "buy",
+                    qty,
+                    explain
+                    + "CONFIRMED REBUY - trend resumed with probability, "
+                    f"VWAP, relative-strength, and volume confirmation. qty={qty}",
+                    confirmed_rebuy=True,
+                    initial_exposure_pct=initial_exposure_pct,
                 )
             return make_decision("buy", qty, explain + f"BUY. qty={qty}")
 
@@ -3189,8 +3252,25 @@ def compute_strategy_decisions(
             if nvda_guarded_momentum
             else None
         )
+        confirmed_rebuy = False
+        if sym.upper() in _session_state["buys"]:
+            rebuy_exposure_pct = confirmed_rebuy_exposure_pct(
+                sym,
+                preds.get(sym, 0.0),
+                diagnostics,
+            )
+            if rebuy_exposure_pct > float(INITIAL_POSITION_EQUITY_PCT):
+                initial_exposure_pct = rebuy_exposure_pct
+                confirmed_rebuy = True
         relative_candidates.append(
-            (score, sym, reason, size_multiplier, initial_exposure_pct)
+            (
+                score,
+                sym,
+                reason,
+                size_multiplier,
+                initial_exposure_pct,
+                confirmed_rebuy,
+            )
         )
 
     if relative_candidates:
@@ -3200,6 +3280,7 @@ def compute_strategy_decisions(
             relative_reason,
             size_multiplier,
             initial_exposure_pct,
+            confirmed_rebuy,
         ) = max(relative_candidates)
         cash = float(account_state.get("cash", 0.0) or 0.0)
         price = float(prices.get(relative_symbol, 0.0) or 0.0)
@@ -3213,6 +3294,7 @@ def compute_strategy_decisions(
             price,
             cash,
             relative_symbol,
+            is_confirmed_rebuy=confirmed_rebuy,
             initial_exposure_pct=(
                 initial_exposure_pct
                 if initial_exposure_pct is not None
@@ -3246,6 +3328,7 @@ def compute_strategy_decisions(
                     "[NVDA GUARDED MOMENTUM]"
                 ),
                 initial_exposure_pct=initial_exposure_pct,
+                confirmed_rebuy=confirmed_rebuy,
                 size_multiplier=size_multiplier,
                 priority_rank=1,
             )

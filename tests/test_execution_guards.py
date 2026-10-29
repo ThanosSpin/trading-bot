@@ -427,11 +427,11 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(decision["action"], "hold")
         self.assertIn("requires positive intraday momentum", decision["explain"])
 
-    def test_confirmed_nvda_pyramid_can_scale_toward_eighty_percent(self):
+    def test_confirmed_nvda_pyramid_can_scale_toward_eighty_five_percent(self):
         decision = self._pyramid_decision()
         self.assertEqual(decision["action"], "buy")
         self.assertTrue(decision["pyramid"])
-        self.assertEqual(decision["qty"], 782)
+        self.assertEqual(decision["qty"], 831)
 
     def test_pyramid_requires_vwap_relative_strength_and_normalized_volume(self):
         pm = SimpleNamespace(
@@ -472,6 +472,70 @@ class ExecutionGuardTests(unittest.TestCase):
         ):
             qty = strategy.apply_position_limits(1000, 100.0, 100000.0, "NVDA")
         self.assertEqual(qty, 250)
+
+    def test_confirmed_rebuy_restarts_at_fifty_percent_equity(self):
+        pm = SimpleNamespace(
+            data={"shares": 0, "cash": 100000.0, "avg_price": 0.0},
+            refresh_live=lambda: None,
+        )
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "movement_expected": True,
+                "session_return": 0.01,
+                "intraday_mom": 0.005,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.001,
+                "relative_session_return": 0.004,
+                "relative_return_4": 0.002,
+                "volume_time_ratio": 1.1,
+            }
+        }
+        strategy._session_state["buys"].add("NVDA")
+        strategy._session_state["sells"].add("NVDA")
+        strategy._session_state["sell_times"]["NVDA"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=31)
+        )
+
+        with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
+            strategy, "fetch_latest_price", return_value=100.0
+        ), patch.object(
+            strategy.account_cache,
+            "get_account",
+            return_value={"equity": 100000.0},
+        ):
+            decision = strategy.should_trade("NVDA", 0.90, diagnostics=diagnostics)
+
+        self.assertEqual(decision["action"], "buy")
+        self.assertTrue(decision["confirmed_rebuy"])
+        self.assertEqual(decision["initial_exposure_pct"], 0.50)
+        self.assertEqual(decision["qty"], 500)
+
+    def test_post_stop_rebuy_keeps_twenty_five_percent_cap(self):
+        strategy._session_state["buys"].add("NVDA")
+        strategy._session_state["stop_exits"]["NVDA"] = {
+            "timestamp": (
+                datetime.now(timezone.utc) - timedelta(hours=3)
+            ).isoformat(),
+            "kind": "dynamic_risk_stop",
+        }
+        diagnostics = {
+            "NVDA": {
+                "decision_threshold": 0.50,
+                "session_return": 0.01,
+                "intraday_mom": 0.005,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.001,
+                "relative_session_return": 0.004,
+                "relative_return_4": 0.002,
+                "volume_time_ratio": 1.1,
+            }
+        }
+
+        self.assertEqual(
+            strategy.confirmed_rebuy_exposure_pct("NVDA", 0.90, diagnostics),
+            0.25,
+        )
 
     def test_confirmed_mr_reversal_enters_small_before_momentum_crosses_zero(self):
         pm = SimpleNamespace(
