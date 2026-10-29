@@ -164,7 +164,37 @@ def verify_runtime_environment():
 # ===============================================================
 # ✅ FIXED: Signal history logger with new schema
 # ===============================================================
-def log_signal_snapshot(sym: str, sig: dict, final_prob=None, intraday_weight=None) -> None:
+def _ensure_signal_log_schema(path: str, columns: list) -> None:
+    """Expand an existing signal CSV without discarding its historical rows."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return
+
+    with open(path, "r", newline="") as source:
+        reader = csv.DictReader(source)
+        existing_columns = reader.fieldnames or []
+        if existing_columns == columns:
+            return
+        rows = list(reader)
+
+    temporary_path = f"{path}.schema.tmp"
+    with open(temporary_path, "w", newline="") as destination:
+        writer = csv.DictWriter(
+            destination,
+            fieldnames=columns,
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(temporary_path, path)
+
+
+def log_signal_snapshot(
+    sym: str,
+    sig: dict,
+    final_prob=None,
+    intraday_weight=None,
+    diagnostics=None,
+) -> None:
     """
     Log signal snapshot with flexible schema handling.
     Auto-creates headers based on signal dict keys.
@@ -189,10 +219,21 @@ def log_signal_snapshot(sym: str, sig: dict, final_prob=None, intraday_weight=No
             "intradaymom",
             "intradayregime",  # ✅ NEW field
             "allowintraday",  # ✅ NEW field
+            "buythreshold",
+            "sessionreturn",
+            "vwapdistance",
+            "vwapslope2",
+            "relativereturn4",
+            "relativestrengthaccel",
+            "relativesessionreturn",
+            "relativemarketavailable",
+            "volumetimeratio",
+            "sessionvolumepace",
         ]
 
-        # Check if file exists
-        file_exists = os.path.exists(path)
+        _ensure_signal_log_schema(path, columns)
+        file_exists = os.path.exists(path) and os.path.getsize(path) > 0
+        diag = diagnostics or {}
 
         # Prepare row data
         row_data = {
@@ -209,6 +250,16 @@ def log_signal_snapshot(sym: str, sig: dict, final_prob=None, intraday_weight=No
             "intradaymom": sig.get("intraday_mom"),
             "intradayregime": sig.get("intraday_regime"),  # ✅ NEW
             "allowintraday": sig.get("allow_intraday"),  # ✅ NEW
+            "buythreshold": diag.get("buy_threshold"),
+            "sessionreturn": diag.get("session_return"),
+            "vwapdistance": diag.get("vwap_distance"),
+            "vwapslope2": diag.get("vwap_slope_2"),
+            "relativereturn4": diag.get("relative_return_4"),
+            "relativestrengthaccel": diag.get("relative_strength_accel"),
+            "relativesessionreturn": diag.get("relative_session_return"),
+            "relativemarketavailable": diag.get("relative_market_available"),
+            "volumetimeratio": diag.get("volume_time_ratio"),
+            "sessionvolumepace": diag.get("session_volume_pace"),
         }
 
         # Write to CSV
@@ -327,9 +378,6 @@ def get_predictions(symbols, debug=True):
             f"q={q} allow_intraday={allow_intraday} w={w:.3f} -> final={final_prob:.3f}"
         )
 
-        # ✅ log signal history for dashboard using production-adjusted values
-        log_signal_snapshot(sym, sig, final_prob=final_prob, intraday_weight=w)
-
         predictions[sym] = final_prob
 
         daily_prediction = sig.get("daily_prediction")
@@ -440,6 +488,19 @@ def get_predictions(symbols, debug=True):
             "cost_aware_threshold": cost_aware_threshold,
             **threshold_info,
         }
+        diagnostics[sym]["buy_threshold"] = _effective_buy_threshold(
+            sym, diagnostics
+        )
+
+        # Persist the exact production-adjusted probability, threshold, and
+        # confirmation evidence used by the decision cycle.
+        log_signal_snapshot(
+            sym,
+            sig,
+            final_prob=final_prob,
+            intraday_weight=w,
+            diagnostics=diagnostics[sym],
+        )
 
     # ✅ EVALUATE PAST PREDICTIONS (monitoring)
     print("\n📊 Evaluating past predictions...")
