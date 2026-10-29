@@ -758,7 +758,12 @@ for sym in symbols:
         daily_p = sig.get("daily_prob")
         intra_p = sig.get("intraday_prob")
         final_p = sig.get("final_prob")
-        weight = sig.get("intraday_weight", 0.65)
+        # Show the quality/contradiction-adjusted weight that was actually
+        # used to blend the daily and intraday probabilities. The legacy
+        # ``intraday_weight`` field is only the capped base weight.
+        weight = sig.get("intraday_weight_used")
+        if weight is None:
+            weight = sig.get("intraday_weight", 0.0)
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Final prob_up", f"{final_p:.3f}")
@@ -766,7 +771,7 @@ for sym in symbols:
         col3.metric(
             "Intraday model", f"{intra_p:.3f}" if intra_p is not None else "N/A"
         )
-        col4.metric("Intraday weight", f"{weight:.2f}")
+        col4.metric("Intraday weight used", f"{float(weight):.2f}")
         st.progress(max(0.0, min(final_p, 1.0)))
 
         # -----------------------------
