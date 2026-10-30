@@ -14,6 +14,7 @@ from config import (
     FINNHUB_API_KEY,
 )
 from earnings_calendar import (
+    EarningsCalendarProviderError,
     build_calendar,
     fetch_alpha_vantage_dates,
     fetch_finnhub_events,
@@ -31,17 +32,23 @@ def main() -> int:
 
     start = datetime.now(ZoneInfo("America/New_York")).date()
     end = start + timedelta(days=100)
-    primary = fetch_finnhub_events(
-        EARNINGS_CALENDAR_SYMBOLS,
-        start.isoformat(),
-        end.isoformat(),
-        FINNHUB_API_KEY,
-    )
-    secondary = (
-        fetch_alpha_vantage_dates(EARNINGS_CALENDAR_SYMBOLS, ALPHA_VANTAGE_API_KEY)
-        if ALPHA_VANTAGE_API_KEY
-        else {}
-    )
+    try:
+        primary = fetch_finnhub_events(
+            EARNINGS_CALENDAR_SYMBOLS,
+            start.isoformat(),
+            end.isoformat(),
+            FINNHUB_API_KEY,
+        )
+        secondary = (
+            fetch_alpha_vantage_dates(
+                EARNINGS_CALENDAR_SYMBOLS, ALPHA_VANTAGE_API_KEY
+            )
+            if ALPHA_VANTAGE_API_KEY
+            else {}
+        )
+    except EarningsCalendarProviderError as exc:
+        print(f"[EARNINGS CALENDAR] FAILED: {exc}")
+        return 1
     payload = build_calendar(
         EARNINGS_CALENDAR_SYMBOLS,
         primary,

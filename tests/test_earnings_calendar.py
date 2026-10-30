@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from earnings_calendar import (
+    EarningsCalendarProviderError,
+    _ensure_provider_success,
     build_calendar,
     load_cached_event_dates,
     resolve_trading_event_date,
@@ -14,6 +16,19 @@ from earnings_calendar import (
 
 
 class EarningsCalendarTests(unittest.TestCase):
+    def test_provider_authentication_error_does_not_include_url(self):
+        class Response:
+            status_code = 401
+            url = "https://provider.example/calendar?token=secret-value"
+
+        with self.assertRaises(EarningsCalendarProviderError) as raised:
+            _ensure_provider_success(Response(), "Provider")
+
+        message = str(raised.exception)
+        self.assertIn("HTTP 401", message)
+        self.assertNotIn("secret-value", message)
+        self.assertNotIn("https://", message)
+
     def test_before_open_uses_report_date(self):
         self.assertEqual(
             resolve_trading_event_date("2026-11-05", "bmo"),

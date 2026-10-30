@@ -14,6 +14,27 @@ FINNHUB_URL = "https://finnhub.io/api/v1/calendar/earnings"
 ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
 
 
+class EarningsCalendarProviderError(RuntimeError):
+    """Provider failure whose message deliberately excludes request URLs."""
+
+
+def _ensure_provider_success(response, provider: str) -> None:
+    status = int(getattr(response, "status_code", 0) or 0)
+    if 200 <= status < 300:
+        return
+    if status == 401:
+        detail = "authentication failed; verify or regenerate the API key"
+    elif status == 403:
+        detail = "access denied; verify the API plan permits this endpoint"
+    elif status == 429:
+        detail = "rate limit exceeded; retry after the provider reset"
+    else:
+        detail = "request failed"
+    raise EarningsCalendarProviderError(
+        f"{provider} {detail} (HTTP {status or 'unknown'})"
+    )
+
+
 def _iso_date(value) -> Optional[str]:
     try:
         return date.fromisoformat(str(value)[:10]).isoformat()
@@ -56,6 +77,9 @@ def fetch_finnhub_events(
         import requests
 
         session = requests
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        raise EarningsCalendarProviderError("Finnhub API key is missing")
     events = {}
     for symbol in sorted({str(value).upper() for value in symbols}):
         response = session.get(
@@ -68,7 +92,7 @@ def fetch_finnhub_events(
             },
             timeout=20,
         )
-        response.raise_for_status()
+        _ensure_provider_success(response, "Finnhub")
         rows = response.json().get("earningsCalendar") or []
         future_rows = [row for row in rows if _iso_date(row.get("date"))]
         if not future_rows:
@@ -97,6 +121,9 @@ def fetch_alpha_vantage_dates(
         import requests
 
         session = requests
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        raise EarningsCalendarProviderError("Alpha Vantage API key is missing")
     response = session.get(
         ALPHA_VANTAGE_URL,
         params={
@@ -106,7 +133,7 @@ def fetch_alpha_vantage_dates(
         },
         timeout=30,
     )
-    response.raise_for_status()
+    _ensure_provider_success(response, "Alpha Vantage")
     wanted = {str(value).upper() for value in symbols}
     matches: Dict[str, str] = {}
     for row in csv.DictReader(io.StringIO(response.text)):
