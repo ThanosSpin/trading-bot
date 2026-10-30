@@ -93,4 +93,4 @@ ENV_NAME = BOT_ENV
 USE_LIVE_TRADING = True
 
 # Event-driven opening entries require a completed paper cohort first.
-EARNINGS_OPENING_CONTINUATION_ENABLED = False
+EARNINGS_OPENING_CONTINUATION_ENABLED = True
