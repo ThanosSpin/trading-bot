@@ -212,7 +212,8 @@ def apply_earnings_event_day_entry_gate(
     override. The dedicated continuation function runs after this gate and may
     replace the HOLD only when all event checks pass.
     """
-    if enabled is None or event_dates is None:
+    use_cached_dates = event_dates is None
+    if enabled is None or use_cached_dates:
         from config import (
             EARNINGS_OPENING_CONTINUATION_ENABLED,
             EARNINGS_OPENING_EVENT_DATES,
@@ -225,6 +226,10 @@ def apply_earnings_event_day_entry_gate(
 
     if not enabled:
         return decisions
+    if use_cached_dates:
+        from earnings_calendar import resolved_event_dates
+
+        event_dates = resolved_event_dates(event_dates)
     now_ny = now_ny or datetime.now(NY_TZ)
     if now_ny.tzinfo is None:
         now_ny = NY_TZ.localize(now_ny)
@@ -302,6 +307,7 @@ def apply_earnings_opening_continuation(
         SPY_SYMBOL,
     )
     from portfolio import PortfolioManager
+    from earnings_calendar import resolved_event_dates
     from predictive_model.data_loader import (
         fetch_intraday_history,
         fetch_previous_close,
@@ -309,6 +315,10 @@ def apply_earnings_opening_continuation(
 
     if not EARNINGS_OPENING_CONTINUATION_ENABLED:
         return decisions
+
+    EARNINGS_OPENING_EVENT_DATES = resolved_event_dates(
+        EARNINGS_OPENING_EVENT_DATES
+    )
 
     now_ny = now_ny or datetime.now(NY_TZ)
     if now_ny.tzinfo is None:

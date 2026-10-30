@@ -171,12 +171,20 @@ RELATIVE_MOMENTUM_ENTRY_ENABLED = os.getenv(
     "RELATIVE_MOMENTUM_ENTRY_ENABLED", "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
-# Paper-research path for earnings gaps that continue after the regular
-# session opens. Live configurations explicitly keep this disabled.
+# Earnings-gap continuation path. Environment-specific configuration controls
+# activation; provider dates are admitted only through the confirmed cache.
 EARNINGS_OPENING_CONTINUATION_ENABLED = False
 EARNINGS_OPENING_EVENT_DATES = {
     "ABBV": ["2026-10-30"],
 }
+EARNINGS_CALENDAR_SYMBOLS = ["AAPL", "ABBV", "PLTR"]
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+EARNINGS_CALENDAR_CACHE_FILE = (
+    Path(__file__).resolve().parent.parent / "data" / "earnings_calendar.json"
+)
+EARNINGS_CALENDAR_MAX_AGE_HOURS = 36
+EARNINGS_CALENDAR_REQUIRE_CONFIRMATION = True
 EARNINGS_OPENING_WINDOW_END = "10:30"
 EARNINGS_OPENING_MIN_GAP = 0.02
 EARNINGS_OPENING_MIN_VOLUME_PACE = 1.50
