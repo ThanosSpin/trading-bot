@@ -34,6 +34,7 @@ from portfolio import PortfolioManager
 from trader import execute_trade, get_margin_status, get_recent_filled_sells
 from entry_policy import apply_entry_symbol_guard
 from earnings_opening import (
+    apply_earnings_event_day_entry_gate,
     apply_earnings_opening_continuation,
     apply_earnings_opening_protective_exit,
 )
@@ -1297,7 +1298,12 @@ def process_all_symbols(symbols):
         strong_cut=0.75,  # only very strong signals allowed on bad days
     )
 
-    # Paper-only earnings continuation research. This independent event path
+    # On a configured earnings day, ordinary model, breakout, rotation, and
+    # rebuy paths may not bypass the dedicated five-minute event checks. The
+    # continuation function below can replace this HOLD after confirmation.
+    decisions = apply_earnings_event_day_entry_gate(decisions)
+
+    # Earnings continuation path. This independent event path
     # runs after the broad weak-market model guard because it requires its own
     # five-minute SPY-relative, VWAP, breakout, and volume confirmations. The
     # allowlist and normal execution/risk sizing still apply.

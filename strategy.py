@@ -2926,6 +2926,8 @@ def compute_strategy_decisions(
                             f"(AAPL={aapl_prob:.3f}, ABBV={abbv_prob:.3f})."
                         ),
                         priority_rank=0,
+                        rotation_source="AAPL",
+                        rotation_target="ABBV",
                     )
 
                     decisions["ABBV"] = make_decision(
@@ -2937,6 +2939,8 @@ def compute_strategy_decisions(
                         ),
                         recalc_after_sells=True,
                         priority_rank=1,
+                        rotation_source="AAPL",
+                        rotation_target="ABBV",
                     )
 
     # ---------------------------------------------------------

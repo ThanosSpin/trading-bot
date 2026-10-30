@@ -198,6 +198,88 @@ def _event_is_active(symbol: str, now_ny: datetime, event_dates) -> bool:
     return now_ny.date().isoformat() in {str(value) for value in dates}
 
 
+def apply_earnings_event_day_entry_gate(
+    decisions: Dict[str, dict],
+    now_ny: Optional[datetime] = None,
+    enabled: Optional[bool] = None,
+    event_dates=None,
+) -> Dict[str, dict]:
+    """Reserve event-day entries for the dedicated opening strategy.
+
+    Ordinary model, breakout, rotation, and rebuy paths do not evaluate the
+    event-specific five-minute evidence. Blocking their BUY decisions prevents
+    a rejected opening setup from being reintroduced by a later strategy
+    override. The dedicated continuation function runs after this gate and may
+    replace the HOLD only when all event checks pass.
+    """
+    if enabled is None or event_dates is None:
+        from config import (
+            EARNINGS_OPENING_CONTINUATION_ENABLED,
+            EARNINGS_OPENING_EVENT_DATES,
+        )
+
+        if enabled is None:
+            enabled = EARNINGS_OPENING_CONTINUATION_ENABLED
+        if event_dates is None:
+            event_dates = EARNINGS_OPENING_EVENT_DATES
+
+    if not enabled:
+        return decisions
+    now_ny = now_ny or datetime.now(NY_TZ)
+    if now_ny.tzinfo is None:
+        now_ny = NY_TZ.localize(now_ny)
+    else:
+        now_ny = now_ny.astimezone(NY_TZ)
+
+    blocked_targets = set()
+    for symbol, decision in list(decisions.items()):
+        if not _event_is_active(symbol, now_ny, event_dates):
+            continue
+        if str((decision or {}).get("action", "")).lower() != "buy":
+            continue
+        original_reason = (decision or {}).get("explain", "ordinary BUY")
+        decisions[symbol] = {
+            "action": "hold",
+            "qty": 0,
+            "explain": (
+                f"{symbol}: event-day ordinary BUY blocked; waiting for the "
+                f"dedicated five-minute earnings confirmation. "
+                f"Original decision: {original_reason}"
+            ),
+            "event_day_entry_blocked": True,
+        }
+        blocked_targets.add(symbol.upper())
+        print(
+            f"[EARNINGS EVENT GATE] {symbol}: blocked ordinary BUY "
+            f"({original_reason})"
+        )
+
+    # A paired funding sale must not survive after its destination BUY is
+    # blocked. Explicit metadata keeps independent model/risk exits intact.
+    for symbol, decision in list(decisions.items()):
+        rotation_target = str((decision or {}).get("rotation_target", "")).upper()
+        if rotation_target not in blocked_targets:
+            continue
+        if str((decision or {}).get("action", "")).lower() != "sell":
+            continue
+        original_reason = (decision or {}).get("explain", "rotation funding sale")
+        decisions[symbol] = {
+            "action": "hold",
+            "qty": 0,
+            "explain": (
+                f"{symbol}: paired rotation sale cancelled because the "
+                f"event-day {rotation_target} entry was blocked. "
+                f"Original decision: {original_reason}"
+            ),
+            "event_day_rotation_cancelled": True,
+        }
+        print(
+            f"[EARNINGS EVENT GATE] {symbol}: cancelled paired sale for "
+            f"blocked {rotation_target} entry"
+        )
+    return decisions
+
+
 def apply_earnings_opening_continuation(
     decisions: Dict[str, dict],
     diagnostics: Dict[str, dict],

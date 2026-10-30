@@ -10,6 +10,7 @@ os.environ.setdefault("BOT_ENV", "paper")
 
 from earnings_opening import (
     _record_evaluation,
+    apply_earnings_event_day_entry_gate,
     evaluate_opening_bars,
     evaluate_opening_exit_bars,
 )
@@ -64,6 +65,86 @@ def _history(symbol=True):
 
 
 class EarningsOpeningTests(unittest.TestCase):
+    def test_event_day_gate_blocks_ordinary_buy_only_for_event_symbol(self):
+        decisions = {
+            "ABBV": {
+                "action": "buy",
+                "qty": 13,
+                "explain": "ABBV: Rotation BUY after AAPL sale.",
+            },
+            "AAPL": {
+                "action": "sell",
+                "qty": 11,
+                "explain": "AAPL: Rotated into stronger ABBV signal.",
+                "rotation_source": "AAPL",
+                "rotation_target": "ABBV",
+            },
+        }
+        now_ny = NY_TZ.localize(
+            pd.Timestamp("2026-10-30 13:20:00").to_pydatetime()
+        )
+
+        result = apply_earnings_event_day_entry_gate(
+            decisions,
+            now_ny=now_ny,
+            enabled=True,
+            event_dates={"ABBV": ["2026-10-30"]},
+        )
+
+        self.assertEqual(result["ABBV"]["action"], "hold")
+        self.assertEqual(result["ABBV"]["qty"], 0)
+        self.assertTrue(result["ABBV"]["event_day_entry_blocked"])
+        self.assertEqual(result["AAPL"]["action"], "hold")
+        self.assertEqual(result["AAPL"]["qty"], 0)
+        self.assertTrue(result["AAPL"]["event_day_rotation_cancelled"])
+
+    def test_event_day_gate_preserves_independent_sell(self):
+        decisions = {
+            "ABBV": {
+                "action": "buy",
+                "qty": 13,
+                "explain": "ABBV rotation BUY",
+                "rotation_source": "AAPL",
+                "rotation_target": "ABBV",
+            },
+            "AAPL": {
+                "action": "sell",
+                "qty": 11,
+                "explain": "AAPL risk stop",
+                "risk_exit": "dynamic_risk_stop",
+            },
+        }
+        now_ny = NY_TZ.localize(
+            pd.Timestamp("2026-10-30 13:20:00").to_pydatetime()
+        )
+
+        result = apply_earnings_event_day_entry_gate(
+            decisions,
+            now_ny=now_ny,
+            enabled=True,
+            event_dates={"ABBV": ["2026-10-30"]},
+        )
+
+        self.assertEqual(result["ABBV"]["action"], "hold")
+        self.assertEqual(result["AAPL"]["action"], "sell")
+
+    def test_event_day_gate_does_not_block_non_event_date(self):
+        decisions = {
+            "ABBV": {"action": "buy", "qty": 2, "explain": "ordinary BUY"}
+        }
+        now_ny = NY_TZ.localize(
+            pd.Timestamp("2026-10-29 10:15:00").to_pydatetime()
+        )
+
+        result = apply_earnings_event_day_entry_gate(
+            decisions,
+            now_ny=now_ny,
+            enabled=True,
+            event_dates={"ABBV": ["2026-10-30"]},
+        )
+
+        self.assertEqual(result["ABBV"]["action"], "buy")
+
     def test_qualified_gap_breakout_uses_completed_bars(self):
         result = evaluate_opening_bars(
             "ABBV",
