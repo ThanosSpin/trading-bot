@@ -171,6 +171,18 @@ RELATIVE_MOMENTUM_ENTRY_ENABLED = os.getenv(
     "RELATIVE_MOMENTUM_ENTRY_ENABLED", "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
+# Paper-research path for earnings gaps that continue after the regular
+# session opens. Live configurations explicitly keep this disabled.
+EARNINGS_OPENING_CONTINUATION_ENABLED = False
+EARNINGS_OPENING_EVENT_DATES = {
+    "ABBV": ["2026-10-30"],
+}
+EARNINGS_OPENING_WINDOW_END = "10:30"
+EARNINGS_OPENING_MIN_GAP = 0.02
+EARNINGS_OPENING_MIN_VOLUME_PACE = 1.50
+EARNINGS_OPENING_MIN_RELATIVE_RETURN = 0.0
+EARNINGS_OPENING_INITIAL_POSITION_EQUITY_PCT = 0.25
+
 STOP_LOSS = 0.97
 TAKE_PROFIT = None
 TRAIL_STOP = 0.985

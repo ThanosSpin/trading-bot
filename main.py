@@ -13,6 +13,8 @@ from strategy import (
     compute_strategy_decisions,
     # reset_session_state,
     mark_session_buy,
+    session_has_bought,
+    session_earnings_opening_symbols,
     mark_session_sell,
     mark_session_flattened,
     mark_session_position_closed,
@@ -31,6 +33,10 @@ from strategy import (
 from portfolio import PortfolioManager
 from trader import execute_trade, get_margin_status, get_recent_filled_sells
 from entry_policy import apply_entry_symbol_guard
+from earnings_opening import (
+    apply_earnings_opening_continuation,
+    apply_earnings_opening_protective_exit,
+)
 from predictive_model.model_monitor import (
     get_monitor,
     evaluate_predictions,
@@ -901,6 +907,8 @@ def execute_decisions(decisions, diagnostics=None):
 
     def _entry_reason(decision):
         explain = str(decision.get("explain", "")).lower()
+        if decision.get("earnings_opening_continuation"):
+            return "earnings_opening_continuation"
         if decision.get("confirmed_rebuy"):
             return "confirmed_rebuy"
         if decision.get("nvda_guarded_momentum"):
@@ -1197,7 +1205,11 @@ def execute_decisions(decisions, diagnostics=None):
                 sym, decision, "buy", shares_before, filled_price
             ),
         )
-        mark_session_buy(sym, is_pyramid=bool(decision.get("pyramid", False)))
+        mark_session_buy(
+            sym,
+            is_pyramid=bool(decision.get("pyramid", False)),
+            entry_reason=_entry_reason(decision),
+        )
         print(f"Updated Portfolio Value for {sym}: ${pm.value():.2f}")
 
         # update remaining cash after successful buy
@@ -1284,6 +1296,24 @@ def process_all_symbols(symbols):
         loss_limit=-40.0,  # your chosen -40$
         strong_cut=0.75,  # only very strong signals allowed on bad days
     )
+
+    # Paper-only earnings continuation research. This independent event path
+    # runs after the broad weak-market model guard because it requires its own
+    # five-minute SPY-relative, VWAP, breakout, and volume confirmations. The
+    # allowlist and normal execution/risk sizing still apply.
+    decisions = apply_earnings_opening_continuation(
+        decisions,
+        diagnostics,
+        already_bought_symbols=[
+            symbol for symbol in core_symbols if session_has_bought(symbol)
+        ],
+    )
+    decisions = apply_entry_symbol_guard(decisions)
+    decisions = apply_earnings_opening_protective_exit(
+        decisions,
+        session_earnings_opening_symbols(),
+    )
+
     # Daily loss guard for existing positions (fires intraday)
     decisions = apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.015)
 

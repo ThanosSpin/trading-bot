@@ -55,3 +55,6 @@ MAX_LOSS_ACCOUNT_EQUITY_PCT = 0.005
 MAX_LOSS_PER_POSITION_PCT = 0.015
 
 PDT_TIERING_ENABLED = False
+
+# Validate earnings opening continuation separately in the paper account.
+EARNINGS_OPENING_CONTINUATION_ENABLED = True

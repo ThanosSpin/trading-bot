@@ -122,6 +122,7 @@ _session_state: dict = {
     "last_pyramid_times": {},
     "stop_exits": {},
     "mr_reversal_counts": {},
+    "earnings_opening_buys": set(),
 }
 
 SESSION_ENV = str(BOT_ENV).strip().lower()
@@ -149,6 +150,7 @@ def reset_session_state():
     _session_state["last_pyramid_times"].clear()
     _session_state["stop_exits"].clear()
     _session_state["mr_reversal_counts"].clear()
+    _session_state["earnings_opening_buys"].clear()
     print("[SESSION] Session state reset for new trading day.")
 
 
@@ -201,6 +203,9 @@ def load_session_state():
                 str(k).upper(): int(v)
                 for k, v in data.get("mr_reversal_counts", {}).items()
             }
+            _session_state["earnings_opening_buys"] = set(
+                data.get("earnings_opening_buys", [])
+            )
             print(f"[SESSION] Loaded state from {SESSION_STATE_PATH}")
     except Exception as e:
         print(f"[WARN] Failed to load session_state: {e}")
@@ -233,6 +238,9 @@ def save_session_state():
             },
             "stop_exits": _session_state["stop_exits"],
             "mr_reversal_counts": _session_state["mr_reversal_counts"],
+            "earnings_opening_buys": list(
+                _session_state["earnings_opening_buys"]
+            ),
         }
         with open(SESSION_STATE_PATH, "w") as f:
             json.dump(data, f)
@@ -266,15 +274,31 @@ def record_broker_sell_fills(fills):
     return changed
 
 
-def mark_session_buy(sym: str, is_pyramid: bool = False):
+def mark_session_buy(
+    sym: str,
+    is_pyramid: bool = False,
+    entry_reason: str = None,
+):
     sym = sym.upper()
     _session_state["buys"].add(sym)
     _session_state["buy_times"][sym] = _dt.now(timezone.utc)
+    if entry_reason == "earnings_opening_continuation":
+        _session_state["earnings_opening_buys"].add(sym)
     if is_pyramid:
         _session_state["pyramid_counts"][sym] = (
             int(_session_state["pyramid_counts"].get(sym, 0)) + 1
         )
         _session_state["last_pyramid_times"][sym] = _dt.now(timezone.utc)
+
+
+def session_has_bought(sym: str) -> bool:
+    """Return whether this environment already bought the symbol today."""
+    return str(sym).upper() in _session_state["buys"]
+
+
+def session_earnings_opening_symbols():
+    """Return symbols entered by the event-opening strategy today."""
+    return set(_session_state["earnings_opening_buys"])
 
 
 def mark_session_position_closed(sym: str):
