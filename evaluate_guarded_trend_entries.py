@@ -51,8 +51,16 @@ def guarded_candidates(
     frame: pd.DataFrame,
     max_probability_gap: float,
     minimum_volume_ratio: float,
+    relative_rule: str = "strict",
 ) -> pd.DataFrame:
+    if relative_rule not in {"strict", "recent"}:
+        raise ValueError(f"unsupported relative rule: {relative_rule}")
+
     complete = frame.dropna(subset=list(REQUIRED_COLUMNS - {"timestamp", "relativemarketavailable"}))
+    relative_mask = complete["relativereturn4"] > 0.0
+    if relative_rule == "strict":
+        relative_mask &= complete["relativesessionreturn"] > 0.0
+
     mask = (
         (complete["finalprob"] < complete["buythreshold"])
         & (complete["finalprob"] >= complete["buythreshold"] - max_probability_gap)
@@ -60,8 +68,7 @@ def guarded_candidates(
         & (complete["intradaymom"] > 0.0)
         & (complete["vwapdistance"] > 0.0)
         & (complete["vwapslope2"] > 0.0)
-        & (complete["relativereturn4"] > 0.0)
-        & (complete["relativesessionreturn"] > 0.0)
+        & relative_mask
         & complete["relativemarketavailable"]
         & (complete["volumetimeratio"] >= minimum_volume_ratio)
     )
@@ -88,6 +95,11 @@ def evaluate_horizon(
     selected = []
     next_allowed = None
     for row in candidates.itertuples(index=False):
+        timestamp_ny = row.timestamp.tz_convert("America/New_York")
+        close_ny = timestamp_ny.normalize() + pd.Timedelta(hours=16)
+        latest_entry_ny = close_ny - pd.Timedelta(minutes=horizon_minutes)
+        if timestamp_ny > latest_entry_ny:
+            continue
         if next_allowed is not None and row.timestamp < next_allowed:
             continue
         target = row.timestamp + pd.Timedelta(minutes=horizon_minutes)
@@ -159,6 +171,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tolerance-minutes", type=int, default=15)
     parser.add_argument("--minimum-samples", type=int, default=20)
     parser.add_argument("--minimum-sessions", type=int, default=5)
+    parser.add_argument(
+        "--relative-rules",
+        nargs="+",
+        choices=["strict", "recent"],
+        default=["strict", "recent"],
+        help=(
+            "strict requires positive recent and whole-session returns versus SPY; "
+            "recent requires only positive recent return versus SPY"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("logs/guarded_trend_evaluation"))
     return parser.parse_args()
 
@@ -174,17 +196,27 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "rule": {
+        "evaluation": {
             "max_probability_gap": args.max_probability_gap,
             "minimum_volume_ratio": args.minimum_volume_ratio,
             "cost_bps": args.cost_bps,
-            "conditions": [
+            "common_conditions": [
                 "below normal BUY threshold but within probability gap",
                 "positive session return and intraday momentum",
                 "above VWAP with positive two-bar VWAP slope",
-                "positive 60-minute and session relative strength",
                 "time-normalized volume at or above minimum",
             ],
+            "relative_rules": {
+                "strict": "positive recent and whole-session return versus SPY",
+                "recent": "positive recent return versus SPY; whole-session relative return is informational",
+            },
+            "latest_entry": {
+                str(horizon): (
+                    f"{(16 * 60 - horizon) // 60:02d}:"
+                    f"{(16 * 60 - horizon) % 60:02d} America/New_York"
+                )
+                for horizon in args.horizons
+            },
         },
         "results": {},
     }
@@ -194,7 +226,7 @@ def main() -> int:
         report["results"][environment] = {}
         for symbol in args.symbols:
             path = directory / f"signals_{symbol.upper()}.csv"
-            symbol_result = {"source": str(path), "horizons": {}}
+            symbol_result = {"source": str(path)}
             report["results"][environment][symbol.upper()] = symbol_result
             if not path.is_file():
                 symbol_result["status"] = "MISSING"
@@ -205,36 +237,48 @@ def main() -> int:
                 symbol_result.update(status="COLLECTING", reason=str(exc))
                 continue
 
-            candidates = guarded_candidates(
-                history,
-                args.max_probability_gap,
-                args.minimum_volume_ratio,
-            )
             symbol_result["complete_rows"] = int(
                 history[list(REQUIRED_COLUMNS - {"timestamp", "relativemarketavailable"})]
                 .notna().all(axis=1).sum()
             )
-            symbol_result["candidate_rows"] = int(len(candidates))
-            for horizon in args.horizons:
-                evaluated = evaluate_horizon(
+            symbol_result["rules"] = {}
+            for relative_rule in args.relative_rules:
+                candidates = guarded_candidates(
                     history,
-                    candidates,
-                    horizon,
-                    args.cost_bps,
-                    args.tolerance_minutes,
+                    args.max_probability_gap,
+                    args.minimum_volume_ratio,
+                    relative_rule=relative_rule,
                 )
-                summary = summarize(evaluated, args.minimum_samples, args.minimum_sessions)
-                symbol_result["horizons"][str(horizon)] = summary
-                if not evaluated.empty:
-                    evaluated.insert(0, "environment", environment)
-                    evaluated.insert(1, "symbol", symbol.upper())
-                    all_rows.append(evaluated)
-                print(
-                    f"[GUARDED TREND] {environment}/{symbol.upper()}/{horizon}m: "
-                    f"{summary['status']} observations={summary['observations']} "
-                    f"sessions={summary['sessions']} avg_net={summary['average_net_return']} "
-                    f"pf={summary['profit_factor']}"
-                )
+                rule_result = {
+                    "candidate_rows_before_horizon_cutoff": int(len(candidates)),
+                    "horizons": {},
+                }
+                symbol_result["rules"][relative_rule] = rule_result
+                for horizon in args.horizons:
+                    evaluated = evaluate_horizon(
+                        history,
+                        candidates,
+                        horizon,
+                        args.cost_bps,
+                        args.tolerance_minutes,
+                    )
+                    summary = summarize(
+                        evaluated, args.minimum_samples, args.minimum_sessions
+                    )
+                    rule_result["horizons"][str(horizon)] = summary
+                    if not evaluated.empty:
+                        evaluated.insert(0, "environment", environment)
+                        evaluated.insert(1, "symbol", symbol.upper())
+                        evaluated.insert(2, "relative_rule", relative_rule)
+                        all_rows.append(evaluated)
+                    print(
+                        f"[GUARDED TREND] {environment}/{symbol.upper()}/"
+                        f"{relative_rule}/{horizon}m: "
+                        f"{summary['status']} observations={summary['observations']} "
+                        f"sessions={summary['sessions']} "
+                        f"avg_net={summary['average_net_return']} "
+                        f"pf={summary['profit_factor']}"
+                    )
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     report_path = output_dir / f"guarded_trend_{stamp}.json"

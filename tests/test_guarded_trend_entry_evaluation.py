@@ -9,8 +9,8 @@ from evaluate_guarded_trend_entries import (
 )
 
 
-def _history(momentum=0.002):
-    timestamps = pd.date_range("2026-10-28 14:00:00+00:00", periods=14, freq="5min")
+def _history(momentum=0.002, relative_session=0.004, start="2026-10-28 14:00:00+00:00"):
+    timestamps = pd.date_range(start, periods=14, freq="5min")
     return pd.DataFrame(
         {
             "timestamp": timestamps,
@@ -22,7 +22,7 @@ def _history(momentum=0.002):
             "vwapdistance": 0.002,
             "vwapslope2": 0.001,
             "relativereturn4": 0.003,
-            "relativesessionreturn": 0.004,
+            "relativesessionreturn": relative_session,
             "relativemarketavailable": True,
             "volumetimeratio": 1.0,
         }
@@ -31,11 +31,22 @@ def _history(momentum=0.002):
 
 class GuardedTrendEntryEvaluationTests(unittest.TestCase):
     def test_rule_requires_all_confirmations(self):
-        passing = guarded_candidates(_history(), 0.05, 0.80)
-        failing = guarded_candidates(_history(momentum=-0.001), 0.05, 0.80)
+        passing = guarded_candidates(_history(), 0.05, 0.80, relative_rule="strict")
+        failing = guarded_candidates(
+            _history(momentum=-0.001), 0.05, 0.80, relative_rule="strict"
+        )
 
         self.assertEqual(len(passing), 14)
         self.assertTrue(failing.empty)
+
+    def test_recent_rule_does_not_require_positive_session_relative_return(self):
+        history = _history(relative_session=-0.005)
+
+        strict = guarded_candidates(history, 0.05, 0.80, relative_rule="strict")
+        recent = guarded_candidates(history, 0.05, 0.80, relative_rule="recent")
+
+        self.assertTrue(strict.empty)
+        self.assertEqual(len(recent), 14)
 
     def test_horizon_samples_are_non_overlapping(self):
         history = _history()
@@ -55,6 +66,14 @@ class GuardedTrendEntryEvaluationTests(unittest.TestCase):
 
         self.assertEqual(summary["status"], "COLLECTING")
         self.assertEqual(summary["observations"], 2)
+
+    def test_horizon_excludes_entries_too_close_to_market_close(self):
+        history = _history(start="2026-10-28 19:40:00+00:00")
+        candidates = guarded_candidates(history, 0.05, 0.80)
+
+        evaluated = evaluate_horizon(history, candidates, 30, 10, 5)
+
+        self.assertTrue(evaluated.empty)
 
 
 if __name__ == "__main__":
