@@ -24,6 +24,22 @@ class _OrderClient:
 
 
 class ExecutionGuardTests(unittest.TestCase):
+    def test_overbought_rsi_passes_when_trend_is_not_extended(self):
+        blocked, detail = strategy._overbought_entry_is_extended(
+            74.0,
+            {"intraday_mom": 0.004, "vwap_distance": 0.006},
+        )
+        self.assertFalse(blocked)
+        self.assertIn("RSI=74.0", detail)
+
+    def test_overbought_rsi_blocks_extended_entry(self):
+        blocked, detail = strategy._overbought_entry_is_extended(
+            74.0,
+            {"intraday_mom": 0.012, "vwap_distance": 0.006},
+        )
+        self.assertTrue(blocked)
+        self.assertIn("momentum=1.20%", detail)
+
     def setUp(self):
         strategy.reset_session_state()
 

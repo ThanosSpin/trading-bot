@@ -66,10 +66,20 @@ POST_STOP_REBUY_BUFFER = 0.10
 ORDER_FILL_TIMEOUT_SECONDS = 30
 AAPL_BUY_THRESHOLD = 0.60
 AAPL_MOMENTUM_INTRADAY_MIN_PROB = 0.58
-AAPL_MOMENTUM_MIN_RELATIVE_SESSION = 0.003
-AAPL_MOMENTUM_MIN_RELATIVE_60M = 0.005
+# Whole-session performance versus SPY is informational for the guarded
+# momentum path. A stock can lag SPY early and still establish a valid recent
+# uptrend. Require positive recent relative strength instead of a large 0.50%
+# lead over the preceding hour.
+AAPL_MOMENTUM_MIN_RELATIVE_SESSION = None
+AAPL_MOMENTUM_MIN_RELATIVE_60M = 0.0
 AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO = 0.80
 AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER = 0.50
+
+# Daily RSI alone must not veto an otherwise confirmed trend. It becomes a
+# late-entry guard only when price is also stretched intraday.
+OVERBOUGHT_RSI_THRESHOLD = 70.0
+OVERBOUGHT_MAX_VWAP_DISTANCE = 0.015
+OVERBOUGHT_MAX_INTRADAY_MOMENTUM = 0.010
 
 # The legacy NVDA momentum artifact classifies above roughly 0.53, while the
 # ordinary strategy floor remains deliberately stricter at 0.57. Permit a

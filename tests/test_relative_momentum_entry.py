@@ -134,6 +134,50 @@ class RelativeMomentumEntryTests(unittest.TestCase):
         self.assertFalse(qualifies)
         self.assertIn("VWAP_slope_30m", reason)
 
+    def test_aapl_guarded_momentum_allows_session_lag_with_recent_strength(self):
+        diagnostics = {
+            "AAPL": {
+                "relative_market_available": 1.0,
+                "movement_expected": True,
+                "intraday_model_used": "intraday_mom",
+                "intraday_prob": 0.61,
+                "session_return": 0.006,
+                "relative_session_return": -0.004,
+                "relative_return_4": 0.001,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.0002,
+                "volume_time_ratio": 0.9,
+                "intraday_mom": 0.003,
+            }
+        }
+        qualifies, _, reason = _check_aapl_guarded_momentum_entry(
+            "AAPL", diagnostics, now_ny=self._market_time()
+        )
+        self.assertTrue(qualifies)
+        self.assertIn("vs_SPY=-0.40%", reason)
+
+    def test_aapl_guarded_momentum_requires_positive_recent_relative_strength(self):
+        diagnostics = {
+            "AAPL": {
+                "relative_market_available": 1.0,
+                "movement_expected": True,
+                "intraday_model_used": "intraday_mom",
+                "intraday_prob": 0.61,
+                "session_return": 0.006,
+                "relative_session_return": 0.004,
+                "relative_return_4": 0.0,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.0002,
+                "volume_time_ratio": 0.9,
+                "intraday_mom": 0.003,
+            }
+        }
+        qualifies, _, reason = _check_aapl_guarded_momentum_entry(
+            "AAPL", diagnostics, now_ny=self._market_time()
+        )
+        self.assertFalse(qualifies)
+        self.assertIn("rel_60m", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

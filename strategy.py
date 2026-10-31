@@ -56,6 +56,9 @@ from config import (
     AAPL_MOMENTUM_MIN_RELATIVE_60M,
     AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO,
     AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER,
+    OVERBOUGHT_RSI_THRESHOLD,
+    OVERBOUGHT_MAX_VWAP_DISTANCE,
+    OVERBOUGHT_MAX_INTRADAY_MOMENTUM,
     NVDA_GUARDED_MOMENTUM_ENTRY_ENABLED,
     NVDA_MOMENTUM_FINAL_PROB_MIN,
     NVDA_MOMENTUM_MIN_RELATIVE_SESSION,
@@ -652,6 +655,36 @@ def _core_entry_volume_block(diagnostics: dict) -> tuple:
 
     minimum = float(CORE_ENTRY_MIN_VOLUME_TIME_RATIO)
     return ratio < minimum, ratio, minimum
+
+
+def _overbought_entry_is_extended(rsi: float, diagnostics: dict) -> tuple:
+    """Return whether an overbought symbol is also too extended to chase."""
+    try:
+        rsi_value = float(rsi)
+    except (TypeError, ValueError):
+        return False, "invalid RSI"
+    if rsi_value <= float(OVERBOUGHT_RSI_THRESHOLD):
+        return False, f"RSI={rsi_value:.1f}"
+
+    d = diagnostics or {}
+    try:
+        momentum = float(d.get("intraday_mom"))
+    except (TypeError, ValueError):
+        momentum = 0.0
+    try:
+        vwap_distance = float(d.get("vwap_distance"))
+    except (TypeError, ValueError):
+        vwap_distance = 0.0
+
+    extended = (
+        momentum > float(OVERBOUGHT_MAX_INTRADAY_MOMENTUM)
+        or vwap_distance > float(OVERBOUGHT_MAX_VWAP_DISTANCE)
+    )
+    detail = (
+        f"RSI={rsi_value:.1f}, momentum={momentum:.2%}, "
+        f"VWAP={vwap_distance:.2%}"
+    )
+    return extended, detail
 
 
 def _artifact_threshold_from_diag(
@@ -2236,16 +2269,18 @@ def _check_aapl_guarded_momentum_entry(
         )
     if values["session_return"] <= 0.0:
         failures.append(f"session={values['session_return']:.2%} <= 0")
-    if values["relative_session_return"] < float(
-        AAPL_MOMENTUM_MIN_RELATIVE_SESSION
+    if (
+        AAPL_MOMENTUM_MIN_RELATIVE_SESSION is not None
+        and values["relative_session_return"]
+        < float(AAPL_MOMENTUM_MIN_RELATIVE_SESSION)
     ):
         failures.append(
             f"vs_SPY={values['relative_session_return']:.2%} < "
             f"{float(AAPL_MOMENTUM_MIN_RELATIVE_SESSION):.2%}"
         )
-    if values["relative_return_4"] < float(AAPL_MOMENTUM_MIN_RELATIVE_60M):
+    if values["relative_return_4"] <= float(AAPL_MOMENTUM_MIN_RELATIVE_60M):
         failures.append(
-            f"rel_60m={values['relative_return_4']:.2%} < "
+            f"rel_60m={values['relative_return_4']:.2%} <= "
             f"{float(AAPL_MOMENTUM_MIN_RELATIVE_60M):.2%}"
         )
     if values["vwap_distance"] <= 0.0:
@@ -2410,9 +2445,12 @@ def compute_strategy_decisions(
             rs = gain / loss.replace(0, 1e-9)
             rsi = float((100 - 100 / (1 + rs)).iloc[-1])
 
-            if rsi > 70:
-                print(f"[RSI BLOCK] {sym} RSI={rsi:.1f} - overbought, blocking BUY")
+            blocked, detail = _overbought_entry_is_extended(rsi, _diag(sym))
+            if blocked:
+                print(f"[RSI BLOCK] {sym} {detail} - extended, blocking BUY")
                 return True
+            if rsi > float(OVERBOUGHT_RSI_THRESHOLD):
+                print(f"[RSI PASS] {sym} {detail} - confirmed trend is not extended")
         except Exception:
             pass
         return False
