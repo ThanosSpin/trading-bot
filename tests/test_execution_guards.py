@@ -35,10 +35,10 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_overbought_rsi_blocks_extended_entry(self):
         blocked, detail = strategy._overbought_entry_is_extended(
             74.0,
-            {"intraday_mom": 0.012, "vwap_distance": 0.006},
+            {"intraday_mom": 0.004, "vwap_distance": 0.016},
         )
         self.assertTrue(blocked)
-        self.assertIn("momentum=1.20%", detail)
+        self.assertIn("VWAP=1.60%", detail)
 
     def setUp(self):
         strategy.reset_session_state()

@@ -51,14 +51,14 @@ from config import (
     MAX_LOSS_ACCOUNT_EQUITY_PCT,
     MAX_LOSS_PER_POSITION_PCT,
     AAPL_BUY_THRESHOLD,
-    AAPL_MOMENTUM_INTRADAY_MIN_PROB,
-    AAPL_MOMENTUM_MIN_RELATIVE_SESSION,
-    AAPL_MOMENTUM_MIN_RELATIVE_60M,
-    AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO,
-    AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER,
+    GUARDED_MOMENTUM_SYMBOLS,
+    GUARDED_MOMENTUM_INTRADAY_MIN_PROB,
+    GUARDED_MOMENTUM_MIN_RELATIVE_SESSION,
+    GUARDED_MOMENTUM_MIN_RELATIVE_60M,
+    GUARDED_MOMENTUM_MIN_VOLUME_TIME_RATIO,
+    GUARDED_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER,
     OVERBOUGHT_RSI_THRESHOLD,
     OVERBOUGHT_MAX_VWAP_DISTANCE,
-    OVERBOUGHT_MAX_INTRADAY_MOMENTUM,
     NVDA_GUARDED_MOMENTUM_ENTRY_ENABLED,
     NVDA_MOMENTUM_FINAL_PROB_MIN,
     NVDA_MOMENTUM_MIN_RELATIVE_SESSION,
@@ -676,10 +676,7 @@ def _overbought_entry_is_extended(rsi: float, diagnostics: dict) -> tuple:
     except (TypeError, ValueError):
         vwap_distance = 0.0
 
-    extended = (
-        momentum > float(OVERBOUGHT_MAX_INTRADAY_MOMENTUM)
-        or vwap_distance > float(OVERBOUGHT_MAX_VWAP_DISTANCE)
-    )
+    extended = vwap_distance > float(OVERBOUGHT_MAX_VWAP_DISTANCE)
     detail = (
         f"RSI={rsi_value:.1f}, momentum={momentum:.2%}, "
         f"VWAP={vwap_distance:.2%}"
@@ -2058,16 +2055,15 @@ def check_relative_momentum_entry(
         if nvda_result[0]:
             return nvda_result
 
-    # AAPL's ordinary entry threshold remains deliberately conservative. In a
-    # confirmed momentum regime, allow the intraday model to identify an early
-    # continuation even when a weak daily probability drags down the blend.
-    # Low time-adjusted volume is handled through smaller sizing by the caller.
-    if sym.upper() == "AAPL":
-        aapl_result = _check_aapl_guarded_momentum_entry(
+    # A weak daily probability can drag a confirmed intraday continuation
+    # below the ordinary blended threshold. Apply the same guarded path across
+    # the stock universe; low time-adjusted volume receives smaller sizing.
+    if sym.upper() in {str(item).upper() for item in GUARDED_MOMENTUM_SYMBOLS}:
+        guarded_result = _check_guarded_momentum_entry(
             sym, diagnostics, now_ny=now_ny
         )
-        if aapl_result[0]:
-            return aapl_result
+        if guarded_result[0]:
+            return guarded_result
 
     if float(d.get("relative_market_available", 0.0) or 0.0) < 1.0:
         return False, 0.0, f"[RELATIVE REJECT] {sym}: benchmark unavailable"
@@ -2226,19 +2222,20 @@ def _check_nvda_guarded_momentum_entry(
     return True, float(score), reason
 
 
-def _check_aapl_guarded_momentum_entry(
+def _check_guarded_momentum_entry(
     sym: str,
     diagnostics: dict,
     now_ny=None,
 ) -> tuple:
-    """Allow a confirmed AAPL intraday-momentum entry below its blend floor."""
+    """Allow a confirmed intraday-momentum entry below its blend floor."""
+    label = sym.upper()
     d = (diagnostics or {}).get(sym, {}) or {}
     if float(d.get("relative_market_available", 0.0) or 0.0) < 1.0:
-        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: benchmark unavailable"
+        return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: benchmark unavailable"
     if d.get("movement_expected") is False:
-        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: movement_expected=False"
+        return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: movement_expected=False"
     if d.get("intraday_model_used") != "intraday_mom":
-        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: momentum model inactive"
+        return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: momentum model inactive"
 
     values = {}
     for name in (
@@ -2254,34 +2251,34 @@ def _check_aapl_guarded_momentum_entry(
         try:
             values[name] = float(d.get(name))
         except (TypeError, ValueError):
-            return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: missing {name}"
+            return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: missing {name}"
 
     now_ny = now_ny or _dt.now(NY_TZ)
     minute = now_ny.hour * 60 + now_ny.minute
     if not (9 * 60 + 45 <= minute < 15 * 60):
-        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: outside entry window"
+        return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: outside entry window"
 
     failures = []
-    if values["intraday_prob"] < float(AAPL_MOMENTUM_INTRADAY_MIN_PROB):
+    if values["intraday_prob"] < float(GUARDED_MOMENTUM_INTRADAY_MIN_PROB):
         failures.append(
             f"intraday_prob={values['intraday_prob']:.3f} < "
-            f"{float(AAPL_MOMENTUM_INTRADAY_MIN_PROB):.3f}"
+            f"{float(GUARDED_MOMENTUM_INTRADAY_MIN_PROB):.3f}"
         )
     if values["session_return"] <= 0.0:
         failures.append(f"session={values['session_return']:.2%} <= 0")
     if (
-        AAPL_MOMENTUM_MIN_RELATIVE_SESSION is not None
+        GUARDED_MOMENTUM_MIN_RELATIVE_SESSION is not None
         and values["relative_session_return"]
-        < float(AAPL_MOMENTUM_MIN_RELATIVE_SESSION)
+        < float(GUARDED_MOMENTUM_MIN_RELATIVE_SESSION)
     ):
         failures.append(
             f"vs_SPY={values['relative_session_return']:.2%} < "
-            f"{float(AAPL_MOMENTUM_MIN_RELATIVE_SESSION):.2%}"
+            f"{float(GUARDED_MOMENTUM_MIN_RELATIVE_SESSION):.2%}"
         )
-    if values["relative_return_4"] <= float(AAPL_MOMENTUM_MIN_RELATIVE_60M):
+    if values["relative_return_4"] <= float(GUARDED_MOMENTUM_MIN_RELATIVE_60M):
         failures.append(
             f"rel_60m={values['relative_return_4']:.2%} <= "
-            f"{float(AAPL_MOMENTUM_MIN_RELATIVE_60M):.2%}"
+            f"{float(GUARDED_MOMENTUM_MIN_RELATIVE_60M):.2%}"
         )
     if values["vwap_distance"] <= 0.0:
         failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
@@ -2290,7 +2287,7 @@ def _check_aapl_guarded_momentum_entry(
     if values["intraday_mom"] <= 0.0:
         failures.append(f"momentum={values['intraday_mom']:.2%} <= 0")
     if failures:
-        return False, 0.0, f"[AAPL MOMENTUM REJECT] {sym}: " + "; ".join(failures)
+        return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: " + "; ".join(failures)
 
     score = (
         values["intraday_prob"]
@@ -2298,13 +2295,13 @@ def _check_aapl_guarded_momentum_entry(
         + values["relative_return_4"]
     )
     size_multiplier = (
-        float(AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER)
+        float(GUARDED_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER)
         if values["volume_time_ratio"]
-        < float(AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO)
+        < float(GUARDED_MOMENTUM_MIN_VOLUME_TIME_RATIO)
         else 1.0
     )
     reason = (
-        f"[AAPL GUARDED MOMENTUM] {sym}: intraday_prob={values['intraday_prob']:.3f}, "
+        f"[GUARDED MOMENTUM] {label}: intraday_prob={values['intraday_prob']:.3f}, "
         f"session={values['session_return']:.2%}, "
         f"vs_SPY={values['relative_session_return']:.2%}, "
         f"rel_60m={values['relative_return_4']:.2%}, "
@@ -2313,6 +2310,15 @@ def _check_aapl_guarded_momentum_entry(
         f"size={size_multiplier:.0%}"
     )
     return True, float(score), reason
+
+
+def _check_aapl_guarded_momentum_entry(
+    sym: str,
+    diagnostics: dict,
+    now_ny=None,
+) -> tuple:
+    """Backward-compatible wrapper for callers and historical tests."""
+    return _check_guarded_momentum_entry(sym, diagnostics, now_ny=now_ny)
 
 
 # ---------------------------------------------------------
@@ -3288,12 +3294,12 @@ def compute_strategy_decisions(
             continue
         if float(pms[sym].data.get("shares", 0.0) or 0.0) > 0:
             continue
-        aapl_guarded_momentum = reason.startswith("[AAPL GUARDED MOMENTUM]")
+        guarded_momentum = reason.startswith("[GUARDED MOMENTUM]")
         nvda_guarded_momentum = reason.startswith("[NVDA GUARDED MOMENTUM]")
         if (
             _block_buy_on_pullback(sym)
             or (
-                not (aapl_guarded_momentum or nvda_guarded_momentum)
+                not (guarded_momentum or nvda_guarded_momentum)
                 and _block_buy_on_weak_volume(sym)
             )
             or _block_buy_overbought(sym)
@@ -3310,12 +3316,12 @@ def compute_strategy_decisions(
             )
             continue
         size_multiplier = 1.0
-        if aapl_guarded_momentum:
+        if guarded_momentum:
             volume_time_ratio = _safe_float(
                 _diag(sym).get("volume_time_ratio"), 0.0
             )
-            if volume_time_ratio < float(AAPL_MOMENTUM_MIN_VOLUME_TIME_RATIO):
-                size_multiplier = float(AAPL_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER)
+            if volume_time_ratio < float(GUARDED_MOMENTUM_MIN_VOLUME_TIME_RATIO):
+                size_multiplier = float(GUARDED_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER)
         initial_exposure_pct = (
             float(NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT)
             if nvda_guarded_momentum

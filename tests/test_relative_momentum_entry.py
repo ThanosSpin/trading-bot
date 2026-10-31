@@ -156,6 +156,28 @@ class RelativeMomentumEntryTests(unittest.TestCase):
         self.assertTrue(qualifies)
         self.assertIn("vs_SPY=-0.40%", reason)
 
+    def test_guarded_momentum_applies_to_abbv(self):
+        diagnostics = {
+            "ABBV": {
+                "relative_market_available": 1.0,
+                "movement_expected": True,
+                "intraday_model_used": "intraday_mom",
+                "intraday_prob": 0.61,
+                "session_return": 0.006,
+                "relative_session_return": -0.002,
+                "relative_return_4": 0.001,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.0002,
+                "volume_time_ratio": 0.9,
+                "intraday_mom": 0.003,
+            }
+        }
+        qualifies, _, reason = check_relative_momentum_entry(
+            "ABBV", diagnostics, {"ABBV": 0.54}, now_ny=self._market_time()
+        )
+        self.assertTrue(qualifies)
+        self.assertIn("[GUARDED MOMENTUM] ABBV", reason)
+
     def test_aapl_guarded_momentum_requires_positive_recent_relative_strength(self):
         diagnostics = {
             "AAPL": {
