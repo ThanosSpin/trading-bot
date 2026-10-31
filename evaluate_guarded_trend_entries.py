@@ -75,6 +75,77 @@ def guarded_candidates(
     return complete.loc[mask].copy()
 
 
+def guard_funnel(
+    frame: pd.DataFrame,
+    max_probability_gap: float,
+    minimum_volume_ratio: float,
+    relative_rule: str = "strict",
+) -> dict:
+    """Return individual and cumulative pass counts for every entry guard."""
+    if relative_rule not in {"strict", "recent"}:
+        raise ValueError(f"unsupported relative rule: {relative_rule}")
+
+    complete = frame.dropna(
+        subset=list(REQUIRED_COLUMNS - {"timestamp", "relativemarketavailable"})
+    )
+    conditions = [
+        (
+            "probability_gap",
+            (complete["finalprob"] < complete["buythreshold"])
+            & (
+                complete["finalprob"]
+                >= complete["buythreshold"] - max_probability_gap
+            ),
+        ),
+        ("positive_session_return", complete["sessionreturn"] > 0.0),
+        ("positive_intraday_momentum", complete["intradaymom"] > 0.0),
+        ("above_vwap", complete["vwapdistance"] > 0.0),
+        ("positive_vwap_slope", complete["vwapslope2"] > 0.0),
+        (
+            "minimum_volume_ratio",
+            complete["volumetimeratio"] >= minimum_volume_ratio,
+        ),
+        ("relative_market_available", complete["relativemarketavailable"]),
+        ("positive_recent_relative_return", complete["relativereturn4"] > 0.0),
+    ]
+    if relative_rule == "strict":
+        conditions.append(
+            (
+                "positive_session_relative_return",
+                complete["relativesessionreturn"] > 0.0,
+            )
+        )
+
+    cumulative_mask = pd.Series(True, index=complete.index, dtype=bool)
+    individual = {}
+    cumulative = {}
+    rejected_at = {}
+    for name, condition in conditions:
+        condition = condition.fillna(False).astype(bool)
+        individual[name] = int(condition.sum())
+        rejected_at[name] = int((cumulative_mask & ~condition).sum())
+        cumulative_mask &= condition
+        cumulative[name] = int(cumulative_mask.sum())
+
+    return {
+        "complete_rows": int(len(complete)),
+        "individual_pass_counts": individual,
+        "cumulative_pass_counts": cumulative,
+        "rejected_at_guard": rejected_at,
+        "candidate_rows": int(cumulative_mask.sum()),
+    }
+
+
+def horizon_eligible_count(candidates: pd.DataFrame, horizon_minutes: int) -> int:
+    """Count candidates early enough to complete a same-session horizon."""
+    if candidates.empty:
+        return 0
+    timestamps_ny = candidates["timestamp"].dt.tz_convert("America/New_York")
+    close_ny = timestamps_ny.dt.normalize() + pd.Timedelta(hours=16)
+    latest_entry_ny = close_ny - pd.Timedelta(minutes=horizon_minutes)
+    return int((timestamps_ny <= latest_entry_ny).sum())
+
+
 def evaluate_horizon(
     history: pd.DataFrame,
     candidates: pd.DataFrame,
@@ -197,6 +268,7 @@ def main() -> int:
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "evaluation": {
+            "horizons": args.horizons,
             "max_probability_gap": args.max_probability_gap,
             "minimum_volume_ratio": args.minimum_volume_ratio,
             "cost_bps": args.cost_bps,
@@ -243,6 +315,12 @@ def main() -> int:
             )
             symbol_result["rules"] = {}
             for relative_rule in args.relative_rules:
+                funnel = guard_funnel(
+                    history,
+                    args.max_probability_gap,
+                    args.minimum_volume_ratio,
+                    relative_rule=relative_rule,
+                )
                 candidates = guarded_candidates(
                     history,
                     args.max_probability_gap,
@@ -251,10 +329,14 @@ def main() -> int:
                 )
                 rule_result = {
                     "candidate_rows_before_horizon_cutoff": int(len(candidates)),
+                    "funnel": funnel,
                     "horizons": {},
                 }
                 symbol_result["rules"][relative_rule] = rule_result
                 for horizon in args.horizons:
+                    eligible_before_sampling = horizon_eligible_count(
+                        candidates, horizon
+                    )
                     evaluated = evaluate_horizon(
                         history,
                         candidates,
@@ -264,6 +346,9 @@ def main() -> int:
                     )
                     summary = summarize(
                         evaluated, args.minimum_samples, args.minimum_sessions
+                    )
+                    summary["eligible_rows_before_nonoverlap_sampling"] = (
+                        eligible_before_sampling
                     )
                     rule_result["horizons"][str(horizon)] = summary
                     if not evaluated.empty:
@@ -279,6 +364,14 @@ def main() -> int:
                         f"avg_net={summary['average_net_return']} "
                         f"pf={summary['profit_factor']}"
                     )
+                print(
+                    f"[GUARDED TREND FUNNEL] {environment}/{symbol.upper()}/"
+                    f"{relative_rule}: complete={funnel['complete_rows']} "
+                    + " ".join(
+                        f"{name}={count}"
+                        for name, count in funnel["cumulative_pass_counts"].items()
+                    )
+                )
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     report_path = output_dir / f"guarded_trend_{stamp}.json"

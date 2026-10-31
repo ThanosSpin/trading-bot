@@ -4,7 +4,9 @@ import pandas as pd
 
 from evaluate_guarded_trend_entries import (
     evaluate_horizon,
+    guard_funnel,
     guarded_candidates,
+    horizon_eligible_count,
     summarize,
 )
 
@@ -48,6 +50,31 @@ class GuardedTrendEntryEvaluationTests(unittest.TestCase):
         self.assertTrue(strict.empty)
         self.assertEqual(len(recent), 14)
 
+    def test_funnel_identifies_first_guard_that_rejects_rows(self):
+        history = _history(momentum=-0.001)
+
+        funnel = guard_funnel(history, 0.05, 0.80, relative_rule="strict")
+
+        self.assertEqual(funnel["complete_rows"], 14)
+        self.assertEqual(funnel["individual_pass_counts"]["probability_gap"], 14)
+        self.assertEqual(funnel["cumulative_pass_counts"]["positive_session_return"], 14)
+        self.assertEqual(funnel["rejected_at_guard"]["positive_intraday_momentum"], 14)
+        self.assertEqual(funnel["cumulative_pass_counts"]["positive_intraday_momentum"], 0)
+        self.assertEqual(funnel["candidate_rows"], 0)
+
+    def test_recent_funnel_omits_session_relative_guard(self):
+        funnel = guard_funnel(
+            _history(relative_session=-0.005),
+            0.05,
+            0.80,
+            relative_rule="recent",
+        )
+
+        self.assertNotIn(
+            "positive_session_relative_return", funnel["cumulative_pass_counts"]
+        )
+        self.assertEqual(funnel["candidate_rows"], 14)
+
     def test_horizon_samples_are_non_overlapping(self):
         history = _history()
         candidates = guarded_candidates(history, 0.05, 0.80)
@@ -74,6 +101,7 @@ class GuardedTrendEntryEvaluationTests(unittest.TestCase):
         evaluated = evaluate_horizon(history, candidates, 30, 10, 5)
 
         self.assertTrue(evaluated.empty)
+        self.assertEqual(horizon_eligible_count(candidates, 30), 0)
 
 
 if __name__ == "__main__":
