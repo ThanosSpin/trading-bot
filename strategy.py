@@ -52,7 +52,8 @@ from config import (
     MAX_LOSS_PER_POSITION_PCT,
     AAPL_BUY_THRESHOLD,
     GUARDED_MOMENTUM_SYMBOLS,
-    GUARDED_MOMENTUM_INTRADAY_MIN_PROB,
+    GUARDED_MOMENTUM_MIN_PROBABILITY_FLOOR,
+    GUARDED_MOMENTUM_AAPL_MIN_PROBABILITY,
     GUARDED_MOMENTUM_MIN_RELATIVE_SESSION,
     GUARDED_MOMENTUM_MIN_RELATIVE_60M,
     GUARDED_MOMENTUM_MIN_VOLUME_TIME_RATIO,
@@ -2258,11 +2259,25 @@ def _check_guarded_momentum_entry(
     if not (9 * 60 + 45 <= minute < 15 * 60):
         return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: outside entry window"
 
+    artifact_threshold = _safe_float(d.get("intraday_decision_threshold"), None)
+    probability_floor = float(GUARDED_MOMENTUM_MIN_PROBABILITY_FLOOR)
+    if artifact_threshold is not None and np.isfinite(artifact_threshold):
+        probability_floor = max(
+            probability_floor,
+            float(artifact_threshold) + float(MODEL_ENTRY_BUFFER),
+        )
+    if label == "AAPL":
+        probability_floor = max(
+            probability_floor,
+            float(GUARDED_MOMENTUM_AAPL_MIN_PROBABILITY),
+        )
+    probability_floor = min(0.95, probability_floor)
+
     failures = []
-    if values["intraday_prob"] < float(GUARDED_MOMENTUM_INTRADAY_MIN_PROB):
+    if values["intraday_prob"] < probability_floor:
         failures.append(
             f"intraday_prob={values['intraday_prob']:.3f} < "
-            f"{float(GUARDED_MOMENTUM_INTRADAY_MIN_PROB):.3f}"
+            f"symbol_floor={probability_floor:.3f}"
         )
     if values["session_return"] <= 0.0:
         failures.append(f"session={values['session_return']:.2%} <= 0")
@@ -2302,6 +2317,7 @@ def _check_guarded_momentum_entry(
     )
     reason = (
         f"[GUARDED MOMENTUM] {label}: intraday_prob={values['intraday_prob']:.3f}, "
+        f"prob_floor={probability_floor:.3f}, "
         f"session={values['session_return']:.2%}, "
         f"vs_SPY={values['relative_session_return']:.2%}, "
         f"rel_60m={values['relative_return_4']:.2%}, "

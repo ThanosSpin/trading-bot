@@ -5,6 +5,7 @@ import pytz
 
 from strategy import (
     _check_aapl_guarded_momentum_entry,
+    _check_guarded_momentum_entry,
     check_relative_momentum_entry,
 )
 
@@ -141,6 +142,7 @@ class RelativeMomentumEntryTests(unittest.TestCase):
                 "movement_expected": True,
                 "intraday_model_used": "intraday_mom",
                 "intraday_prob": 0.61,
+                "intraday_decision_threshold": 0.47,
                 "session_return": 0.006,
                 "relative_session_return": -0.004,
                 "relative_return_4": 0.001,
@@ -177,6 +179,30 @@ class RelativeMomentumEntryTests(unittest.TestCase):
         )
         self.assertTrue(qualifies)
         self.assertIn("[GUARDED MOMENTUM] ABBV", reason)
+        self.assertIn("prob_floor=0.560", reason)
+
+    def test_guarded_momentum_uses_symbol_artifact_threshold(self):
+        diagnostics = {
+            "PLTR": {
+                "relative_market_available": 1.0,
+                "movement_expected": True,
+                "intraday_model_used": "intraday_mom",
+                "intraday_prob": 0.60,
+                "intraday_decision_threshold": 0.59,
+                "session_return": 0.006,
+                "relative_session_return": 0.001,
+                "relative_return_4": 0.001,
+                "vwap_distance": 0.003,
+                "vwap_slope_2": 0.0002,
+                "volume_time_ratio": 0.9,
+                "intraday_mom": 0.003,
+            }
+        }
+        qualifies, _, reason = _check_guarded_momentum_entry(
+            "PLTR", diagnostics, now_ny=self._market_time()
+        )
+        self.assertFalse(qualifies)
+        self.assertIn("symbol_floor=0.610", reason)
 
     def test_aapl_guarded_momentum_requires_positive_recent_relative_strength(self):
         diagnostics = {
