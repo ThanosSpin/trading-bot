@@ -18,6 +18,7 @@ from config import (
     WEAK_PROB_THRESHOLD,
     WEAK_RATIO_THRESHOLD,
     PRICE_WEAK_RATIO_THRESHOLD,
+    WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT,
     LAST_HOUR_BUY_BUFFER,
     FINAL_15_MIN_BUY_BUFFER,
     TRAIL_ACTIVATE,
@@ -683,6 +684,67 @@ def _overbought_entry_is_extended(rsi: float, diagnostics: dict) -> tuple:
         f"VWAP={vwap_distance:.2%}"
     )
     return extended, detail
+
+
+def _momentum_entry_is_extended(diagnostics: dict) -> tuple:
+    """Block a chase only when both momentum and VWAP extension are extreme."""
+    d = diagnostics or {}
+    momentum = _safe_float(d.get("intraday_mom"), None)
+    vwap_distance = _safe_float(d.get("vwap_distance"), None)
+    if momentum is None or vwap_distance is None:
+        return False, "extension unavailable"
+    blocked = momentum > 0.010 and vwap_distance > float(
+        OVERBOUGHT_MAX_VWAP_DISTANCE
+    )
+    return blocked, f"momentum={momentum:.2%}, VWAP={vwap_distance:.2%}"
+
+
+def _apply_weak_market_buy_filter(
+    decisions: dict,
+    core_symbols,
+    *,
+    equity: float,
+    prices: dict,
+) -> dict:
+    """Block ordinary BUYs while allowing small fully guarded entries."""
+    for sym in core_symbols:
+        decision = decisions.get(sym) or {}
+        if decision.get("action") != "buy":
+            continue
+
+        if decision.get("relative_momentum"):
+            price = _safe_float((prices or {}).get(sym), 0.0) or 0.0
+            max_qty = (
+                int(
+                    float(equity)
+                    * float(WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT)
+                    // price
+                )
+                if equity > 0 and price > 0
+                else 0
+            )
+            qty = min(int(decision.get("qty", 0) or 0), max_qty)
+            if qty > 0:
+                decision = dict(decision)
+                decision["qty"] = qty
+                decision["weak_market_guarded_entry"] = True
+                decision["initial_exposure_pct"] = float(
+                    WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT
+                )
+                decision["explain"] = (
+                    f"{decision.get('explain', '')} WEAK-MARKET GUARDED SIZE - "
+                    f"capped at {float(WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT):.1%}."
+                )
+                decisions[sym] = decision
+                continue
+
+        decisions[sym] = make_decision(
+            "hold",
+            0,
+            f"{sym} BUY blocked by weak-market filter. "
+            f"{decision.get('explain', '')}",
+        )
+    return decisions
 
 
 def _artifact_threshold_from_diag(
@@ -2526,18 +2588,10 @@ def compute_strategy_decisions(
             print(f"[DEBUG _is_buy] {sym} BLOCKED: overbought guard")  # ðŸ†•
             return False
 
-        # -- NEW: don't chase - block if intraday momentum is already extended --
-        d = _diag(sym)
-        mom = d.get("intraday_mom")
-        try:
-            mom = float(mom)
-            if mom > 0.01:  # already up >1.0% in last 2h - likely overextended
-                print(
-                    f"[BLOCK] {sym}: entry blocked - momentum overextended (mom={mom:.2%})"
-                )
-                return False
-        except Exception:
-            pass
+        extended, detail = _momentum_entry_is_extended(_diag(sym))
+        if extended:
+            print(f"[BLOCK] {sym}: entry blocked - chase conditions ({detail})")
+            return False
 
         # Session rebuy guard - block same-day re-entry below REBUY_THRESHOLD
         if sym in _session_state["buys"]:
@@ -2610,31 +2664,6 @@ def compute_strategy_decisions(
         pms[sym] = pm
         d = diagnostics.get(sym.upper()) or {}
         prices[sym] = float(d.get("price") or 0.0) or (fetch_latest_price(sym) or 0.0)
-
-    # ---------------------------------------------------------
-    # Cross-sectional intraday volume ratio (vr) stats
-    # ---------------------------------------------------------
-    vr_values = []
-    for sym in symbols:
-        d_vr = diagnostics.get(sym.upper()) or {}
-        vr = d_vr.get("intraday_volume_ratio")
-        try:
-            if vr is not None:
-                vr_values.append(float(vr))
-        except Exception:
-            continue
-
-    group_median_vr = None
-    if vr_values:
-        try:
-            group_median_vr = float(pd.Series(vr_values).median())
-        except Exception:
-            group_median_vr = None
-
-    if group_median_vr is not None:
-        print(
-            f"[VR] group_median_vr={group_median_vr:.3f} from {len(vr_values)} symbols"
-        )
 
     # Ensure SPY state exists even if not in symbols (safe)
     if spy_sym not in pms:
@@ -3007,50 +3036,6 @@ def compute_strategy_decisions(
                     )
 
     # ---------------------------------------------------------
-    # Cross-sectional low-volume guardrail for MR BUYs
-    # ---------------------------------------------------------
-    if group_median_vr is not None and group_median_vr > 0:
-        for sym in core_symbols:
-            d_diag = diagnostics.get(sym.upper()) or {}
-            regime = d_diag.get("intraday_regime")
-            stock_vr = d_diag.get("intraday_volume_ratio")
-
-            # Only apply to mean-reversion regime
-            if regime != "mr":
-                continue
-
-            try:
-                if stock_vr is None:
-                    continue
-                stock_vr = float(stock_vr)
-            except Exception:
-                continue
-
-            prev = decisions.get(sym) or {}
-            if prev.get("action") != "buy":
-                # Only care about NEW BUYs
-                continue
-
-            # Optional tiny absolute floor to avoid completely dead tape
-            if stock_vr < 0.02:
-                decisions[sym] = make_decision(
-                    "hold",
-                    0,
-                    f"{sym}: MR BUY blocked - vr={stock_vr:.3f} < 0.02 (dead tape). "
-                    f"orig_reason=({prev.get('explain','')})",
-                )
-                continue
-
-            # Relative rule: block only if far below peers
-            if stock_vr < 0.5 * group_median_vr:
-                decisions[sym] = make_decision(
-                    "hold",
-                    0,
-                    f"{sym}: MR BUY blocked - vr={stock_vr:.3f} << group_median_vr={group_median_vr:.3f}. "
-                    f"orig_reason=({prev.get('explain','')})",
-                )
-
-    # ---------------------------------------------------------
     # 4.5) BUY CONFIRMATION GUARDRAIL
     # ---------------------------------------------------------
     def _safe_f(x, default=None):
@@ -3095,13 +3080,12 @@ def compute_strategy_decisions(
                 )
                 continue
 
-            mom = _safe_f(_diag(sym).get("intraday_mom"))
-            if mom is not None and mom > 0.01:
+            extended, detail = _momentum_entry_is_extended(_diag(sym))
+            if extended:
                 decisions[sym] = make_decision(
                     "hold",
                     0,
-                    f"{sym}: BUY blocked by momentum-overextension guardrail "
-                    f"(mom={mom:.2%}).",
+                    f"{sym}: BUY blocked by chase guardrail ({detail}).",
                 )
 
     # ---------------------------------------------------------
@@ -3556,19 +3540,20 @@ def compute_strategy_decisions(
 
     if market_weak:
         print(
-            f"WEAK-MARKET BLOCK: Blocking new core BUYs "
+            f"WEAK-MARKET FILTER: Blocking ordinary core BUYs; confirmed "
+            f"guarded entries capped at "
+            f"{float(WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT):.1%} "
             f"(prob_threshold={WEAK_PROB_THRESHOLD:.2f}, "
             f"prob_ratio_threshold={WEAK_RATIO_THRESHOLD:.2f}, "
             f"price_ratio_threshold={PRICE_WEAK_RATIO_THRESHOLD:.2f})"
         )
-        for sym in core_symbols:
-            d = decisions.get(sym) or {}
-            if d.get("action") == "buy":
-                decisions[sym] = make_decision(
-                    "hold",
-                    0,
-                    f"{sym} BUY blocked by weak-market filter. {d.get('explain','')}",
-                )
+        equity = _safe_float((account_state or {}).get("equity"), 0.0) or 0.0
+        decisions = _apply_weak_market_buy_filter(
+            decisions,
+            core_symbols,
+            equity=equity,
+            prices=prices,
+        )
         return decisions
     else:
         print("WEAK-MARKET: market NOT weak (no filter applied).")

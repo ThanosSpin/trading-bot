@@ -187,11 +187,16 @@ MODEL_EVAL_TRANSACTION_COST_BPS = 10.0
 # so one worker avoids CPU saturation and calibration process duplication.
 MODEL_TRAIN_N_JOBS = 1
 
-# Experimental guarded entry path. Keep disabled unless explicitly enabled in
-# the isolated paper worktree with RELATIVE_MOMENTUM_ENTRY_ENABLED=true.
+# Guarded entries remain independently confirmed and use reduced sizing when
+# broad market conditions are weak. An environment may still disable the path
+# explicitly for operational rollback.
 RELATIVE_MOMENTUM_ENTRY_ENABLED = os.getenv(
-    "RELATIVE_MOMENTUM_ENTRY_ENABLED", "false"
+    "RELATIVE_MOMENTUM_ENTRY_ENABLED", "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+# A fully confirmed guarded-momentum entry may proceed during broad market
+# weakness, but at half the normal initial allocation.
+WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT = 0.125
 
 # Earnings-gap continuation path. Environment-specific configuration controls
 # activation; provider dates are admitted only through the confirmed cache.

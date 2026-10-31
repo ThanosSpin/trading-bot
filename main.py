@@ -282,6 +282,53 @@ def log_signal_snapshot(
         print(f"[WARN] log_signal_snapshot failed for {sym}: {e}")
 
 
+def log_guard_decision_snapshot(decisions: dict) -> None:
+    """Persist the final action and guard explanation for funnel analysis."""
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        path = os.path.join(LOGS_DIR, "guard_decisions.csv")
+        columns = [
+            "timestamp",
+            "symbol",
+            "action",
+            "qty",
+            "explain",
+            "relative_momentum",
+            "weak_market_guarded_entry",
+            "entry_blocked",
+            "risk_exit",
+            "exit_reason",
+        ]
+        file_exists = os.path.exists(path) and os.path.getsize(path) > 0
+        with open(path, "a", newline="") as destination:
+            writer = csv.DictWriter(destination, fieldnames=columns)
+            if not file_exists:
+                writer.writeheader()
+            timestamp = datetime.now(timezone.utc).isoformat()
+            for symbol, decision in (decisions or {}).items():
+                decision = decision or {}
+                writer.writerow(
+                    {
+                        "timestamp": timestamp,
+                        "symbol": str(symbol).upper(),
+                        "action": decision.get("action"),
+                        "qty": decision.get("qty"),
+                        "explain": decision.get("explain"),
+                        "relative_momentum": bool(
+                            decision.get("relative_momentum", False)
+                        ),
+                        "weak_market_guarded_entry": bool(
+                            decision.get("weak_market_guarded_entry", False)
+                        ),
+                        "entry_blocked": bool(decision.get("entry_blocked", False)),
+                        "risk_exit": decision.get("risk_exit"),
+                        "exit_reason": decision.get("exit_reason"),
+                    }
+                )
+    except Exception as exc:
+        print(f"[WARN] log_guard_decision_snapshot failed: {exc}")
+
+
 # ===============================================================
 # Fetch Predictions for All Symbols (USING compute_signals)
 # ===============================================================
@@ -1376,6 +1423,8 @@ def process_all_symbols(symbols):
             f"{sym} shares={shares} "
             f"prob_up={sig_prob:.3f}"
         )
+
+    log_guard_decision_snapshot(decisions)
 
     print("\n================== DECISIONS ==================")
     for sym, d in decisions.items():

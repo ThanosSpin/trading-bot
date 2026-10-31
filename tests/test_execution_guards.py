@@ -24,6 +24,38 @@ class _OrderClient:
 
 
 class ExecutionGuardTests(unittest.TestCase):
+    def test_momentum_alone_does_not_trigger_chase_block(self):
+        blocked, detail = strategy._momentum_entry_is_extended(
+            {"intraday_mom": 0.012, "vwap_distance": 0.006}
+        )
+        self.assertFalse(blocked)
+        self.assertIn("momentum=1.20%", detail)
+
+    def test_momentum_and_vwap_extension_trigger_chase_block(self):
+        blocked, detail = strategy._momentum_entry_is_extended(
+            {"intraday_mom": 0.012, "vwap_distance": 0.016}
+        )
+        self.assertTrue(blocked)
+        self.assertIn("VWAP=1.60%", detail)
+
+    def test_weak_market_allows_only_small_guarded_entry(self):
+        decisions = {
+            "AAPL": strategy.make_decision(
+                "buy", 250, "guarded", relative_momentum=True
+            ),
+            "ABBV": strategy.make_decision("buy", 250, "ordinary"),
+        }
+        filtered = strategy._apply_weak_market_buy_filter(
+            decisions,
+            ["AAPL", "ABBV"],
+            equity=100000.0,
+            prices={"AAPL": 100.0, "ABBV": 100.0},
+        )
+        self.assertEqual(filtered["AAPL"]["action"], "buy")
+        self.assertEqual(filtered["AAPL"]["qty"], 125)
+        self.assertTrue(filtered["AAPL"]["weak_market_guarded_entry"])
+        self.assertEqual(filtered["ABBV"]["action"], "hold")
+
     def test_overbought_rsi_passes_when_trend_is_not_extended(self):
         blocked, detail = strategy._overbought_entry_is_extended(
             74.0,
