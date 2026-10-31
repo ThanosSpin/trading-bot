@@ -77,6 +77,7 @@ from config import (
     MODEL_MIN_CLASS_BOUNDARY,
     AAPL_MODEL_MIN_CLASS_BOUNDARY,
     BUY_SESSION_RETURN_FLOOR,
+    CORE_ENTRY_MIN_VOLUME_TIME_RATIO,
     MR_REVERSAL_ENTRY_ENABLED,
     MR_REVERSAL_PROB_BUFFER,
     MR_REVERSAL_MIN_MOMENTUM,
@@ -634,6 +635,23 @@ def _safe_float(x, default=None):
         return float(x)
     except Exception:
         return default
+
+
+def _core_entry_volume_block(diagnostics: dict) -> tuple:
+    """Evaluate core-entry participation using a causal session-volume ratio.
+
+    ``volume_time_ratio`` compares cumulative volume with the historical
+    cumulative baseline for the same time of day. The legacy
+    ``intraday_volume_ratio`` compares partial-session volume with a full-day
+    average and therefore suppresses otherwise valid entries near the open.
+    """
+    diagnostics = diagnostics or {}
+    ratio = _safe_float(diagnostics.get("volume_time_ratio"), None)
+    if ratio is None or not np.isfinite(ratio):
+        return False, None, float(CORE_ENTRY_MIN_VOLUME_TIME_RATIO)
+
+    minimum = float(CORE_ENTRY_MIN_VOLUME_TIME_RATIO)
+    return ratio < minimum, ratio, minimum
 
 
 def _artifact_threshold_from_diag(
@@ -2368,28 +2386,13 @@ def compute_strategy_decisions(
 
         Returns True if volume is too weak for the current regime.
         """
-        d = _diag(sym)
-        vol_ratio = d.get("intraday_volume_ratio")
-        regime = d.get("intraday_regime")  # "mom", "mr", or None
-
-        try:
-            vol_ratio = None if vol_ratio is None else float(vol_ratio)
-        except Exception:
-            vol_ratio = None
-
-        if vol_ratio is None:
-            # No volume data - > don't block (fail open)
-            return False
-
-        # Regime-specific thresholds
-        if regime == "mom":
-            min_ratio = 1.20  # momentum needs volume expansion
-        elif regime == "mr":
-            min_ratio = 0.80  # mean-reversion can work in quieter conditions
-        else:
-            min_ratio = 1.00  # default for legacy intraday
-
-        return vol_ratio < min_ratio
+        blocked, ratio, minimum = _core_entry_volume_block(_diag(sym))
+        if blocked:
+            print(
+                f"[VOLUME-TIME BLOCK] {sym}: volume_time_ratio={ratio:.2f} "
+                f"< {minimum:.2f}"
+            )
+        return blocked
 
     def _block_buy_overbought(sym: str) -> bool:
         """Block buy if RSI indicates overbought conditions."""

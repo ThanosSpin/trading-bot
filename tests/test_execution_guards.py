@@ -27,6 +27,41 @@ class ExecutionGuardTests(unittest.TestCase):
     def setUp(self):
         strategy.reset_session_state()
 
+    def test_core_entry_volume_guard_uses_time_normalized_ratio(self):
+        blocked, ratio, minimum = strategy._core_entry_volume_block(
+            {
+                "intraday_regime": "mom",
+                "intraday_volume_ratio": 0.05,
+                "volume_time_ratio": 1.0,
+            }
+        )
+
+        self.assertFalse(blocked)
+        self.assertEqual(ratio, 1.0)
+        self.assertEqual(minimum, 0.80)
+
+    def test_core_entry_volume_guard_blocks_low_session_pace(self):
+        blocked, ratio, minimum = strategy._core_entry_volume_block(
+            {
+                "intraday_regime": "mr",
+                "intraday_volume_ratio": 2.0,
+                "volume_time_ratio": 0.50,
+            }
+        )
+
+        self.assertTrue(blocked)
+        self.assertEqual(ratio, 0.50)
+        self.assertEqual(minimum, 0.80)
+
+    def test_core_entry_volume_guard_fails_open_without_causal_metric(self):
+        blocked, ratio, minimum = strategy._core_entry_volume_block(
+            {"intraday_volume_ratio": 0.01}
+        )
+
+        self.assertFalse(blocked)
+        self.assertIsNone(ratio)
+        self.assertEqual(minimum, 0.80)
+
     def test_momentum_breakout_can_fetch_daily_history(self):
         import pandas as pd
 

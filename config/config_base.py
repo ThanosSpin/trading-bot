@@ -100,6 +100,10 @@ AAPL_MODEL_MIN_CLASS_BOUNDARY = 0.55
 # Do not enter, re-enter, or pyramid a symbol that is down at least 0.5%
 # from the previous close. This prevents buying a brief bounce in a weak day.
 BUY_SESSION_RETURN_FLOOR = -0.005
+# Core-entry volume must be compared with the expected cumulative volume at
+# the same time of day. A partial-session/full-day ratio is structurally low
+# near the open and incorrectly rejects early trends.
+CORE_ENTRY_MIN_VOLUME_TIME_RATIO = 0.80
 
 # A mean-reversion entry may begin before the one-hour momentum measure crosses
 # above zero, but only after shorter-horizon market evidence confirms a turn.
