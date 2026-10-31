@@ -346,6 +346,14 @@ class ExecutionGuardTests(unittest.TestCase):
         )
         self.assertEqual(selected, ["ABBV", "PLTR"])
 
+    def test_nvda_companion_limit_selects_only_strongest_secondary(self):
+        selected = strategy._select_secondary_entry_symbols(
+            {"AAPL": 0.64, "ABBV": 0.62, "PLTR": 0.60},
+            {"AAPL": 0, "ABBV": 0, "PLTR": 0},
+            limit=strategy.MAX_NEW_SECONDARY_BUYS_WITH_NVDA,
+        )
+        self.assertEqual(selected, ["AAPL"])
+
     def test_secondary_buy_is_suppressed_only_for_unselected_flat_symbol(self):
         self.assertTrue(
             strategy._suppress_unselected_secondary_buy(

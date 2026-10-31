@@ -97,6 +97,7 @@ from config import (
     PROFIT_TRIGGER_PCT,
     ROTATION_MIN_EDGE,
     MAX_NEW_SECONDARY_BUYS_PER_CYCLE,
+    MAX_NEW_SECONDARY_BUYS_WITH_NVDA,
     PYRAMID_COOLDOWN_MINUTES,
     MAX_PYRAMID_ADDITIONS,
     POST_STOP_REBUY_COOLDOWN_MINUTES,
@@ -2811,6 +2812,11 @@ def compute_strategy_decisions(
 
         # ---- NVDA BUY priority: sell other core positions (funding) + plan big buy
         if nvda_action == "buy" and live_shares("NVDA") <= 0:
+            # A fresh NVDA entry may be accompanied by only the strongest flat
+            # secondary that independently passes the normal entry guards.
+            nvda_companions = pick_secondary_entry_symbols()[
+                : int(MAX_NEW_SECONDARY_BUYS_WITH_NVDA)
+            ]
             sim_cash = float(pms[core_symbols[0]].data.get("cash", 0.0))
             nvda_px = float(prices.get("NVDA", 0.0) or 0.0)
             if nvda_px <= 0:
@@ -2889,6 +2895,27 @@ def compute_strategy_decisions(
                 decisions["NVDA"] = make_decision(
                     "hold", 0, "NVDA BUY priority but insufficient capital."
                 )
+
+            # Keep the two allocations independent: NVDA remains capped at its
+            # normal 25% initial exposure and the companion receives its own
+            # normal 25% cap through should_trade(). Confirmed later pyramids
+            # can still scale NVDA/AAPL toward their configured 85% ceiling.
+            if decisions["NVDA"].get("action") == "buy":
+                for sym in nvda_companions:
+                    companion = should_trade(
+                        sym,
+                        preds.get(sym, 0.0),
+                        total_symbols=len(core_symbols),
+                        concurrent_buys=concurrent_buys,
+                        diagnostics=diagnostics,
+                    )
+                    if companion.get("action") == "buy":
+                        companion["nvda_companion_entry"] = True
+                        decisions[sym] = companion
+                        print(
+                            f"[NVDA COMPANION] {sym}: independently guarded "
+                            "25% initial entry alongside NVDA."
+                        )
 
             # NOTE: do NOT apply SPY here; final enforcement below will handle it.
         elif nvda_action == "sell":

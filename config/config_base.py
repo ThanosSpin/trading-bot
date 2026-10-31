@@ -271,6 +271,9 @@ ROTATION_MIN_EDGE = 0.03
 # Allow two independently guarded, flat secondary symbols to enter in one
 # cycle. Each entry remains subject to its normal per-position allocation cap.
 MAX_NEW_SECONDARY_BUYS_PER_CYCLE = 2
+# When NVDA opens its initial priority position, allow the strongest one of
+# AAPL/ABBV/PLTR to open alongside it. This keeps total new exposure near 50%.
+MAX_NEW_SECONDARY_BUYS_WITH_NVDA = 1
 
 PRE_MARKET_ENABLED = True
 PRE_MARKET_MIN_PROB = 0.55
