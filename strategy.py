@@ -96,6 +96,7 @@ from config import (
     SPY_MODEL_EXIT_BUFFER,
     PROFIT_TRIGGER_PCT,
     ROTATION_MIN_EDGE,
+    MAX_NEW_SECONDARY_BUYS_PER_CYCLE,
     PYRAMID_COOLDOWN_MINUTES,
     MAX_PYRAMID_ADDITIONS,
     POST_STOP_REBUY_COOLDOWN_MINUTES,
@@ -355,13 +356,30 @@ def _eligible_rotation_targets(symbols, decisions, position_shares):
     ]
 
 
-def _suppress_unselected_secondary_buy(symbol, action, selected_secondary):
-    """Block a secondary BUY unless that symbol passed selection guards."""
-    return (
-        action == "buy"
-        and symbol in ("AAPL", "ABBV", "PLTR")
-        and symbol != selected_secondary
+def _select_secondary_entry_symbols(candidates, position_shares, limit):
+    """Select the strongest flat secondary candidates without consuming held slots."""
+    ranked = sorted(
+        (
+            (sym, float(prob))
+            for sym, prob in candidates.items()
+            if float(position_shares.get(sym, 0.0) or 0.0) <= 0
+        ),
+        key=lambda item: (-item[1], item[0]),
     )
+    return [sym for sym, _ in ranked[: max(0, int(limit))]]
+
+
+def _suppress_unselected_secondary_buy(
+    symbol, action, selected_secondaries, current_shares=0.0
+):
+    """Block only an unselected new secondary BUY; never consume a slot for holdings."""
+    if action != "buy" or symbol not in ("AAPL", "ABBV", "PLTR"):
+        return False
+    if float(current_shares or 0.0) > 0:
+        return False
+    if isinstance(selected_secondaries, str):
+        selected_secondaries = [selected_secondaries]
+    return symbol not in set(selected_secondaries or [])
 
 
 def mark_session_sell(sym: str, sold_at=None):
@@ -2605,42 +2623,6 @@ def compute_strategy_decisions(
         print(f"[DEBUG _is_buy] {sym} PASSED all guards: prob={preds.get(sym,0):.3f}")
         return True
 
-    # âœ… NOW pick_secondary_among_stocks() can use _is_buy()
-    def pick_secondary_among_stocks() -> Optional[str]:
-        """
-        Choose best secondary stock when NVDA not buying.
-        Candidates: AAPL, ABBV, PLTR (mutual exclusive).
-        Returns highest probability stock above BUY_THRESHOLD.
-        """
-        candidates = {}
-
-        for sym in ["AAPL", "ABBV", "PLTR"]:
-            if sym in core_symbols and is_new_entry_allowed(sym):
-                prob = preds.get(sym)
-                if prob is not None and _is_buy(sym):  # âœ… Now visible!
-                    candidates[sym] = prob
-
-        if not candidates:
-            return None
-
-        # Return highest probability
-        best_sym = max(candidates.keys(), key=lambda s: candidates[s])
-        best_prob = candidates[best_sym]
-
-        # Optional: margin requirement (prevent flipping on tiny differences)
-        others = {s: p for s, p in candidates.items() if s != best_sym}
-        if others:
-            second_best = max(others.values())
-            if best_prob < second_best + rs_margin:  # too close - keep incumbent
-                # Check who we're holding
-                for sym in [best_sym] + list(others.keys()):
-                    # pms will be defined later in compute_strategy_decisions
-                    # This is safe because pick_secondary_among_stocks() is only called
-                    # after pms is populated
-                    pass  # Will fix after pms is defined
-
-        return best_sym
-
     # Default decisions
     decisions = {s: make_decision("hold", 0, f"{s}: default HOLD") for s in symbols}
 
@@ -2675,42 +2657,30 @@ def compute_strategy_decisions(
         pms[spy_sym] = pm
         prices[spy_sym] = fetch_latest_price(spy_sym) or 0.0
 
-    # âœ… NOW fix pick_secondary_among_stocks() to use pms
-    # We need to redefine it here after pms is available
-    def pick_secondary_among_stocks_fixed() -> Optional[str]:
-        """
-        Choose best secondary stock when NVDA not buying.
-        Candidates: AAPL, ABBV, PLTR (mutual exclusive).
-        Returns highest probability stock above BUY_THRESHOLD.
-        """
+    def pick_secondary_entry_symbols() -> List[str]:
+        """Choose up to the configured number of guarded, flat secondaries."""
         candidates = {}
+        position_shares = {}
 
         for sym in ["AAPL", "ABBV", "PLTR"]:
             if sym in core_symbols:
+                position_shares[sym] = float(
+                    pms[sym].data.get("shares", 0.0) or 0.0
+                )
                 prob = preds.get(sym)
-                if prob is not None and _is_buy(sym):
+                if (
+                    position_shares[sym] <= 0
+                    and is_new_entry_allowed(sym)
+                    and prob is not None
+                    and _is_buy(sym)
+                ):
                     candidates[sym] = prob
 
-        if not candidates:
-            return None
-
-        # Return highest probability
-        best_sym = max(candidates.keys(), key=lambda s: candidates[s])
-        best_prob = candidates[best_sym]
-
-        # Optional: margin requirement (prevent flipping on tiny differences)
-        others = {s: p for s, p in candidates.items() if s != best_sym}
-        if others:
-            second_best = max(others.values())
-            if best_prob < second_best + rs_margin:  # too close - keep incumbent
-                for sym in [best_sym] + list(others.keys()):
-                    if float(pms[sym].data.get("shares", 0)) > 0:
-                        return sym  # keep what we hold
-
-        return best_sym
-
-    # Use the fixed version
-    pick_secondary_among_stocks = pick_secondary_among_stocks_fixed
+        return _select_secondary_entry_symbols(
+            candidates,
+            position_shares,
+            MAX_NEW_SECONDARY_BUYS_PER_CYCLE,
+        )
 
     def spy_shares() -> float:
         return float(pms[spy_sym].data.get("shares", 0.0))
@@ -2964,8 +2934,8 @@ def compute_strategy_decisions(
                         "buy", qty, f"{strongest}: Rotated from NVDA sell, qty={qty}"
                     )
         else:
-            # NVDA HOLD -> allow at most ONE secondary BUY: AAPL vs ABBV vs PLTR
-            secondary = pick_secondary_among_stocks()
+            # NVDA HOLD -> allow up to two independently guarded new secondaries.
+            selected_secondaries = pick_secondary_entry_symbols()
 
             for sym in core_symbols:
                 d0 = should_trade(
@@ -2978,12 +2948,16 @@ def compute_strategy_decisions(
 
                 # suppress BUY for the non-selected secondary candidate
                 if _suppress_unselected_secondary_buy(
-                    sym, d0.get("action"), secondary
+                    sym,
+                    d0.get("action"),
+                    selected_secondaries,
+                    float(pms[sym].data.get("shares", 0.0) or 0.0),
                 ):
                     suppressed_reason = (
                         "no secondary candidate passed entry guards"
-                        if secondary is None
-                        else f"secondary={secondary}"
+                        if not selected_secondaries
+                        else "selected_secondaries="
+                        + ",".join(selected_secondaries)
                     )
                     d0 = make_decision(
                         "hold", 0, f"{sym}: BUY suppressed ({suppressed_reason})."
@@ -2994,7 +2968,7 @@ def compute_strategy_decisions(
             # If ABBV chosen AND AAPL is not BUY AND we hold AAPL -> sell AAPL to fund ABBV
             # Rotate AAPL into ABBV only when ABBV has a meaningful signal advantage.
             if (
-                secondary == "ABBV"
+                "ABBV" in selected_secondaries
                 and "AAPL" in core_symbols
                 and "ABBV" in core_symbols
             ):
@@ -3005,6 +2979,7 @@ def compute_strategy_decisions(
                 rotation_is_better = (
                     aapl_sh > 0
                     and float(pms["ABBV"].data.get("shares", 0.0) or 0.0) <= 0
+                    and (decisions.get("AAPL") or {}).get("action") != "buy"
                     and (decisions.get("ABBV") or {}).get("action") == "buy"
                     and abbv_prob >= aapl_prob + ROTATION_MIN_EDGE
                 )

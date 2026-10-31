@@ -268,6 +268,9 @@ MARGIN_EMERGENCY_MAX_PER_DAY = 1
 MARGIN_EMERGENCY_PROB_THRESH = 0.40
 
 ROTATION_MIN_EDGE = 0.03
+# Allow two independently guarded, flat secondary symbols to enter in one
+# cycle. Each entry remains subject to its normal per-position allocation cap.
+MAX_NEW_SECONDARY_BUYS_PER_CYCLE = 2
 
 PRE_MARKET_ENABLED = True
 PRE_MARKET_MIN_PROB = 0.55

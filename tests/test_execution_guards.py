@@ -330,12 +330,37 @@ class ExecutionGuardTests(unittest.TestCase):
         )
         self.assertEqual(eligible, ["NVDA"])
 
-    def test_secondary_buy_is_suppressed_when_all_candidates_are_blocked(self):
+    def test_secondary_selection_chooses_two_strongest_flat_candidates(self):
+        selected = strategy._select_secondary_entry_symbols(
+            {"AAPL": 0.64, "ABBV": 0.62, "PLTR": 0.60},
+            {"AAPL": 0, "ABBV": 0, "PLTR": 0},
+            limit=2,
+        )
+        self.assertEqual(selected, ["AAPL", "ABBV"])
+
+    def test_held_secondary_does_not_consume_new_entry_slot(self):
+        selected = strategy._select_secondary_entry_symbols(
+            {"AAPL": 0.70, "ABBV": 0.62, "PLTR": 0.60},
+            {"AAPL": 5, "ABBV": 0, "PLTR": 0},
+            limit=2,
+        )
+        self.assertEqual(selected, ["ABBV", "PLTR"])
+
+    def test_secondary_buy_is_suppressed_only_for_unselected_flat_symbol(self):
         self.assertTrue(
-            strategy._suppress_unselected_secondary_buy("ABBV", "buy", None)
+            strategy._suppress_unselected_secondary_buy(
+                "PLTR", "buy", ["AAPL", "ABBV"], current_shares=0
+            )
         )
         self.assertFalse(
-            strategy._suppress_unselected_secondary_buy("ABBV", "buy", "ABBV")
+            strategy._suppress_unselected_secondary_buy(
+                "ABBV", "buy", ["AAPL", "ABBV"], current_shares=0
+            )
+        )
+        self.assertFalse(
+            strategy._suppress_unselected_secondary_buy(
+                "PLTR", "buy", ["AAPL", "ABBV"], current_shares=4
+            )
         )
 
     def test_artifact_thresholds_blend_with_probability_weight(self):
