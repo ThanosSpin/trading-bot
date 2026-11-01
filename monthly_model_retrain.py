@@ -393,7 +393,17 @@ def _validate_existing(symbols: List[str]) -> Tuple[dict, List[str]]:
             path = MODEL_DIR / f"{symbol}_{mode}_xgb.pkl"
             try:
                 artifact = joblib.load(path)
-                validate_artifact(artifact, symbol, mode)
+                # Active champions may predate the walk-forward framework. They
+                # remain usable if their model structure, calibration, target,
+                # split, and regime metadata are valid. Walk-forward evidence is
+                # mandatory for new challengers before promotion, not retroactively
+                # required from legacy champions during an integrity check.
+                validate_artifact(
+                    artifact,
+                    symbol,
+                    mode,
+                    require_walk_forward=False,
+                )
                 summaries[label] = _artifact_summary(artifact)
                 print(f"[VALID] {label}: {path}")
             except Exception as exc:
@@ -512,10 +522,13 @@ def main() -> int:
         _send_email(report, report_path)
 
     if failures:
-        print(
-            "[MONTHLY] FAILED - failed artifact promotions were rolled back; "
-            "successful independent promotions remain active."
-        )
+        if args.validate_only:
+            print("[MONTHLY] FAILED - one or more active artifacts are invalid.")
+        else:
+            print(
+                "[MONTHLY] FAILED - failed artifact promotions were rolled back; "
+                "successful independent promotions remain active."
+            )
         for failure in failures:
             print(f"  - {failure}")
         return 1

@@ -11,6 +11,30 @@ import monthly_model_retrain as monthly
 
 
 class MonthlyRetrainStatusTests(unittest.TestCase):
+    def test_validate_existing_allows_legacy_champion_without_walk_forward(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            monthly, "MODEL_DIR", Path(tmp) / "models"
+        ), patch.object(monthly, "MODES", ("daily",)), patch.object(
+            monthly, "validate_artifact"
+        ) as validate:
+            monthly.MODEL_DIR.mkdir(parents=True)
+            artifact = {"symbol": "NVDA", "mode": "daily"}
+            monthly.joblib.dump(
+                artifact,
+                monthly.MODEL_DIR / "NVDA_daily_xgb.pkl",
+            )
+
+            summaries, failures = monthly._validate_existing(["NVDA"])
+
+            self.assertEqual(failures, [])
+            self.assertIn("NVDA/daily", summaries)
+            validate.assert_called_once_with(
+                artifact,
+                "NVDA",
+                "daily",
+                require_walk_forward=False,
+            )
+
     def test_accepted_artifacts_promote_independently(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             monthly, "MODEL_DIR", Path(tmp) / "models"
