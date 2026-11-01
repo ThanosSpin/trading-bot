@@ -11,6 +11,25 @@ import monthly_model_retrain as monthly
 
 
 class MonthlyRetrainStatusTests(unittest.TestCase):
+    def test_legacy_intraday_artifact_can_use_runtime_regime_fallback(self):
+        artifact = {
+            "model": object(),
+            "features": ["feature"],
+            "metrics": {},
+            "trained_at": "2026-09-01T00:00:00",
+            "symbol": "NVDA",
+            "mode": "intraday_mr",
+            "calibrated": True,
+        }
+
+        monthly.validate_artifact(
+            artifact,
+            "NVDA",
+            "intraday_mr",
+            require_walk_forward=False,
+            allow_legacy_metadata=True,
+        )
+
     def test_validate_existing_allows_legacy_champion_without_walk_forward(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             monthly, "MODEL_DIR", Path(tmp) / "models"

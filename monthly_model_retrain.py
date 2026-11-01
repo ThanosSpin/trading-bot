@@ -131,13 +131,16 @@ def validate_artifact(
 
     if mode.startswith("intraday_"):
         regime = artifact.get("regime_config")
-        if not isinstance(regime, dict):
+        if not isinstance(regime, dict) and not allow_legacy_metadata:
             raise ValueError("intraday artifact has no persisted regime_config")
-        for key in ("momentum_threshold", "volatility_threshold"):
-            if not _finite_positive(regime.get(key)):
-                raise ValueError(f"invalid regime threshold: {key}={regime.get(key)!r}")
-        if not regime.get("fit_end"):
-            raise ValueError("regime_config is missing fit_end")
+        if isinstance(regime, dict):
+            for key in ("momentum_threshold", "volatility_threshold"):
+                if not _finite_positive(regime.get(key)):
+                    raise ValueError(
+                        f"invalid regime threshold: {key}={regime.get(key)!r}"
+                    )
+            if not regime.get("fit_end"):
+                raise ValueError("regime_config is missing fit_end")
 
 
 def _artifact_summary(artifact: dict) -> dict:
@@ -419,6 +422,8 @@ def _validate_existing(symbols: List[str]) -> Tuple[dict, List[str]]:
                     )
                     if not artifact.get(key)
                 ]
+                if mode.startswith("intraday_") and not artifact.get("regime_config"):
+                    legacy_missing.append("regime_config")
                 summary["legacy_metadata_missing"] = legacy_missing
                 summaries[label] = summary
                 status = "VALID LEGACY" if legacy_missing else "VALID"
