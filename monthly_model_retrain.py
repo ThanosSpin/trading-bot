@@ -66,22 +66,23 @@ def validate_artifact(
     symbol: str,
     mode: str,
     require_walk_forward: bool = True,
+    allow_legacy_metadata: bool = False,
 ) -> None:
-    """Raise ValueError when an artifact is unsafe to promote."""
+    """Raise ValueError when an artifact is unsafe for the requested purpose."""
     if not isinstance(artifact, dict):
         raise ValueError("training did not return an artifact dictionary")
 
     required = {
         "model",
         "features",
-        "full_feature_schema",
-        "split_metadata",
         "metrics",
         "trained_at",
         "symbol",
         "mode",
         "calibrated",
     }
+    if not allow_legacy_metadata:
+        required.update({"full_feature_schema", "split_metadata"})
     missing = sorted(required.difference(artifact))
     if missing:
         raise ValueError(f"artifact missing required keys: {missing}")
@@ -105,12 +106,15 @@ def validate_artifact(
                 f"two-stage target horizon mismatch: {artifact.get('target_horizon')!r}"
             )
 
-    split = artifact.get("split_metadata") or {}
-    for key in ("train_samples", "calibration_samples", "test_samples"):
-        if not _finite_positive(split.get(key)):
-            raise ValueError(f"invalid split metadata: {key}={split.get(key)!r}")
-    if split.get("windows_overlap") is not False:
-        raise ValueError("artifact does not confirm non-overlapping time windows")
+    split = artifact.get("split_metadata")
+    if split:
+        for key in ("train_samples", "calibration_samples", "test_samples"):
+            if not _finite_positive(split.get(key)):
+                raise ValueError(f"invalid split metadata: {key}={split.get(key)!r}")
+        if split.get("windows_overlap") is not False:
+            raise ValueError("artifact does not confirm non-overlapping time windows")
+    elif not allow_legacy_metadata:
+        raise ValueError("artifact has no split_metadata")
 
     if require_walk_forward:
         walk_forward = artifact.get("walk_forward_evaluation")
@@ -403,9 +407,27 @@ def _validate_existing(symbols: List[str]) -> Tuple[dict, List[str]]:
                     symbol,
                     mode,
                     require_walk_forward=False,
+                    allow_legacy_metadata=True,
                 )
-                summaries[label] = _artifact_summary(artifact)
-                print(f"[VALID] {label}: {path}")
+                summary = _artifact_summary(artifact)
+                legacy_missing = [
+                    key
+                    for key in (
+                        "full_feature_schema",
+                        "split_metadata",
+                        "walk_forward_evaluation",
+                    )
+                    if not artifact.get(key)
+                ]
+                summary["legacy_metadata_missing"] = legacy_missing
+                summaries[label] = summary
+                status = "VALID LEGACY" if legacy_missing else "VALID"
+                detail = (
+                    f" (missing audit metadata: {', '.join(legacy_missing)})"
+                    if legacy_missing
+                    else ""
+                )
+                print(f"[{status}] {label}: {path}{detail}")
             except Exception as exc:
                 message = f"{label}: {type(exc).__name__}: {exc}"
                 failures.append(message)

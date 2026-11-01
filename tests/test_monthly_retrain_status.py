@@ -33,6 +33,7 @@ class MonthlyRetrainStatusTests(unittest.TestCase):
                 "NVDA",
                 "daily",
                 require_walk_forward=False,
+                allow_legacy_metadata=True,
             )
 
     def test_accepted_artifacts_promote_independently(self):
