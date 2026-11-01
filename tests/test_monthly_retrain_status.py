@@ -11,6 +11,58 @@ import monthly_model_retrain as monthly
 
 
 class MonthlyRetrainStatusTests(unittest.TestCase):
+    def test_accepted_artifacts_promote_independently(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            monthly, "MODEL_DIR", Path(tmp) / "models"
+        ):
+            model_dir = monthly.MODEL_DIR
+            stage_dir = model_dir / ".monthly_retrain_staging" / "run"
+            stage_dir.mkdir(parents=True)
+            model_dir.mkdir(parents=True, exist_ok=True)
+
+            joblib = monthly.joblib
+            joblib.dump({"version": "champion"}, model_dir / "NVDA_daily_xgb.pkl")
+            joblib.dump({"version": "champion"}, model_dir / "AAPL_daily_xgb.pkl")
+            joblib.dump({"version": "challenger"}, stage_dir / "NVDA_daily_xgb.pkl")
+
+            promoted, failures = monthly._promote_accepted(
+                stage_dir,
+                ["NVDA/daily"],
+            )
+
+            self.assertEqual(promoted, ["NVDA/daily"])
+            self.assertEqual(failures, [])
+            self.assertEqual(
+                joblib.load(model_dir / "NVDA_daily_xgb.pkl")["version"],
+                "challenger",
+            )
+            self.assertEqual(
+                joblib.load(model_dir / "AAPL_daily_xgb.pkl")["version"],
+                "champion",
+            )
+
+    def test_missing_accepted_artifact_does_not_block_other_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            monthly, "MODEL_DIR", Path(tmp) / "models"
+        ):
+            model_dir = monthly.MODEL_DIR
+            stage_dir = model_dir / ".monthly_retrain_staging" / "run"
+            stage_dir.mkdir(parents=True)
+            monthly.joblib.dump(
+                {"version": "challenger"},
+                stage_dir / "AAPL_daily_xgb.pkl",
+            )
+
+            promoted, failures = monthly._promote_accepted(
+                stage_dir,
+                ["NVDA/daily", "AAPL/daily"],
+            )
+
+            self.assertEqual(promoted, ["AAPL/daily"])
+            self.assertEqual(len(failures), 1)
+            self.assertIn("NVDA/daily: FileNotFoundError", failures[0])
+            self.assertTrue((model_dir / "AAPL_daily_xgb.pkl").exists())
+
     def test_gate_rejection_is_reported_without_failure_or_traceback(self):
         artifact = {
             "trained_at": "2026-10-01T00:00:00",

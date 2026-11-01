@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Validated monthly retraining for daily and dual intraday models.
 
-This job is intentionally separate from the weekly trainers. It always builds a
-complete batch, validates every artifact, and promotes nothing unless all
-expected models train successfully.
+This job is intentionally separate from the weekly trainers. It builds and
+validates every requested artifact, then independently promotes only the
+challengers that pass their promotion gates.
 """
 
 from __future__ import annotations
@@ -275,48 +275,57 @@ def _cleanup_old_backups() -> None:
         print(f"[BACKUP] Removed old monthly backup: {old_dir}")
 
 
-def _promote_batch(stage_dir: Path, symbols: List[str]) -> None:
-    """Back up active artifacts and atomically replace each file."""
+def _promote_accepted(
+    stage_dir: Path,
+    accepted_labels: Iterable[str],
+) -> Tuple[List[str], List[str]]:
+    """Promote accepted artifacts independently with per-artifact rollback."""
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     month_dir = MODEL_DIR / "monthly_backups" / datetime.now().strftime("%Y-%m")
     rollback_dir = stage_dir / "rollback"
     month_dir.mkdir(parents=True, exist_ok=True)
     rollback_dir.mkdir(parents=True, exist_ok=True)
 
-    filenames = [f"{symbol}_{mode}_xgb.pkl" for symbol in symbols for mode in MODES]
-    existed = {}
-
-    for filename in filenames:
-        active = MODEL_DIR / filename
-        existed[filename] = active.exists()
-        if active.exists():
-            shutil.copy2(active, rollback_dir / filename)
-            monthly_backup = month_dir / filename
-            if not monthly_backup.exists():
-                shutil.copy2(active, monthly_backup)
-
-    promoted: List[str] = []
-    try:
-        for filename in filenames:
+    promoted_labels: List[str] = []
+    failures: List[str] = []
+    for label in accepted_labels:
+        active = None
+        rollback = None
+        existed = False
+        try:
+            symbol, mode = label.split("/", 1)
+            filename = f"{symbol}_{mode}_xgb.pkl"
             staged = stage_dir / filename
             active = MODEL_DIR / filename
             if not staged.exists():
                 raise FileNotFoundError(f"staged artifact missing: {staged}")
-            os.replace(staged, active)
-            promoted.append(filename)
-            print(f"[PROMOTED] {active}")
-    except Exception:
-        print("[ROLLBACK] Promotion failed; restoring previous active artifacts.")
-        for filename in promoted:
-            active = MODEL_DIR / filename
+
+            existed = active.exists()
             rollback = rollback_dir / filename
-            if existed.get(filename) and rollback.exists():
+            if existed:
+                shutil.copy2(active, rollback)
+                monthly_backup = month_dir / filename
+                if not monthly_backup.exists():
+                    shutil.copy2(active, monthly_backup)
+
+            os.replace(staged, active)
+            promoted_labels.append(label)
+            print(f"[PROMOTED] {label}: {active}")
+        except Exception as exc:
+            print(f"[ROLLBACK] {label}: promotion failed; restoring champion.")
+            if (
+                active is not None
+                and existed
+                and rollback is not None
+                and rollback.exists()
+            ):
                 shutil.copy2(rollback, active)
-            elif active.exists():
+            elif active is not None and not existed and active.exists():
                 active.unlink()
-        raise
+            failures.append(f"{label}: {type(exc).__name__}: {exc}")
 
     _cleanup_old_backups()
+    return promoted_labels, failures
 
 
 def _write_report(report: dict) -> Path:
@@ -352,6 +361,8 @@ def _send_email(report: dict, report_path: Path) -> None:
         f"Models promoted: {report.get('promoted_count', 0)}",
         f"Report: {report_path}",
     ]
+    if report.get("promoted_artifacts"):
+        lines.extend(["", "Promoted artifacts:", *report["promoted_artifacts"]])
     if report.get("rejections"):
         lines.extend(["", "Expected gate rejections:", *report["rejections"]])
     if report.get("failures"):
@@ -469,21 +480,28 @@ def main() -> int:
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
         "promoted_count": 0,
+        "promoted_artifacts": [],
         "artifacts": summaries,
         "rejections": rejections,
         "failures": failures,
     }
 
-    if not failures and not rejections and not args.validate_only and not args.shadow:
-        try:
-            _promote_batch(stage_dir, symbols)
-            report["promoted"] = True
-            report["promoted_count"] = expected_models
-        except Exception as exc:
-            failures.append(f"promotion: {type(exc).__name__}: {exc}")
+    if not failures and not args.validate_only and not args.shadow:
+        accepted_labels = [
+            label
+            for label, summary in summaries.items()
+            if (summary.get("promotion") or {}).get("accepted") is True
+        ]
+        promoted_labels, promotion_failures = _promote_accepted(
+            stage_dir,
+            accepted_labels,
+        )
+        failures.extend(promotion_failures)
+        report["promoted_artifacts"] = promoted_labels
+        report["promoted_count"] = len(promoted_labels)
+        report["promoted"] = bool(promoted_labels)
+        if failures:
             report["status"] = "failed"
-            report["promoted"] = False
-            traceback.print_exc()
     else:
         report["promoted"] = False
 
@@ -494,7 +512,10 @@ def main() -> int:
         _send_email(report, report_path)
 
     if failures:
-        print("[MONTHLY] FAILED - active models were not intentionally replaced.")
+        print(
+            "[MONTHLY] FAILED - failed artifact promotions were rolled back; "
+            "successful independent promotions remain active."
+        )
         for failure in failures:
             print(f"  - {failure}")
         return 1
@@ -503,7 +524,7 @@ def main() -> int:
         print(
             f"[MONTHLY] COMPLETED - {len(summaries)} models evaluated; "
             f"{accepted_count} accepted, {rejected_count} rejected; "
-            "active models unchanged."
+            f"{report.get('promoted_count', 0)} promoted; rejected champions unchanged."
         )
         return 0
 
