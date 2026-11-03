@@ -2175,10 +2175,16 @@ def check_relative_momentum_entry(
         return False, 0.0, f"[RELATIVE REJECT] {sym}: outside entry window"
 
     failures = []
+    # Relaxed relative-momentum entry thresholds for all symbols
+    min_relative_session = 0.002  # +0.20% vs SPY
+    min_volume_time = 0.60        # 60% of expected time-adjusted volume
     if not 0.005 <= values["session_return"] <= 0.020:
         failures.append(f"session={values['session_return']:.2%} outside +0.50%..+2.00%")
-    if values["relative_session_return"] < 0.005:
-        failures.append(f"vs_SPY={values['relative_session_return']:.2%} < +0.50%")
+    if values["relative_session_return"] < min_relative_session:
+        failures.append(
+            f"vs_SPY={values['relative_session_return']:.2%} "
+            f"< +{min_relative_session:.2%}"
+        )
     if values["relative_return_4"] < 0.002:
         failures.append(f"rel_60m={values['relative_return_4']:.2%} < +0.20%")
     if values["relative_strength_accel"] < -0.001:
@@ -2187,8 +2193,11 @@ def check_relative_momentum_entry(
         failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
     if values["vwap_slope_2"] <= 0.0:
         failures.append(f"VWAP_slope_30m={values['vwap_slope_2']:.2%} <= 0")
-    if values["volume_time_ratio"] < 0.80:
-        failures.append(f"volume_time={values['volume_time_ratio']:.2f} < 0.80")
+    if values["volume_time_ratio"] < min_volume_time:
+        failures.append(
+            f"volume_time={values['volume_time_ratio']:.2f} "
+            f"< {min_volume_time:.2f}"
+        )
     if not 0.0 < values["intraday_mom"] <= 0.010:
         failures.append(f"momentum={values['intraday_mom']:.2%} outside 0..+1.00%")
     if probability < 0.50:
