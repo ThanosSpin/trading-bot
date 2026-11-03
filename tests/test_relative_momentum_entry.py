@@ -48,7 +48,7 @@ class RelativeMomentumEntryTests(unittest.TestCase):
     def test_rejects_move_above_chasing_limit(self):
         qualifies, _, _ = check_relative_momentum_entry(
             "PLTR",
-            self._diagnostics(session_return=0.021),
+            self._diagnostics(session_return=0.041),
             {"PLTR": 0.60},
             now_ny=self._market_time(),
         )
@@ -73,12 +73,12 @@ class RelativeMomentumEntryTests(unittest.TestCase):
     def test_rejection_explains_failed_conditions(self):
         qualifies, _, reason = check_relative_momentum_entry(
             "PLTR",
-            self._diagnostics(volume_time_ratio=0.50),
+            self._diagnostics(volume_time_ratio=0.30),
             {"PLTR": 0.49},
             now_ny=self._market_time(),
         )
         self.assertFalse(qualifies)
-        self.assertIn("volume_time=0.50", reason)
+        self.assertIn("volume_time=0.30", reason)
         self.assertIn("model=0.490", reason)
 
     def test_rejects_late_entry(self):
