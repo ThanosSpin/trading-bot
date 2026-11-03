@@ -31,3 +31,6 @@ shap_*.png
 
 # Shell files
 *.sh
+
+# DS_Store
+*.DS_Store
