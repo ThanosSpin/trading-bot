@@ -59,12 +59,13 @@ PAPER_ENTRY_SYMBOLS = list(SYMBOL) + ["SPY"]
 BUY_THRESHOLD = 0.55
 SELL_THRESHOLD = 0.45
 PYRAMID_THRESHOLD = 0.65
-PYRAMID_COOLDOWN_MINUTES = 60
+PYRAMID_COOLDOWN_MINUTES = 30
 MAX_PYRAMID_ADDITIONS = 2
 POST_STOP_REBUY_COOLDOWN_MINUTES = 120
 POST_STOP_REBUY_BUFFER = 0.10
 ORDER_FILL_TIMEOUT_SECONDS = 30
 AAPL_BUY_THRESHOLD = 0.60
+AAPL_SELL_THRESHOLD = 0.57
 AAPL_MOMENTUM_INTRADAY_MIN_PROB = 0.58
 # Whole-session performance versus SPY is informational for the guarded
 # momentum path. A stock can lag SPY early and still establish a valid recent
@@ -87,16 +88,15 @@ GUARDED_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER = (
 # Daily RSI alone must not veto an otherwise confirmed trend. It becomes a
 # late-entry guard only when price is also stretched intraday.
 OVERBOUGHT_RSI_THRESHOLD = 70.0
-OVERBOUGHT_MAX_VWAP_DISTANCE = 0.015
+OVERBOUGHT_MAX_VWAP_DISTANCE = 0.020
 
-# The legacy NVDA momentum artifact classifies above roughly 0.53, while the
-# ordinary strategy floor remains deliberately stricter at 0.57. Permit a
-# separately attributed initial entry only when live evidence confirms it.
+# Permit NVDA momentum entries from 0.53, below the ordinary 0.55 floor,
+# when the remaining momentum confirmations pass.
 NVDA_GUARDED_MOMENTUM_ENTRY_ENABLED = True
-NVDA_MOMENTUM_FINAL_PROB_MIN = 0.55
+NVDA_MOMENTUM_FINAL_PROB_MIN = 0.53
 NVDA_MOMENTUM_MIN_RELATIVE_SESSION = 0.0
 NVDA_MOMENTUM_MIN_RELATIVE_60M = 0.0
-NVDA_MOMENTUM_MIN_VOLUME_TIME_RATIO = 0.60
+NVDA_MOMENTUM_MIN_VOLUME_TIME_RATIO = 0.20
 NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT = 0.25
 
 USE_ARTIFACT_THRESHOLDS = True
@@ -106,22 +106,22 @@ MODEL_ENTRY_BUFFER = 0.02
 MODEL_EXIT_BUFFER = 0.02
 # Cost-aware thresholds may relax the legacy entry floor, but keep a wider
 # neutral band to limit churn between six-minute decision cycles.
-COST_AWARE_BUY_FLOOR = 0.56
+COST_AWARE_BUY_FLOOR = 0.55
 COST_AWARE_SELL_CEILING = 0.52
-COST_AWARE_MIN_HYSTERESIS = 0.04
-MODEL_REBUY_BUFFER = 0.04
+COST_AWARE_MIN_HYSTERESIS = 0.03
+MODEL_REBUY_BUFFER = 0.03
 MODEL_PYRAMID_BUFFER = 0.05
 # A trained, cost-aware artifact may lower the legacy entry floor, but never
 # below a neutral class boundary. AAPL retains a slightly higher safety floor.
 MODEL_MIN_CLASS_BOUNDARY = 0.50
 AAPL_MODEL_MIN_CLASS_BOUNDARY = 0.55
-# Do not enter, re-enter, or pyramid a symbol that is down at least 0.5%
-# from the previous close. This prevents buying a brief bounce in a weak day.
+# Below this session-return level, a fresh entry needs positive intraday
+# momentum or the confirmed mean-reversion reversal path.
 BUY_SESSION_RETURN_FLOOR = -0.005
 # Core-entry volume must be compared with the expected cumulative volume at
 # the same time of day. A partial-session/full-day ratio is structurally low
 # near the open and incorrectly rejects early trends.
-CORE_ENTRY_MIN_VOLUME_TIME_RATIO = 0.80
+CORE_ENTRY_MIN_VOLUME_TIME_RATIO = 0.30
 
 # A mean-reversion entry may begin before the one-hour momentum measure crosses
 # above zero, but only after shorter-horizon market evidence confirms a turn.
@@ -130,7 +130,7 @@ MR_REVERSAL_PROB_BUFFER = 0.05
 MR_REVERSAL_MIN_MOMENTUM = -0.0035
 MR_REVERSAL_MIN_RELATIVE_ACCEL = 0.0010
 MR_REVERSAL_MIN_RELATIVE_60M = 0.0
-MR_REVERSAL_MIN_VOLUME_TIME_RATIO = 0.80
+MR_REVERSAL_MIN_VOLUME_TIME_RATIO = 0.30
 MR_REVERSAL_CONFIRM_CYCLES = 2
 MR_REVERSAL_INITIAL_POSITION_EQUITY_PCT = 0.125
 
@@ -138,7 +138,7 @@ SPY_USE_ARTIFACT_THRESHOLDS = True
 SPY_MODEL_ENTRY_BUFFER = 0.03
 SPY_MODEL_EXIT_BUFFER = 0.02
 
-REBUY_THRESHOLD = BUY_THRESHOLD + 0.06
+REBUY_THRESHOLD = 0.60
 REBUY_COOLDOWN_MINUTES = 30
 ALLOW_SAME_DAY_REBUY = True
 
@@ -159,7 +159,7 @@ WEAK_RATIO_THRESHOLD = 0.75
 PRICE_WEAK_RATIO_THRESHOLD = 0.75
 LAST_HOUR_BUY_BUFFER = 0.04
 FINAL_15_MIN_BUY_BUFFER = 0.06
-SPY_ENTRY_THRESHOLD = 0.70
+SPY_ENTRY_THRESHOLD = 0.65
 SPY_EXIT_THRESHOLD = 0.50
 SPY_RISK_FRACTION = 1.0
 SPY_MUTUAL_EXCLUSIVE = True
@@ -240,11 +240,12 @@ EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO = 0.80
 # rebuy may restart at 50%; NVDA and AAPL may then scale to 85% only after the
 # prediction and live confirmation features continue to agree.
 CONFIRMED_REBUY_POSITION_EQUITY_PCT = 0.50
+CONFIRMED_REBUY_MIN_VOLUME_TIME_RATIO = 0.80
 CORE_CONFIRMED_POSITION_EQUITY_PCT = 0.85
-OTHER_CONFIRMED_POSITION_EQUITY_PCT = 0.50
+OTHER_CONFIRMED_POSITION_EQUITY_PCT = 0.75
 CORE_CONFIRMED_POSITION_SYMBOLS = ["NVDA", "AAPL"]
 CONFIRMED_PYRAMID_MIN_POSITION_RETURN = 0.002
-CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO = 0.80
+CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO = 0.30
 
 # A model-driven minimum holding period must never delay a confirmed loss exit.
 # Measure the loss from the broker average entry and require deteriorating

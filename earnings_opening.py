@@ -108,10 +108,11 @@ def evaluate_opening_bars(
     spy_rows = _session_rows(spy_history, session_date)
     completed_cutoff = pd.Timestamp(now_ny).tz_convert("UTC") - pd.Timedelta(minutes=5)
     rows = rows[rows.index <= completed_cutoff]
-    spy_rows = spy_rows[spy_rows.index <= completed_cutoff]
+    if not spy_rows.empty:
+        spy_rows = spy_rows[spy_rows.index <= completed_cutoff]
     result: Dict[str, object] = {"qualified": False, "symbol": symbol}
 
-    if len(rows) < 2 or len(spy_rows) < 2:
+    if len(rows) < 2:
         return {**result, "reason": "waiting for two completed five-minute bars"}
     if previous_close is None or float(previous_close) <= 0:
         return {**result, "reason": "previous close unavailable"}
@@ -121,8 +122,6 @@ def evaluate_opening_bars(
     first = rows.iloc[0]
     latest = rows.iloc[-1]
     prior = rows.iloc[-2]
-    spy_first = spy_rows.iloc[0]
-    spy_latest = spy_rows.iloc[-1]
     typical = (rows["High"] + rows["Low"] + rows["Close"]) / 3.0
     cumulative_volume = rows["Volume"].cumsum()
     if float(cumulative_volume.iloc[-1]) <= 0:
@@ -132,16 +131,17 @@ def evaluate_opening_bars(
     gap_return = float(first["Open"]) / float(previous_close) - 1.0
     momentum = float(latest["Close"]) / float(prior["Close"]) - 1.0
     symbol_open_return = float(latest["Close"]) / float(first["Open"]) - 1.0
-    spy_open_return = float(spy_latest["Close"]) / float(spy_first["Open"]) - 1.0
-    relative_return = symbol_open_return - spy_open_return
+    spy_open_return = (
+        float(spy_rows.iloc[-1]["Close"]) / float(spy_rows.iloc[0]["Open"]) - 1.0
+        if len(spy_rows) >= 2 else None
+    )
+    relative_return = symbol_open_return - spy_open_return if spy_open_return is not None else None
     volume_pace = _opening_volume_pace(symbol_history, rows, session_date)
 
     checks = {
         "gap": gap_return >= float(min_gap),
         "opening_breakout": float(latest["Close"]) > float(first["High"]),
         "positive_momentum": momentum > 0.0,
-        "above_vwap": float(latest["Close"]) > vwap,
-        "relative_strength": relative_return >= float(min_relative_return),
         "volume_pace": volume_pace is not None
         and volume_pace >= float(min_volume_pace),
     }
@@ -334,9 +334,8 @@ def apply_earnings_opening_continuation(
         str(symbol).upper() for symbol in (already_bought_symbols or [])
     }
 
-    spy_history = fetch_intraday_history(
-        SPY_SYMBOL, lookback_minutes=9750, interval="5min"
-    )
+    # SPY-relative performance is no longer an entry condition.
+    spy_history = None
     for symbol in sorted(EARNINGS_OPENING_EVENT_DATES):
         if not _event_is_active(symbol, now_ny, EARNINGS_OPENING_EVENT_DATES):
             continue
@@ -387,7 +386,6 @@ def apply_earnings_opening_continuation(
             "explain": (
                 f"{symbol}: earnings opening continuation confirmed; "
                 f"gap={result['gap_return']:.2%}, momentum_5m={result['momentum_5m']:.2%}, "
-                f"relative_open={result['relative_open_return']:.2%}, "
                 f"volume_pace={result['volume_pace']:.2f}"
             ),
             "earnings_opening_continuation": True,

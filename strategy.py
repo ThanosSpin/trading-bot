@@ -36,6 +36,7 @@ from config import (
     EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT,
     EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO,
     CONFIRMED_REBUY_POSITION_EQUITY_PCT,
+    CONFIRMED_REBUY_MIN_VOLUME_TIME_RATIO,
     CORE_CONFIRMED_POSITION_EQUITY_PCT,
     OTHER_CONFIRMED_POSITION_EQUITY_PCT,
     CORE_CONFIRMED_POSITION_SYMBOLS,
@@ -52,6 +53,7 @@ from config import (
     MAX_LOSS_ACCOUNT_EQUITY_PCT,
     MAX_LOSS_PER_POSITION_PCT,
     AAPL_BUY_THRESHOLD,
+    AAPL_SELL_THRESHOLD,
     GUARDED_MOMENTUM_SYMBOLS,
     GUARDED_MOMENTUM_MIN_PROBABILITY_FLOOR,
     GUARDED_MOMENTUM_AAPL_MIN_PROBABILITY,
@@ -707,14 +709,8 @@ def _overbought_entry_is_extended(rsi: float, diagnostics: dict) -> tuple:
 
 
 def _momentum_entry_is_extended(diagnostics: dict) -> tuple:
-    """Block a chase only when both momentum and VWAP extension are extreme."""
-    d = diagnostics or {}
-    momentum = _safe_float(d.get("intraday_mom"), None)
-    vwap_distance = _safe_float(d.get("vwap_distance"), None)
-    if momentum is None or vwap_distance is None:
-        return False, "extension unavailable"
-    blocked = momentum > 0.010 and vwap_distance > float(OVERBOUGHT_MAX_VWAP_DISTANCE)
-    return blocked, f"momentum={momentum:.2%}, VWAP={vwap_distance:.2%}"
+    """Compatibility helper: the standalone chase blocker has been removed."""
+    return False, "standalone chase blocker disabled"
 
 
 def _apply_weak_market_buy_filter(
@@ -835,49 +831,23 @@ def combine_artifact_decision_thresholds(
 def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     sym = sym.upper()
     configured_base = float(AAPL_BUY_THRESHOLD if sym == "AAPL" else BUY_THRESHOLD)
-    threshold_source = "fallback"
-    cost_aware_threshold = False
-
+    symbol_diagnostics = (diagnostics or {}).get(sym, {}) or {}
+    threshold_source = symbol_diagnostics.get("threshold_source")
+    cost_aware_threshold = bool(USE_ARTIFACT_THRESHOLDS and
+                               symbol_diagnostics.get("cost_aware_threshold", False))
+    # The configured BUY value is an actual floor for all models. A missing
+    # artifact does not add a second buffer to that floor. Real artifact entry
+    # boundaries and late-session buffers may still require a higher score.
+    thr = configured_base
     if USE_ARTIFACT_THRESHOLDS:
-        class_boundary = _artifact_threshold_from_diag(sym, diagnostics)
-        artifact_entry = class_boundary + float(MODEL_ENTRY_BUFFER)
-        model_floor = float(
-            AAPL_MODEL_MIN_CLASS_BOUNDARY if sym == "AAPL" else MODEL_MIN_CLASS_BOUNDARY
-        )
-        symbol_diagnostics = (diagnostics or {}).get(sym, {}) or {}
-        threshold_source = symbol_diagnostics.get("threshold_source")
-        cost_aware_threshold = bool(
-            symbol_diagnostics.get("cost_aware_threshold", False)
-        )
-        # Missing/legacy threshold metadata keeps the conservative configured
-        # fallback. Trained artifacts may use their cost-aware boundary down to
-        # the explicit neutral-probability safety floor.
-        floor = (
-            model_floor
-            if threshold_source != "fallback" and cost_aware_threshold
-            else configured_base
-        )
-        thr = min(0.95, max(floor + float(MODEL_ENTRY_BUFFER), artifact_entry))
-    else:
-        thr = min(0.95, configured_base + float(MODEL_ENTRY_BUFFER))
-
-    # Preserve a no-trade band between entry and exit. A cost-aware artifact
-    # may lower the class boundary, but it must never make BUY overlap SELL.
-    # Reuse the configured entry buffer as the minimum hysteresis width.
+        boundary = _safe_float(symbol_diagnostics.get("decision_threshold"), None)
+        if boundary is not None and np.isfinite(boundary) and threshold_source != "fallback":
+            thr = max(thr, boundary + float(MODEL_ENTRY_BUFFER))
     effective_sell = _effective_sell_threshold(sym, diagnostics)
-    if cost_aware_threshold and threshold_source != "fallback":
-        if sym == "AAPL":
-            # Preserve AAPL's established stricter entry policy.
-            thr = max(thr, configured_base + float(MODEL_ENTRY_BUFFER))
-        else:
-            thr = max(thr, float(COST_AWARE_BUY_FLOOR))
-        hysteresis = float(COST_AWARE_MIN_HYSTERESIS)
-    else:
-        hysteresis = float(MODEL_ENTRY_BUFFER)
-    thr = min(
-        0.95,
-        max(thr, effective_sell + hysteresis),
-    )
+    hysteresis = (float(COST_AWARE_MIN_HYSTERESIS)
+                  if cost_aware_threshold and threshold_source != "fallback"
+                  else float(MODEL_ENTRY_BUFFER))
+    thr = min(0.95, max(thr, effective_sell + hysteresis))
 
     # 2) Time-of-day adjustment: stricter in last hour before close
     now_ny = _dt.now(NY_TZ)
@@ -893,7 +863,7 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
             else float(LAST_HOUR_BUY_BUFFER)
         )
         window = "final 15 minutes" if minutes_to_close <= 15 else "last hour"
-        adjusted = min(0.95, thr + late_session_buffer)
+        adjusted = round(min(0.95, thr + late_session_buffer), 12)
 
         print(
             f"[TIME-AWARE BUY THR] {sym}: {window} before close "
@@ -903,7 +873,7 @@ def _effective_buy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> f
         return adjusted
 
     # Outside last hour: use normal threshold
-    return thr
+    return round(thr, 12)
 
 
 def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
@@ -916,8 +886,13 @@ def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> 
             if sym == "AAPL"
             else (ARTIFACT_THRESHOLD_FALLBACK or BUY_THRESHOLD)
         )
-        configured_ceiling = configured_base - float(MODEL_EXIT_BUFFER)
+        configured_ceiling = (float(AAPL_SELL_THRESHOLD) if sym == "AAPL"
+                              else configured_base - float(MODEL_EXIT_BUFFER))
         # Artifact boundaries may trigger an earlier exit, never a later one.
+        symbol_diag = (diagnostics or {}).get(sym, {}) or {}
+        supplied_boundary = _safe_float(symbol_diag.get("decision_threshold"), None)
+        if supplied_boundary is None or not np.isfinite(supplied_boundary) or symbol_diag.get("threshold_source") == "fallback":
+            artifact_exit = configured_ceiling
         threshold = max(0.05, min(0.95, max(configured_ceiling, artifact_exit)))
         symbol_diagnostics = (diagnostics or {}).get(sym, {}) or {}
         if (
@@ -933,15 +908,14 @@ def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> 
 def _effective_rebuy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
     base_buy = _effective_buy_threshold(sym, diagnostics)
     legacy = float(REBUY_THRESHOLD)
-    return max(legacy, min(0.98, base_buy + float(MODEL_REBUY_BUFFER)))
+    return round(max(legacy, min(0.98, base_buy + float(MODEL_REBUY_BUFFER))), 12)
 
 
 def _effective_pyramid_threshold(
     sym: str, diagnostics: Dict[str, dict] = None
 ) -> float:
     base_buy = _effective_buy_threshold(sym, diagnostics)
-    legacy = float(PYRAMID_THRESHOLD)
-    return max(legacy, min(0.99, base_buy + float(MODEL_PYRAMID_BUFFER)))
+    return round(min(0.99, base_buy + float(MODEL_PYRAMID_BUFFER)), 12)
 
 
 def exceptional_initial_exposure_pct(
@@ -1003,7 +977,7 @@ def confirmed_rebuy_exposure_pct(
         _safe_float(diag.get("relative_session_return"), 0.0) > 0.0,
         _safe_float(diag.get("relative_return_4"), 0.0) > 0.0,
         _safe_float(diag.get("volume_time_ratio"), 0.0)
-        >= float(CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO),
+        >= float(CONFIRMED_REBUY_MIN_VOLUME_TIME_RATIO),
     )
     if all(checks):
         return float(CONFIRMED_REBUY_POSITION_EQUITY_PCT)
@@ -1111,9 +1085,6 @@ def _confirmed_mr_reversal_entry(
     values = {
         "probability": _safe_float(probability, 0.0),
         "relative_accel": _safe_float(diag.get("relative_strength_accel"), None),
-        "relative_60m": _safe_float(diag.get("relative_return_4"), None),
-        "vwap_distance": _safe_float(diag.get("vwap_distance"), None),
-        "vwap_slope_2": _safe_float(diag.get("vwap_slope_2"), None),
         "volume_time_ratio": _safe_float(diag.get("volume_time_ratio"), None),
     }
 
@@ -1124,10 +1095,6 @@ def _confirmed_mr_reversal_entry(
         values["probability"] >= float(buy_threshold) + float(MR_REVERSAL_PROB_BUFFER),
         values["relative_accel"] is not None
         and values["relative_accel"] >= float(MR_REVERSAL_MIN_RELATIVE_ACCEL),
-        values["relative_60m"] is not None
-        and values["relative_60m"] > float(MR_REVERSAL_MIN_RELATIVE_60M),
-        values["vwap_distance"] is not None and values["vwap_distance"] > 0.0,
-        values["vwap_slope_2"] is not None and values["vwap_slope_2"] > 0.0,
         values["volume_time_ratio"] is not None
         and values["volume_time_ratio"] >= float(MR_REVERSAL_MIN_VOLUME_TIME_RATIO),
     )
@@ -1703,9 +1670,9 @@ def should_trade(
                 0,
                 explain + "HOLD - two-stage movement gate expects no meaningful move.",
             )
-        if session_return is not None and session_return <= float(
-            BUY_SESSION_RETURN_FLOOR
-        ):
+        if (session_return is not None and session_return <= float(BUY_SESSION_RETURN_FLOOR)
+            and not (intraday_mom is not None and intraday_mom > 0)
+            and not (shares <= 0 and intraday_mom is not None and intraday_mom <= 0)):
             return make_decision(
                 "hold",
                 0,
@@ -1771,31 +1738,9 @@ def should_trade(
             )
 
         confirmation_checks = (
-            ("VWAP", _safe_float(d_diag.get("vwap_distance"), None), 0.0, False),
-            (
-                "VWAP slope",
-                _safe_float(d_diag.get("vwap_slope_2"), None),
-                0.0,
-                False,
-            ),
-            (
-                "relative session return",
-                _safe_float(d_diag.get("relative_session_return"), None),
-                0.0,
-                False,
-            ),
-            (
-                "60-minute relative strength",
-                _safe_float(d_diag.get("relative_return_4"), None),
-                0.0,
-                False,
-            ),
-            (
-                "time-normalized volume",
-                _safe_float(d_diag.get("volume_time_ratio"), None),
-                float(CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO),
-                True,
-            ),
+            ("60-minute relative strength", _safe_float(d_diag.get("relative_return_4"), None), 0.0, False),
+            ("time-normalized volume", _safe_float(d_diag.get("volume_time_ratio"), None),
+             float(CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO), True),
         )
         failed_confirmations = []
         for label, value, minimum, inclusive in confirmation_checks:
@@ -1818,11 +1763,11 @@ def should_trade(
                 + ".",
             )
 
-        # -- Guard 2b: don't chase - block pyramid if already up >2% from entry --
+        # Permit confirmed additions through a 5% position gain.
         avg_cost = float(pm.data.get("avg_price", 0.0))
         if avg_cost > 0 and price > avg_cost:
             run_up_pct = (price - avg_cost) / avg_cost
-            if run_up_pct > 0.02:
+            if run_up_pct > 0.05:
                 return make_decision(
                     "hold",
                     0,
@@ -1840,7 +1785,7 @@ def should_trade(
                 spy_recent = float(spy_close.iloc[-1])
                 spy_2h_ago = float(spy_close.iloc[-8])  # ~2h ago (8 x 15min bars)
                 spy_trend = (spy_recent - spy_2h_ago) / spy_2h_ago
-                if spy_trend < -0.003:  # SPY down >0.3% in last 2h
+                if spy_trend < -0.01:  # SPY down more than 1% across eight bars
                     return make_decision(
                         "hold",
                         0,
@@ -2153,81 +2098,7 @@ def check_relative_momentum_entry(
         if guarded_result[0]:
             return guarded_result
 
-    if float(d.get("relative_market_available", 0.0) or 0.0) < 1.0:
-        return False, 0.0, f"[RELATIVE REJECT] {sym}: benchmark unavailable"
-    if d.get("movement_expected") is False:
-        return False, 0.0, f"[RELATIVE REJECT] {sym}: movement_expected=False"
-
-    values = {}
-    for name in (
-        "session_return",
-        "relative_session_return",
-        "relative_return_4",
-        "relative_strength_accel",
-        "vwap_distance",
-        "vwap_slope_2",
-        "volume_time_ratio",
-        "intraday_mom",
-    ):
-        try:
-            values[name] = float(d.get(name))
-        except (TypeError, ValueError):
-            return False, 0.0, f"[RELATIVE REJECT] {sym}: missing {name}"
-
-    probability = float((preds or {}).get(sym, 0.0) or 0.0)
-    now_ny = now_ny or _dt.now(NY_TZ)
-    minute = now_ny.hour * 60 + now_ny.minute
-    if not (9 * 60 + 45 <= minute < 15 * 60):
-        return False, 0.0, f"[RELATIVE REJECT] {sym}: outside entry window"
-
-    failures = []
-    # Relaxed relative-momentum entry thresholds for all symbols
-    min_relative_session = 0.002  # +0.20% vs SPY
-    # Require stronger volume confirmation for extended moves.
-    min_volume_time = 0.60 if values["session_return"] > 0.030 else 0.40
-    if not 0.005 <= values["session_return"] <= 0.040:
-        failures.append(
-            f"session={values['session_return']:.2%} " f"outside +0.50%..+4.00%"
-        )
-    if values["relative_session_return"] < min_relative_session:
-        failures.append(
-            f"vs_SPY={values['relative_session_return']:.2%} "
-            f"< +{min_relative_session:.2%}"
-        )
-    if values["relative_return_4"] < 0.002:
-        failures.append(f"rel_60m={values['relative_return_4']:.2%} < +0.20%")
-    if values["relative_strength_accel"] < -0.001:
-        failures.append(f"accel={values['relative_strength_accel']:.2%} < -0.10%")
-    if values["vwap_distance"] <= 0.0:
-        failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
-    if values["vwap_slope_2"] <= 0.0:
-        failures.append(f"VWAP_slope_30m={values['vwap_slope_2']:.2%} <= 0")
-    if values["volume_time_ratio"] < min_volume_time:
-        failures.append(
-            f"volume_time={values['volume_time_ratio']:.2f} " f"< {min_volume_time:.2f}"
-        )
-    if not 0.0 < values["intraday_mom"] <= 0.010:
-        failures.append(f"momentum={values['intraday_mom']:.2%} outside 0..+1.00%")
-    if probability < 0.50:
-        failures.append(f"model={probability:.3f} < 0.500")
-    if failures:
-        return False, 0.0, f"[RELATIVE REJECT] {sym}: " + "; ".join(failures)
-
-    score = (
-        probability
-        + 2.0 * values["relative_session_return"]
-        + values["relative_return_4"]
-        + 0.5 * max(0.0, values["relative_strength_accel"])
-    )
-    reason = (
-        f"[RELATIVE MOMENTUM] {sym}: session={values['session_return']:.2%}, "
-        f"vs_SPY={values['relative_session_return']:.2%}, "
-        f"rel_60m={values['relative_return_4']:.2%}, "
-        f"VWAP={values['vwap_distance']:.2%}, "
-        f"volume_time={values['volume_time_ratio']:.2f}, "
-        f"model={probability:.3f}"
-    )
-    return True, float(score), reason
+    return False, 0.0, f"[RELATIVE REJECT] {sym}: generic relative entry disabled"
 
 
 def _check_nvda_guarded_momentum_entry(
@@ -2250,10 +2121,7 @@ def _check_nvda_guarded_momentum_entry(
     values = {}
     for name in (
         "session_return",
-        "relative_session_return",
         "relative_return_4",
-        "vwap_distance",
-        "vwap_slope_2",
         "volume_time_ratio",
         "intraday_mom",
     ):
@@ -2278,20 +2146,11 @@ def _check_nvda_guarded_momentum_entry(
         failures.append(f"momentum={values['intraday_mom']:.2%} <= 0")
     if values["session_return"] <= 0.0:
         failures.append(f"session={values['session_return']:.2%} <= 0")
-    if values["relative_session_return"] <= float(NVDA_MOMENTUM_MIN_RELATIVE_SESSION):
-        failures.append(
-            f"vs_SPY={values['relative_session_return']:.2%} <= "
-            f"{float(NVDA_MOMENTUM_MIN_RELATIVE_SESSION):.2%}"
-        )
     if values["relative_return_4"] <= float(NVDA_MOMENTUM_MIN_RELATIVE_60M):
         failures.append(
             f"rel_60m={values['relative_return_4']:.2%} <= "
             f"{float(NVDA_MOMENTUM_MIN_RELATIVE_60M):.2%}"
         )
-    if values["vwap_distance"] <= 0.0:
-        failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
-    if values["vwap_slope_2"] <= 0.0:
-        failures.append(f"VWAP_slope_30m={values['vwap_slope_2']:.2%} <= 0")
     if values["volume_time_ratio"] < float(NVDA_MOMENTUM_MIN_VOLUME_TIME_RATIO):
         failures.append(
             f"volume_time={values['volume_time_ratio']:.2f} < "
@@ -2302,16 +2161,12 @@ def _check_nvda_guarded_momentum_entry(
 
     score = (
         probability
-        + 2.0 * values["relative_session_return"]
         + values["relative_return_4"]
     )
     reason = (
         f"[NVDA GUARDED MOMENTUM] {sym}: final_prob={probability:.3f}, "
         f"session={values['session_return']:.2%}, "
-        f"vs_SPY={values['relative_session_return']:.2%}, "
         f"rel_60m={values['relative_return_4']:.2%}, "
-        f"VWAP={values['vwap_distance']:.2%}, "
-        f"VWAP_slope_30m={values['vwap_slope_2']:.2%}, "
         f"volume_time={values['volume_time_ratio']:.2f}, "
         f"initial_exposure="
         f"{float(NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT):.0%}"
@@ -2339,9 +2194,6 @@ def _check_guarded_momentum_entry(
         "intraday_prob",
         "session_return",
         "relative_session_return",
-        "relative_return_4",
-        "vwap_distance",
-        "vwap_slope_2",
         "volume_time_ratio",
         "intraday_mom",
     ):
@@ -2384,15 +2236,6 @@ def _check_guarded_momentum_entry(
             f"vs_SPY={values['relative_session_return']:.2%} < "
             f"{float(GUARDED_MOMENTUM_MIN_RELATIVE_SESSION):.2%}"
         )
-    if values["relative_return_4"] <= float(GUARDED_MOMENTUM_MIN_RELATIVE_60M):
-        failures.append(
-            f"rel_60m={values['relative_return_4']:.2%} <= "
-            f"{float(GUARDED_MOMENTUM_MIN_RELATIVE_60M):.2%}"
-        )
-    if values["vwap_distance"] <= 0.0:
-        failures.append(f"VWAP={values['vwap_distance']:.2%} <= 0")
-    if values["vwap_slope_2"] < 0.0:
-        failures.append(f"VWAP_slope_30m={values['vwap_slope_2']:.2%} < 0")
     if values["intraday_mom"] <= 0.0:
         failures.append(f"momentum={values['intraday_mom']:.2%} <= 0")
     if failures:
@@ -2401,7 +2244,6 @@ def _check_guarded_momentum_entry(
     score = (
         values["intraday_prob"]
         + 2.0 * values["relative_session_return"]
-        + values["relative_return_4"]
     )
     size_multiplier = (
         float(GUARDED_MOMENTUM_LOW_VOLUME_SIZE_MULTIPLIER)
@@ -2413,8 +2255,6 @@ def _check_guarded_momentum_entry(
         f"prob_floor={probability_floor:.3f}, "
         f"session={values['session_return']:.2%}, "
         f"vs_SPY={values['relative_session_return']:.2%}, "
-        f"rel_60m={values['relative_return_4']:.2%}, "
-        f"VWAP={values['vwap_distance']:.2%}, "
         f"volume_time={values['volume_time_ratio']:.2f}, "
         f"size={size_multiplier:.0%}"
     )
@@ -2506,49 +2346,6 @@ def compute_strategy_decisions(
     def _diag(sym: str) -> dict:
         return diagnostics.get(sym.upper()) or {}
 
-    def _block_buy_on_pullback(sym: str) -> bool:
-        """
-        Guardrail: avoid buying while short-term momentum is negative
-        and intraday signal is weaker than daily.
-        """
-        d = _diag(sym)
-
-        dp = d.get("daily_prob")
-        ip = d.get("intraday_prob")
-        mom = d.get("intraday_mom")  # e.g. -0.0060 == -0.60% over ~2h
-        q = d.get("intraday_quality_score")
-
-        try:
-            dp = None if dp is None else float(dp)
-            ip = None if ip is None else float(ip)
-            mom = None if mom is None else float(mom)
-            q = None if q is None else float(q)
-        except Exception:
-            return False
-
-        # no intraday diagnostics => don't block
-        if mom is None or ip is None or dp is None:
-            return False
-
-        # require reasonable intraday quality
-        if q is not None and q < 0.60:
-            return False
-
-        # pullback + intraday weaker than daily
-        if (mom <= -0.003) and (ip < dp):
-            return True
-
-        # ADD this additional check - block if price just spiked >1% in last bar:
-        d = _diag(sym)
-        price_now = float(d.get("price") or 0)
-        # block if intraday vol is high AND momentum is positive (chasing a spike)
-        vol = float(d.get("intraday_vol") or 0)
-        mom = float(d.get("intraday_mom") or 0)
-        if mom > 0.008 and vol > 0.005:  # price spiked hard - > wait for pullback
-            return True
-
-        return False
-
     def _block_buy_on_weak_volume(sym: str) -> bool:
         """
         Guardrail: avoid full-size BUY when intraday volume is weak
@@ -2604,9 +2401,9 @@ def compute_strategy_decisions(
             print(f"[DEBUG _is_buy] {sym} BLOCKED: no meaningful move expected")
             return False
         session_return = _safe_float(_diag(sym).get("session_return"), None)
-        if session_return is not None and session_return <= float(
-            BUY_SESSION_RETURN_FLOOR
-        ):
+        momentum = _safe_float(_diag(sym).get("intraday_mom"), None)
+        if (session_return is not None and session_return <= float(BUY_SESSION_RETURN_FLOOR)
+            and not (momentum is not None and momentum > 0)):
             print(
                 f"[DEBUG _is_buy] {sym} BLOCKED: session return "
                 f"{session_return:.2%} <= {float(BUY_SESSION_RETURN_FLOOR):.2%}"
@@ -2616,10 +2413,6 @@ def compute_strategy_decisions(
             print(
                 f"[DEBUG _is_buy] {sym} BLOCKED: prob={preds.get(sym,0):.3f} < threshold={threshold}"
             )
-            return False
-
-        if _block_buy_on_pullback(sym):
-            print(f"[DEBUG _is_buy] {sym} BLOCKED: pullback guard")
             return False
 
         if _block_buy_on_weak_volume(sym):
@@ -2850,23 +2643,6 @@ def compute_strategy_decisions(
     for sym in core_symbols:
         d = decisions.get(sym) or {}
         if d.get("action") == "buy":
-            if _block_buy_on_pullback(sym):
-                dd = _diag(sym)
-                mom = _safe_f(dd.get("intraday_mom"))
-                ip = _safe_f(dd.get("intraday_prob"))
-                dp = _safe_f(dd.get("daily_prob"))
-
-                mom_str = "NA" if mom is None else f"{mom:.2%}"
-                ip_str = "NA" if ip is None else f"{ip:.3f}"
-                dp_str = "NA" if dp is None else f"{dp:.3f}"
-
-                decisions[sym] = make_decision(
-                    "hold",
-                    0,
-                    f"{sym}: BUY blocked by pullback guardrail (mom={mom_str}, ip={ip_str} < dp={dp_str}).",
-                )
-                continue
-
             if _block_buy_on_weak_volume(sym):
                 decisions[sym] = make_decision(
                     "hold",
@@ -2914,8 +2690,7 @@ def compute_strategy_decisions(
         guarded_momentum = reason.startswith("[GUARDED MOMENTUM]")
         nvda_guarded_momentum = reason.startswith("[NVDA GUARDED MOMENTUM]")
         if (
-            _block_buy_on_pullback(sym)
-            or (
+            (
                 not (guarded_momentum or nvda_guarded_momentum)
                 and _block_buy_on_weak_volume(sym)
             )
@@ -3039,8 +2814,8 @@ def compute_strategy_decisions(
         session_return = _safe_float(d.get("session_return"), None)
         if (
             d.get("movement_expected") is False
-            or (session_return is not None and session_return <= float(BUY_SESSION_RETURN_FLOOR))
-            or _block_buy_on_pullback(sym)
+            or (session_return is not None and session_return <= float(BUY_SESSION_RETURN_FLOOR)
+                and not ((_safe_float(d.get("intraday_mom"), None) or 0.0) > 0))
             or _block_buy_on_weak_volume(sym)
             or _block_buy_overbought(sym)
             or _momentum_entry_is_extended(d)[0]
