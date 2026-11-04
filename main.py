@@ -11,6 +11,7 @@ from market import is_market_open, debug_market, is_trading_day
 from predictive_model.model_xgb import compute_signals
 from strategy import (
     compute_strategy_decisions,
+    funding_buy_is_valid,
     # reset_session_state,
     mark_session_buy,
     session_has_bought,
@@ -23,6 +24,7 @@ from strategy import (
     exceptional_initial_exposure_pct,
     _effective_buy_threshold,
     _effective_sell_threshold,
+    effective_entry_exit_thresholds,
     combine_artifact_decision_thresholds,
     apply_daily_loss_guard,
     apply_daily_profit_guard,
@@ -32,7 +34,9 @@ from strategy import (
 )
 from portfolio import PortfolioManager
 from trader import execute_trade, get_margin_status, get_recent_filled_sells
-from entry_policy import apply_entry_symbol_guard
+from entry_policy import apply_entry_symbol_guard, is_new_entry_allowed
+from funding_execution import prepare_funding_orders
+from nvda_funding import cancel_orphaned_funding_sells
 from earnings_opening import (
     apply_earnings_event_day_entry_gate,
     apply_earnings_opening_continuation,
@@ -54,6 +58,7 @@ from config import (
     SPY_ENTRY_THRESHOLD,
     SPY_EXIT_THRESHOLD,
     SPY_MUTUAL_EXCLUSIVE,
+    MAX_POSITION_SIZE_PCT,
     PAPER_TRADE_SYMBOLS,
     USE_LIVE_TRADING,
     PAPER_TRADE_NOTES,
@@ -227,6 +232,7 @@ def log_signal_snapshot(
             "intradayregime",  # ✅ NEW field
             "allowintraday",  # ✅ NEW field
             "buythreshold",
+            "sellthreshold",
             "sessionreturn",
             "vwapdistance",
             "vwapslope2",
@@ -258,6 +264,7 @@ def log_signal_snapshot(
             "intradayregime": sig.get("intraday_regime"),  # ✅ NEW
             "allowintraday": sig.get("allow_intraday"),  # ✅ NEW
             "buythreshold": diag.get("buy_threshold"),
+            "sellthreshold": diag.get("sell_threshold"),
             "sessionreturn": diag.get("session_return"),
             "vwapdistance": diag.get("vwap_distance"),
             "vwapslope2": diag.get("vwap_slope_2"),
@@ -542,9 +549,9 @@ def get_predictions(symbols, debug=True):
             "cost_aware_threshold": cost_aware_threshold,
             **threshold_info,
         }
-        diagnostics[sym]["buy_threshold"] = _effective_buy_threshold(
-            sym, diagnostics
-        )
+        entry_threshold, exit_threshold = effective_entry_exit_thresholds(sym, diagnostics)
+        diagnostics[sym]["buy_threshold"] = entry_threshold
+        diagnostics[sym]["sell_threshold"] = exit_threshold
 
         # Persist the exact production-adjusted probability, threshold, and
         # confirmation evidence used by the decision cycle.
@@ -637,8 +644,7 @@ def print_signal_diagnostics(decisions, diagnostics):
         # ---------------------------------------------------------
         # Effective thresholds used by strategy.py
         # ---------------------------------------------------------
-        buy_thr = _effective_buy_threshold(sym, diagnostics)
-        sell_thr = _effective_sell_threshold(sym, diagnostics)
+        buy_thr, sell_thr = effective_entry_exit_thresholds(sym, diagnostics)
 
         # 🔥 VR FIX: intraday_vol / daily_vol
         vr = "NA"
@@ -992,6 +998,7 @@ def execute_decisions(decisions, diagnostics=None):
     def _attribution(sym, decision, action, shares_before, price):
         diag = diagnostics.get(sym, {}) or {}
         enriched = dict(decision)
+        entry_threshold, exit_threshold = effective_entry_exit_thresholds(sym, diagnostics)
         enriched.update(
             {
                 "model_used": diag.get("intraday_model_used") or diag.get("model") or "daily",
@@ -999,8 +1006,8 @@ def execute_decisions(decisions, diagnostics=None):
                 "entry_reason": _entry_reason(decision) if action == "buy" else "",
                 "exit_reason": _exit_reason(decision) if action == "sell" else "",
                 "decision_probability": diag.get("final_prob"),
-                "buy_threshold": _effective_buy_threshold(sym, diagnostics),
-                "sell_threshold": _effective_sell_threshold(sym, diagnostics),
+                "buy_threshold": entry_threshold,
+                "sell_threshold": exit_threshold,
                 "position_value_before": float(shares_before or 0.0) * float(price or 0.0),
             }
         )
@@ -1037,13 +1044,44 @@ def execute_decisions(decisions, diagnostics=None):
         regime = sig.get("intraday_regime")
         model_used = sig.get("intraday_model_used") or sig.get("model")
 
-        buy_thr = _effective_buy_threshold(sym, diagnostics)
-        sell_thr = _effective_sell_threshold(sym, diagnostics)
+        buy_thr, sell_thr = effective_entry_exit_thresholds(sym, diagnostics)
 
         print(
             f"Probabilities: D={_fmt(dp)} I={_fmt(ip)} F={_fmt(fp)} "
             f"| BUY>={buy_thr:.3f} SELL<={sell_thr:.3f} "
             f"| regime={regime} | model={model_used} | w={_fmt(w_used)}"
+        )
+
+    # Later portfolio, earnings, and close-time guards can invalidate a
+    # destination after strategy planning. Reconcile funding before any SELL.
+    decisions = cancel_orphaned_funding_sells(decisions)
+    if any(d.get("funding_sell") and d.get("action") == "sell" for d in decisions.values()):
+        account_cache.invalidate()
+        funding_cash = float((account_cache.get_account() or {}).get("cash", 0.0) or 0.0)
+        funding_prices = {}
+        funding_positions = {}
+        for symbol in decisions:
+            pm = PortfolioManager(symbol)
+            pm.refresh_live()
+            funding_positions[symbol] = float(pm.data.get("shares", 0.0) or 0.0)
+            funding_prices[symbol] = float(fetch_latest_price(symbol) or 0.0)
+
+        def _funding_limit(symbol, decision, qty, cash):
+            return apply_position_limits(
+                qty, funding_prices[symbol], cash, symbol,
+                current_position_value=max(0.0, funding_positions[symbol]) * funding_prices[symbol],
+                is_pyramid=bool(decision.get("pyramid")),
+                is_confirmed_rebuy=bool(decision.get("confirmed_rebuy")),
+                initial_exposure_pct=decision.get("initial_exposure_pct"),
+            )
+
+        decisions = prepare_funding_orders(
+            decisions, cash=funding_cash, prices=funding_prices, positions=funding_positions,
+            validate_buy=lambda symbol, decision: (
+                (funding_positions[symbol] <= 0 or decision.get("pyramid"))
+                and funding_buy_is_valid(symbol, decision, diagnostics)
+            ),
+            limit_buy=_funding_limit, cash_fraction=float(MAX_POSITION_SIZE_PCT),
         )
 
     sell_syms = [
@@ -1123,15 +1161,18 @@ def execute_decisions(decisions, diagnostics=None):
             mark_session_position_closed(sym)
         print(f"Updated Snapshot (cash + {sym} position): ${pm.value():.2f}")
 
+    # An unresolved cancellation can still fill later. Defer all BUYs until
+    # broker reconciliation rather than treating its partial fill as settled.
+    if any(decisions[sym].get("execution_pending") for sym in sell_syms):
+        print("[WARN] BUY batch deferred: a SELL order is still unresolved.")
+        return
+
     # -------------------------
     # Refresh cash after SELLs
     # -------------------------
+    account_cache.invalidate()
     global_cash_after_sells = _get_live_account_cash(proxy_symbol="NVDA")
     remaining_cash = global_cash_after_sells
-
-    # If strategy required SPY liquidation to fund core and it failed, we should not "all-in" core.
-    spy_required_sell = "SPY" in decisions and decisions["SPY"].get("action") == "sell"
-    spy_sell_failed = spy_required_sell and "SPY" in sell_failed
 
     # -------------------------
     # PASS 2: BUYs (priority order)
@@ -1173,60 +1214,29 @@ def execute_decisions(decisions, diagnostics=None):
         else:
             initial_exposure_pct = float(initial_exposure_pct)
 
-        # If strategy expected SPY to be sold first but it didn't fill, skip flagged buys.
-        if (recalc_all_in or recalc_after_sells) and spy_sell_failed:
-            print(
-                "[INFO] BUY skipped because required SPY SELL did not fill (cannot fund priority buy)."
-            )
+        # Use refreshed actual cash, never planned sale proceeds. Failed or
+        # partial funding sales reduce affordability instead of inflating size.
+        remaining_cash = min(remaining_cash, max(0.0, _get_live_account_cash(proxy_symbol=sym)))
+        pm = PortfolioManager(sym)
+        pm.refresh_live()
+        shares_before = float(pm.data.get("shares", 0.0) or 0.0)
+        if not is_new_entry_allowed(sym):
             continue
-
-        # Recompute qty from remaining cash if flagged
-        if recalc_all_in:
-            # refresh live cash in case SELL filled changed it (and to avoid stale state)
-            remaining_cash = _get_live_account_cash(proxy_symbol=sym)
+        if decision.get("funding_sources") and not funding_buy_is_valid(sym, decision, diagnostics):
+            continue
+        original_cap = int(decision.get("max_buy_qty", qty))
+        if recalc_all_in or recalc_after_sells:
             qty = int(remaining_cash // price)
-
-            # ✅ Apply limits
-            qty = apply_position_limits(
-                qty,
-                price,
-                remaining_cash,
-                sym,
-                is_confirmed_rebuy=bool(decision.get("confirmed_rebuy", False)),
-                initial_exposure_pct=initial_exposure_pct,
-            )
-
-            print(
-                f"[INFO] {sym} recalc_all_in: cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}"
-            )
-
-        elif recalc_after_sells:
-            # use the cash remaining after earlier buys in this same cycle
-            qty = int(remaining_cash // price)
-
-            # Recalculated rotation orders must obey the same per-position
-            # sizing limits as ordinary and all-in BUY orders.
-            qty = apply_position_limits(
-                qty,
-                price,
-                remaining_cash,
-                sym,
-                is_confirmed_rebuy=bool(decision.get("confirmed_rebuy", False)),
-                initial_exposure_pct=initial_exposure_pct,
-            )
-            print(
-                f"[INFO] {sym} recalc_after_sells: remaining_cash=${remaining_cash:.2f} price=${price:.2f} -> qty={qty}"
-            )
-
-        elif not decision.get("pyramid"):
-            qty = apply_position_limits(
-                qty,
-                price,
-                remaining_cash,
-                sym,
-                is_confirmed_rebuy=bool(decision.get("confirmed_rebuy", False)),
-                initial_exposure_pct=initial_exposure_pct,
-            )
+        if "max_buy_qty" in decision:
+            qty = min(qty, original_cap)
+        qty = min(qty, int(max(0.0, remaining_cash) // price))
+        qty = apply_position_limits(
+            qty, price, remaining_cash, sym,
+            current_position_value=max(0.0, shares_before) * price,
+            is_pyramid=bool(decision.get("pyramid")),
+            is_confirmed_rebuy=bool(decision.get("confirmed_rebuy", False)),
+            initial_exposure_pct=initial_exposure_pct,
+        )
 
         if qty <= 0:
             print("[INFO] BUY skipped — insufficient cash.")
@@ -1241,6 +1251,8 @@ def execute_decisions(decisions, diagnostics=None):
 
         if not filled_qty:
             print(f"[WARN] {sym} BUY not filled.")
+            if decision.get("execution_pending"):
+                break
             continue
 
         account_cash = _get_live_account_cash(proxy_symbol=sym)
@@ -1262,6 +1274,9 @@ def execute_decisions(decisions, diagnostics=None):
 
         # update remaining cash after successful buy
         remaining_cash = _get_live_account_cash(proxy_symbol=sym)
+        if decision.get("execution_pending"):
+            print("[WARN] Remaining BUYs deferred: an order is still unresolved.")
+            break
 
     # -------------------------
     # PASS 3: HOLD prints

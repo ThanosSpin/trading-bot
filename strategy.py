@@ -111,6 +111,7 @@ from predictive_model.data_loader import (
     fetch_previous_close,
 )
 from account_cache import account_cache
+from nvda_funding import plan_entry_funding, cancel_orphaned_funding_sells
 
 NY_TZ = pytz.timezone("America/New_York")
 # ---------------------------------------------------------
@@ -621,6 +622,10 @@ def apply_position_limits(
             else float(INITIAL_POSITION_EQUITY_PCT)
         )
 
+    requested_cap = _safe_float(initial_exposure_pct, None)
+    if requested_cap is not None:
+        exposure_pct = min(exposure_pct, max(0.0, requested_cap))
+
     remaining_exposure = max(
         0.0,
         (equity * exposure_pct) - max(float(current_position_value), 0.0),
@@ -739,9 +744,9 @@ def _apply_weak_market_buy_filter(
                 decision = dict(decision)
                 decision["qty"] = qty
                 decision["weak_market_guarded_entry"] = True
-                decision["initial_exposure_pct"] = float(
-                    WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT
-                )
+                prior_cap = _safe_float(decision.get("initial_exposure_pct"), None)
+                weak_cap = float(WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT)
+                decision["initial_exposure_pct"] = min(weak_cap, prior_cap) if prior_cap is not None else weak_cap
                 decision["explain"] = (
                     f"{decision.get('explain', '')} WEAK-MARKET GUARDED SIZE - "
                     f"capped at {float(WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT):.1%}."
@@ -1154,6 +1159,15 @@ def _effective_spy_exit_threshold(diagnostics: Dict[str, dict] = None) -> float:
     artifact_exit = class_boundary - float(SPY_MODEL_EXIT_BUFFER)
     # Artifact boundaries may trigger an earlier exit, never a later one.
     return max(0.02, min(0.98, max(float(SPY_EXIT_THRESHOLD), artifact_exit)))
+
+
+def effective_entry_exit_thresholds(symbol, diagnostics=None):
+    """Report the thresholds used by the symbol's actual decision path."""
+    if str(symbol).upper() == str(SPY_SYMBOL).upper():
+        return (_effective_spy_entry_threshold(diagnostics),
+                _effective_spy_exit_threshold(diagnostics))
+    return (_effective_buy_threshold(symbol, diagnostics),
+            _effective_sell_threshold(symbol, diagnostics))
 
 
 def make_decision(action: str, qty: int, explain: str, **meta):
@@ -1974,6 +1988,7 @@ def should_trade(
                     + "MR REVERSAL BUY - two-cycle turn confirmed while one-hour "
                     f"momentum remains {intraday_mom:.3%}. qty={qty}",
                     mr_reversal=True,
+                    initial_exposure_pct=initial_exposure_pct,
                 )
             if confirmed_rebuy:
                 return make_decision(
@@ -1984,9 +1999,16 @@ def should_trade(
                     confirmed_rebuy=True,
                     initial_exposure_pct=initial_exposure_pct,
                 )
-            return make_decision("buy", qty, explain + f"BUY. qty={qty}")
+            return make_decision(
+                "buy", qty, explain + f"BUY. qty={qty}",
+                initial_exposure_pct=initial_exposure_pct,
+            )
 
-        return make_decision("hold", 0, explain + "BUY signal but insufficient cash.")
+        return make_decision(
+            "hold", 0, explain + "BUY signal but insufficient cash.",
+            entry_candidate=True, initial_exposure_pct=initial_exposure_pct,
+            confirmed_rebuy=confirmed_rebuy, mr_reversal=mr_reversal_entry,
+        )
 
     # ---------------------------------------------------------
     # Guard 3: minimum hold time before signal-based sell
@@ -2411,6 +2433,26 @@ def _check_aapl_guarded_momentum_entry(
 # ---------------------------------------------------------
 # NVDA-priority coordinator
 # ---------------------------------------------------------
+def funding_buy_is_valid(symbol, decision, diagnostics):
+    """Recheck a linked destination against the cycle's final diagnostics."""
+    if not is_new_entry_allowed(symbol):
+        return False
+    diag = (diagnostics or {}).get(symbol, {}) or {}
+    probability = _safe_float(diag.get("final_prob"), None)
+    if probability is None or not np.isfinite(probability) or diag.get("movement_expected") is False:
+        return False
+    allowed, _ = _rebuy_allowed(symbol, probability, diagnostics)
+    if not allowed:
+        return False
+    if decision.get("nvda_guarded_momentum"):
+        return _check_nvda_guarded_momentum_entry(symbol, diagnostics, {symbol: probability})[0]
+    if decision.get("relative_momentum"):
+        return check_relative_momentum_entry(symbol, diagnostics, {symbol: probability})[0]
+    if decision.get("momentum_override"):
+        return check_momentum_breakout(symbol, diagnostics, {symbol: probability})[0]
+    return probability >= _effective_buy_threshold(symbol, diagnostics)
+
+
 def compute_strategy_decisions(
     predictions: Dict[str, float],
     symbols: List[str] = None,
@@ -2548,14 +2590,6 @@ def compute_strategy_decisions(
             pass
         return False
 
-    # ---------------------------------------------------------
-    # ABBV secondary logic helpers
-    # ---------------------------------------------------------
-    rs_margin = max(
-        0.0, min(float(RS_MARGIN), 0.25)
-    )  # require ABBV to beat AAPL by 0.05 to switch (anti-churn)
-
-    # âœ… MOVED: Define _is_buy() BEFORE pick_secondary_among_stocks()
     def _is_buy(sym: str) -> bool:
         """
         Core BUY predicate used for AAPL/ABBV/PLTR and other symbols.
@@ -2647,29 +2681,6 @@ def compute_strategy_decisions(
         pms[spy_sym] = pm
         prices[spy_sym] = fetch_latest_price(spy_sym) or 0.0
 
-    def pick_secondary_entry_symbols() -> List[str]:
-        """Choose up to the configured number of guarded, flat secondaries."""
-        candidates = {}
-        position_shares = {}
-
-        for sym in ["AAPL", "ABBV", "PLTR"]:
-            if sym in core_symbols:
-                position_shares[sym] = float(pms[sym].data.get("shares", 0.0) or 0.0)
-                prob = preds.get(sym)
-                if (
-                    position_shares[sym] <= 0
-                    and is_new_entry_allowed(sym)
-                    and prob is not None
-                    and _is_buy(sym)
-                ):
-                    candidates[sym] = prob
-
-        return _select_secondary_entry_symbols(
-            candidates,
-            position_shares,
-            MAX_NEW_SECONDARY_BUYS_PER_CYCLE,
-        )
-
     def spy_shares() -> float:
         return float(pms[spy_sym].data.get("shares", 0.0))
 
@@ -2700,11 +2711,11 @@ def compute_strategy_decisions(
     # ---------------------------------------------------------
     # 2) SPY candidate (ONLY for entering SPY on weak market)
     # ---------------------------------------------------------
+    market_is_weak = _weak_market(symbols, preds)
     spy_candidate = None
     spy_prob = preds.get(spy_sym)
 
     if spy_prob is not None:
-        market_is_weak = _weak_market(symbols, preds)  # your helper excludes SPY
         if market_is_weak:
             sh = spy_shares()
             cash = float(pms[spy_sym].data.get("cash", 0.0))
@@ -2762,265 +2773,70 @@ def compute_strategy_decisions(
                 )
         return decisions
 
-    # ---------------------------------------------------------
-    # 4) Core strategy with NVDA priority (core only)
-    # ---------------------------------------------------------
-    if "NVDA" not in core_symbols:
-        concurrent_buys = sum(
-            1 for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD
-        )
-        for sym in core_symbols:
-            decisions[sym] = should_trade(
-                sym,
-                preds.get(sym, 0.0),
-                total_symbols=len(core_symbols),
-                concurrent_buys=concurrent_buys,
-                diagnostics=diagnostics,
-            )
-    else:
-
-        def live_shares(sym):
-            return float(pms[sym].data.get("shares", 0.0))
-
-        concurrent_buys = sum(
-            1 for s in core_symbols if preds.get(s, 0.0) >= BUY_THRESHOLD
+    # Evaluate all ordinary signals before selection or funding. Potential
+    # proceeds are used only to size candidates, never treated as filled cash.
+    cash_now = max(0.0, float((account_state or {}).get("cash", 0.0) or 0.0))
+    shares_now = {sym: float(pm.data.get("shares", 0.0) or 0.0) for sym, pm in pms.items()}
+    concurrent_buys = sum(1 for sym in core_symbols if _is_buy(sym))
+    for sym in core_symbols:
+        decisions[sym] = should_trade(
+            sym, preds.get(sym, 0.0), len(core_symbols), concurrent_buys,
+            available_cash=cash_now, diagnostics=diagnostics,
         )
 
-        nvda_prob = preds.get("NVDA", 0.0)
-        nvda_base = should_trade(
-            "NVDA",
-            nvda_prob,
-            len(core_symbols),
-            concurrent_buys,
-            diagnostics=diagnostics,
+    # Independent SELLs retain their own reason and are never funding-only.
+    independent_proceeds = sum(
+        int((decisions.get(sym) or {}).get("qty", 0)) * float(prices.get(sym, 0.0) or 0.0)
+        for sym in core_symbols if (decisions.get(sym) or {}).get("action") == "sell"
+    )
+
+    def funding_sources(target):
+        # Keep AAPL when it independently qualifies as a BUY. Other BUYs are
+        # protected too. SPY is the first funding source, as in the old flow.
+        sources = []
+        for source in [spy_sym] + [sym for sym in core_symbols if sym != spy_sym]:
+            if source == target or shares_now.get(source, 0.0) <= 0:
+                continue
+            decision = decisions.get(source) or {}
+            if decision.get("action") == "sell":
+                continue  # Already counted as an independent exit.
+            protected = decision.get("action") == "buy" or (source == "AAPL" and _is_buy(source))
+            if source != spy_sym and target != "NVDA":
+                # Preserve the existing AAPL -> stronger ABBV rotation rule.
+                if not (target == "ABBV" and source == "AAPL" and
+                        preds.get("ABBV", 0.0) >= preds.get("AAPL", 0.0) + ROTATION_MIN_EDGE):
+                    continue
+            sources.append(dict(symbol=source, shares=shares_now[source],
+                                price=prices.get(source, 0.0), independently_buying=protected))
+        return sources
+
+    def candidate_cash(target):
+        return cash_now + independent_proceeds + sum(
+            int(source["shares"]) * float(source["price"] or 0.0)
+            for source in funding_sources(target) if not source["independently_buying"]
         )
-        nvda_action = nvda_base["action"]
 
-        # ---- NVDA BUY priority: sell other core positions (funding) + plan big buy
-        if nvda_action == "buy" and live_shares("NVDA") <= 0:
-            # A fresh NVDA entry may be accompanied by only the strongest flat
-            # secondary that independently passes the normal entry guards.
-            nvda_companions = pick_secondary_entry_symbols()[
-                : int(MAX_NEW_SECONDARY_BUYS_WITH_NVDA)
-            ]
-            sim_cash = float(pms[core_symbols[0]].data.get("cash", 0.0))
-            nvda_px = float(prices.get("NVDA", 0.0) or 0.0)
-            if nvda_px <= 0:
-                return decisions
-
-            # ---------------------------------------------------------
-            # NVDA ROTATION RULE:
-            # If NVDA is BUY and AAPL is NOT BUY (hold/sell), then sell AAPL (if held)
-            # to fund NVDA.
-            # ---------------------------------------------------------
-            aapl_prob = preds.get("AAPL", 0.0)
-            aapl_sig = should_trade(
-                "AAPL",
-                aapl_prob,
-                len(core_symbols),
-                concurrent_buys,
-                diagnostics=diagnostics,
-            )
-            aapl_action = (aapl_sig.get("action") or "hold").lower()
-
-            # fund with other core positions (excluding NVDA)
-            # Fund NVDA with other core positions
-            for sym in core_symbols:
-                if sym == "NVDA":
-                    continue
-
-                sh = live_shares(sym)
-                px = float(prices.get(sym, 0.0) or 0.0)
-
-                if sh <= 0 or px <= 0:
-                    continue
-
-                # AAPL special rule:
-                # keep AAPL if it independently has a BUY signal.
-                if sym == "AAPL" and aapl_action == "buy":
-                    continue
-
-                # Same-day positions may be sold.
-                # Legacy PDT trade-count restrictions no longer apply.
-                sim_cash += sh * px
-
-                if sym == "AAPL":
-                    reason = (
-                        f"AAPL: Rotated out to fund NVDA BUY "
-                        f"(AAPL={aapl_action.upper()}, NVDA=BUY)."
-                    )
-                else:
-                    reason = f"{sym}: Sold to fund NVDA priority BUY."
-
-                decisions[sym] = make_decision(
-                    "sell",
-                    int(sh),
-                    reason,
-                )
-
-            max_shares = int(sim_cash // nvda_px)
-
-            # NEW: Apply limits
-            max_shares = apply_position_limits(
-                max_shares,
-                nvda_px,
-                sim_cash,
-                "NVDA",
-                initial_exposure_pct=exceptional_initial_exposure_pct(
-                    "NVDA", nvda_prob, diagnostics
-                ),
-            )
-
-            if max_shares >= 1:
-                decisions["NVDA"] = make_decision(
-                    "buy",
-                    max_shares,
-                    f"NVDA BUY priority - capital ${sim_cash:.2f}, qty={max_shares}",
-                )
-            else:
-                decisions["NVDA"] = make_decision(
-                    "hold", 0, "NVDA BUY priority but insufficient capital."
-                )
-
-            # Keep the two allocations independent: NVDA remains capped at its
-            # normal 25% initial exposure and the companion receives its own
-            # normal 25% cap through should_trade(). Confirmed later pyramids
-            # can still scale NVDA/AAPL toward their configured 85% ceiling.
-            if decisions["NVDA"].get("action") == "buy":
-                for sym in nvda_companions:
-                    companion = should_trade(
-                        sym,
-                        preds.get(sym, 0.0),
-                        total_symbols=len(core_symbols),
-                        concurrent_buys=concurrent_buys,
-                        diagnostics=diagnostics,
-                    )
-                    if companion.get("action") == "buy":
-                        companion["nvda_companion_entry"] = True
-                        decisions[sym] = companion
-                        print(
-                            f"[NVDA COMPANION] {sym}: independently guarded "
-                            "25% initial entry alongside NVDA."
-                        )
-
-            # NOTE: do NOT apply SPY here; final enforcement below will handle it.
-        elif nvda_action == "sell":
-            sh = live_shares("NVDA")
-            if sh > 0:
-                decisions["NVDA"] = make_decision("sell", int(sh), "NVDA SELL signal.")
-            else:
-                decisions["NVDA"] = make_decision(
-                    "hold", 0, "NVDA SELL but no position."
-                )
-
-            # rotate into strongest other BUY
-            # Rotation may fund a new position, but it must not revive a BUY
-            # rejected by the normal entry guards or silently pyramid an
-            # existing position. Existing positions are added to only through
-            # should_trade(), where pyramid limits and cooldowns are enforced.
-            rotation_decisions = {
-                s: should_trade(
-                    s,
-                    preds.get(s, 0.0),
-                    total_symbols=len(core_symbols),
-                    concurrent_buys=concurrent_buys,
-                    diagnostics=diagnostics,
-                )
-                for s in core_symbols
-                if s != "NVDA"
-            }
-            rotation_shares = {s: live_shares(s) for s in core_symbols}
-            buyers = _eligible_rotation_targets(
-                [s for s in core_symbols if s != "NVDA"],
-                rotation_decisions,
-                rotation_shares,
-            )
-            if buyers:
-                strongest = max(buyers, key=lambda x: preds.get(x, 0.0))
-                cash_now = float(
-                    pms[core_symbols[0]].data.get("cash", 0.0)
-                ) + sh * float(prices.get("NVDA", 0.0) or 0.0)
-                tgt_px = float(prices.get(strongest, 0.0) or 0.0)
-                qty = int(cash_now // tgt_px) if tgt_px > 0 else 0
-                if qty >= 1:
-                    decisions[strongest] = make_decision(
-                        "buy", qty, f"{strongest}: Rotated from NVDA sell, qty={qty}"
-                    )
-        else:
-            # NVDA HOLD -> allow up to two independently guarded new secondaries.
-            selected_secondaries = pick_secondary_entry_symbols()
-
-            for sym in core_symbols:
-                d0 = should_trade(
-                    sym,
-                    preds.get(sym, 0.0),
-                    total_symbols=len(core_symbols),
-                    concurrent_buys=concurrent_buys,
-                    diagnostics=diagnostics,
-                )
-
-                # suppress BUY for the non-selected secondary candidate
-                if _suppress_unselected_secondary_buy(
-                    sym,
-                    d0.get("action"),
-                    selected_secondaries,
-                    float(pms[sym].data.get("shares", 0.0) or 0.0),
-                ):
-                    suppressed_reason = (
-                        "no secondary candidate passed entry guards"
-                        if not selected_secondaries
-                        else "selected_secondaries=" + ",".join(selected_secondaries)
-                    )
-                    d0 = make_decision(
-                        "hold", 0, f"{sym}: BUY suppressed ({suppressed_reason})."
-                    )
-
-                decisions[sym] = d0
-
-            # If ABBV chosen AND AAPL is not BUY AND we hold AAPL -> sell AAPL to fund ABBV
-            # Rotate AAPL into ABBV only when ABBV has a meaningful signal advantage.
-            if (
-                "ABBV" in selected_secondaries
-                and "AAPL" in core_symbols
-                and "ABBV" in core_symbols
-            ):
-                aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
-                aapl_prob = float(preds.get("AAPL", 0.0) or 0.0)
-                abbv_prob = float(preds.get("ABBV", 0.0) or 0.0)
-
-                rotation_is_better = (
-                    aapl_sh > 0
-                    and float(pms["ABBV"].data.get("shares", 0.0) or 0.0) <= 0
-                    and (decisions.get("AAPL") or {}).get("action") != "buy"
-                    and (decisions.get("ABBV") or {}).get("action") == "buy"
-                    and abbv_prob >= aapl_prob + ROTATION_MIN_EDGE
-                )
-
-                if rotation_is_better:
-                    decisions["AAPL"] = make_decision(
-                        "sell",
-                        int(aapl_sh),
-                        (
-                            f"AAPL: Rotated into stronger ABBV signal "
-                            f"(AAPL={aapl_prob:.3f}, ABBV={abbv_prob:.3f})."
-                        ),
-                        priority_rank=0,
-                        rotation_source="AAPL",
-                        rotation_target="ABBV",
-                    )
-
-                    decisions["ABBV"] = make_decision(
-                        "buy",
-                        1,
-                        (
-                            f"ABBV: Rotation BUY after AAPL sale "
-                            f"(ABBV={abbv_prob:.3f}, AAPL={aapl_prob:.3f})."
-                        ),
-                        recalc_after_sells=True,
-                        priority_rank=1,
-                        rotation_source="AAPL",
-                        rotation_target="ABBV",
-                    )
+    # Resize validated entries with potential proceeds without evaluating the
+    # signal twice (mean-reversion confirmation counts are cycle-based).
+    for sym in core_symbols:
+        decision = decisions[sym]
+        if shares_now.get(sym, 0.0) > 0 or not is_new_entry_allowed(sym):
+            continue
+        if decision.get("action") != "buy" and not decision.get("entry_candidate"):
+            continue
+        capital = candidate_cash(sym)
+        price = float(prices.get(sym, 0.0) or 0.0)
+        fraction = (1.0 if sym == "NVDA" else
+                    float(RISK_FRACTION) if (len(core_symbols) > 2 or
+                    (len(core_symbols) == 2 and concurrent_buys == 2)) else 1.0)
+        qty = apply_position_limits(
+            int(capital * fraction // price) if price > 0 else 0, price, capital, sym,
+            is_confirmed_rebuy=bool(decision.get("confirmed_rebuy")),
+            initial_exposure_pct=decision.get("initial_exposure_pct"),
+        )
+        if qty > 0:
+            decisions[sym] = dict(decision, action="buy", qty=qty,
+                                  explain=f"{sym}: validated entry sized with potential funding.")
 
     # ---------------------------------------------------------
     # 4.5) BUY CONFIRMATION GUARDRAIL
@@ -3075,197 +2891,13 @@ def compute_strategy_decisions(
                     f"{sym}: BUY blocked by chase guardrail ({detail}).",
                 )
 
-    # ---------------------------------------------------------
-    # 4.7) ROTATION: If NVDA wants BUY and AAPL is not BUY, sell AAPL to fund NVDA
-    # ---------------------------------------------------------
-    if "NVDA" in core_symbols and "AAPL" in core_symbols:
-        nvda_d = decisions.get("NVDA") or {}
-        aapl_d = decisions.get("AAPL") or {}
-
-        # Use the guarded strategy decision. Raw probability alone must not
-        # resurrect a BUY blocked by entry, risk, or pyramid controls.
-        nvda_wants_buy = (
-            nvda_d.get("action") == "buy"
-            and float(pms["NVDA"].data.get("shares", 0.0) or 0.0) <= 0
-        )
-        aapl_is_not_buy = (aapl_d.get("action") in ("hold", "sell")) and (
-            preds.get("AAPL", 0.0) < BUY_THRESHOLD + 0.05
-        )
-
-        if nvda_wants_buy and aapl_is_not_buy:
-            aapl_sh = float(pms["AAPL"].data.get("shares", 0.0) or 0.0)
-            if aapl_sh > 0:
-                decisions["AAPL"] = make_decision(
-                    "sell",
-                    int(aapl_sh),
-                    "AAPL: Sold to fund NVDA rotation buy.",
-                )
-
-            # mark NVDA as priority buy (main.py will recalc after sells)
-            decisions["NVDA"] = make_decision(
-                "buy",
-                1,
-                "NVDA PRIORITY BUY - recalc all-in after sells (AAPL rotation + SPY liquidation if any).",
-                recalc_all_in=True,
-                priority_rank=1,
-            )
-
-    # ---------------------------------------------------------
-    # 5) FINAL ENFORCEMENT: a guarded new core BUY may sell SPY for funding.
-    # ---------------------------------------------------------
-    # Funding rotation is for opening a guarded core position. Do not sell SPY
-    # or another holding merely to enlarge an existing core position. A normal
-    # pyramid BUY can still use available cash through should_trade().
-    funding_candidates = [
-        sym for sym in ("NVDA", "AAPL", "ABBV", "PLTR") if sym in core_symbols
-    ]
-    funding_shares = {
-        sym: float(pms[sym].data.get("shares", 0.0) or 0.0)
-        for sym in funding_candidates
-    }
-    wanted = _eligible_rotation_targets(funding_candidates, decisions, funding_shares)
-
-    if wanted:
-        sh_spy = float(spy_shares() or 0.0)
-
-        # --------------------------------------------
-        # Funding sanity: only do "recalc after sells"
-        # if we can actually raise cash.
-        # --------------------------------------------
-        # Anything we can liquidate this cycle?
-        has_other_core_positions = any(
-            float(pms[s].data.get("shares", 0.0) or 0.0) > 0.0
-            for s in core_symbols
-            if s
-            not in (
-                "NVDA",
-                "AAPL",
-                "ABBV",
-                "PLTR",
-            )  # exclude targets; optional but recommended
-        )
-
-        has_funding = (sh_spy > 0.0) or has_other_core_positions
-
-        if not has_funding:
-            # Nothing to sell -> don't emit fake "priority buy recalc" intents
-            # Just keep the earlier computed decisions (including guardrail HOLDs).
-            return decisions
-
-        # If we DO have SPY, sell it to fund core
-        if sh_spy > 0.0:
-            decisions[spy_sym] = make_decision(
-                "sell",
-                int(sh_spy),
-                f"{spy_sym}: SELL (rotate into core) - core BUY intent: {', '.join(wanted)}.",
-            )
-
-        # --------------------------------------------
-        # mark priority buys for main.py to recalc AFTER sells
-        # --------------------------------------------
-        if "NVDA" in wanted:
-            decisions["NVDA"] = make_decision(
-                "buy",
-                1,
-                "NVDA PRIORITY BUY - recalc all-in after sells (SPY liquidation).",
-                recalc_all_in=True,
-                priority_rank=1,
-            )
-
-            # choose best secondary among AAPL, ABBV, PLTR
-            secondary = None
-            secondary_candidates = {}
-            for sym in ["AAPL", "ABBV", "PLTR"]:
-                if sym in wanted:
-                    secondary_candidates[sym] = preds.get(sym, 0.0)
-
-            if secondary_candidates:
-                # Pick highest probability with margin
-                sorted_candidates = sorted(
-                    secondary_candidates.items(), key=lambda x: x[1], reverse=True
-                )
-                if len(sorted_candidates) == 1:
-                    secondary = sorted_candidates[0][0]
-                else:
-                    best = sorted_candidates[0]
-                    second_best = sorted_candidates[1]
-                    if best[1] > second_best[1] + rs_margin:
-                        secondary = best[0]
-                    else:
-                        # Too close - keep incumbent
-                        for sym, _ in sorted_candidates:
-                            if float(pms[sym].data.get("shares", 0)) > 0:
-                                secondary = sym
-                                break
-                        if secondary is None:
-                            secondary = best[0]
-
-            if secondary:
-                decisions[secondary] = make_decision(
-                    "buy",
-                    1,
-                    f"{secondary} BUY intent - secondary to NVDA (after sells).",
-                    recalc_after_sells=True,
-                    priority_rank=2,
-                )
-
-        else:
-            # NVDA not wanted -> pick best of AAPL/ABBV/PLTR if any
-            secondary = None
-            secondary_candidates = {}
-            for sym in ["AAPL", "ABBV", "PLTR"]:
-                if sym in wanted:
-                    secondary_candidates[sym] = preds.get(sym, 0.0)
-
-            if secondary_candidates:
-                sorted_candidates = sorted(
-                    secondary_candidates.items(), key=lambda x: x[1], reverse=True
-                )
-                if len(sorted_candidates) == 1:
-                    secondary = sorted_candidates[0][0]
-                else:
-                    best = sorted_candidates[0]
-                    second_best = sorted_candidates[1]
-                    if best[1] > second_best[1] + rs_margin:
-                        secondary = best[0]
-                    else:
-                        for sym, _ in sorted_candidates:
-                            if float(pms[sym].data.get("shares", 0)) > 0:
-                                secondary = sym
-                                break
-                        if secondary is None:
-                            secondary = best[0]
-
-            if secondary:
-                decisions[secondary] = make_decision(
-                    "buy",
-                    1,
-                    f"{secondary} PRIORITY BUY - recalc all-in after sells (SPY liquidation).",
-                    recalc_all_in=True,
-                    priority_rank=1,
-                )
-
-        # When core wants to buy, we do NOT allow SPY buy this cycle
-        return decisions
-
-    # ---------------------------------------------------------
-    # 6) If no core buy intent, allow SPY candidate (entry/exit) with mutual exclusive rules
-    # ---------------------------------------------------------
-    if spy_candidate is not None:
-        if (not SPY_MUTUAL_EXCLUSIVE) or (
-            not _any_stock_trade(decisions, core_symbols)
-        ):
-            decisions[spy_sym] = spy_candidate
-        else:
-            decisions[spy_sym] = make_decision(
-                "hold", 0, f"{spy_sym}: Mutual-exclusive - > skipping SPY this cycle."
-            )
-
     # ============================================================
     # GUARDED RELATIVE-MOMENTUM ENTRY
     # ============================================================
     relative_candidates = []
     for sym in core_symbols if RELATIVE_MOMENTUM_ENTRY_ENABLED else []:
+        if not is_new_entry_allowed(sym):
+            continue
         qualifies, score, reason = check_relative_momentum_entry(
             sym, diagnostics, preds
         )
@@ -3337,8 +2969,11 @@ def compute_strategy_decisions(
             size_multiplier,
             initial_exposure_pct,
             confirmed_rebuy,
-        ) = max(relative_candidates)
-        cash = float(account_state.get("cash", 0.0) or 0.0)
+        ) = max(relative_candidates, key=lambda item: (
+            item[1] == "NVDA",
+            item[0], item[1],
+        ))
+        cash = candidate_cash(relative_symbol)
         price = float(prices.get(relative_symbol, 0.0) or 0.0)
         buy_qty = (
             int((cash * float(RISK_FRACTION) * size_multiplier) // price)
@@ -3360,8 +2995,8 @@ def compute_strategy_decisions(
             ),
         )
         if buy_qty > 0:
-            # Prefer the strongest confirmed relative-momentum candidate over
-            # simultaneous unconfirmed model-only entries.
+            # NVDA retains entry priority; otherwise prefer the strongest
+            # confirmed relative-momentum candidate over model-only entries.
             for sym in core_symbols:
                 existing = decisions.get(sym) or {}
                 if (
@@ -3395,6 +3030,24 @@ def compute_strategy_decisions(
     # ============================================================
     for sym in core_symbols:
         if not is_new_entry_allowed(sym):
+            continue
+        existing = decisions.get(sym) or {}
+        # A later override must not replace guarded sizing or its provenance.
+        if existing.get("action") == "buy":
+            continue
+        d = _diag(sym)
+        session_return = _safe_float(d.get("session_return"), None)
+        if (
+            d.get("movement_expected") is False
+            or (session_return is not None and session_return <= float(BUY_SESSION_RETURN_FLOOR))
+            or _block_buy_on_pullback(sym)
+            or _block_buy_on_weak_volume(sym)
+            or _block_buy_overbought(sym)
+            or _momentum_entry_is_extended(d)[0]
+        ):
+            continue
+        allowed, _reason = _rebuy_allowed(sym, preds.get(sym, 0.0), diagnostics)
+        if not allowed:
             continue
         force_buy, reason = check_momentum_breakout(sym, diagnostics, preds)
 
@@ -3477,6 +3130,8 @@ def compute_strategy_decisions(
                 continue
             if not is_new_entry_allowed(sym):
                 continue
+            if decision.get("relative_momentum") or decision.get("nvda_guarded_momentum"):
+                continue
 
             prob = float(preds.get(sym, 0.0) or 0.0)
 
@@ -3500,7 +3155,13 @@ def compute_strategy_decisions(
                             pm = pms.get(sym)
                             if pm:
                                 cash = float(pm.data.get("cash", 0.0))
-                                new_qty = int(cash * 0.98 / price)
+                                new_qty = apply_position_limits(
+                                    int(cash * 0.98 / price), price, cash, sym,
+                                    current_position_value=float(pm.data.get("shares", 0.0) or 0.0) * price,
+                                    is_pyramid=bool(decision.get("pyramid")),
+                                    is_confirmed_rebuy=bool(decision.get("confirmed_rebuy")),
+                                    initial_exposure_pct=decision.get("initial_exposure_pct"),
+                                )
 
                                 if new_qty > decision.get("qty", 0):
                                     old_qty = decision.get("qty", 0)
@@ -3512,28 +3173,78 @@ def compute_strategy_decisions(
                     except Exception as e:
                         print(f"[ERROR] Dip-buy: {e}")
 
-    # ---------------------------------------------------------
-    # WEAK-MARKET BUY BLOCKER (core symbols only)
-    # ---------------------------------------------------------
-    market_weak = _weak_market(symbols, preds)
-
-    if market_weak:
-        print(
-            f"WEAK-MARKET FILTER: Blocking ordinary core BUYs; confirmed "
-            f"guarded entries capped at "
-            f"{float(WEAK_MARKET_GUARDED_ENTRY_EQUITY_PCT):.1%} "
-            f"(prob_threshold={WEAK_PROB_THRESHOLD:.2f}, "
-            f"prob_ratio_threshold={WEAK_RATIO_THRESHOLD:.2f}, "
-            f"price_ratio_threshold={PRICE_WEAK_RATIO_THRESHOLD:.2f})"
-        )
-        equity = _safe_float((account_state or {}).get("equity"), 0.0) or 0.0
+    # Finalize eligibility and capped quantities before creating funding SELLs.
+    if market_is_weak:
         decisions = _apply_weak_market_buy_filter(
-            decisions,
-            core_symbols,
-            equity=equity,
+            decisions, core_symbols,
+            equity=_safe_float((account_state or {}).get("equity"), 0.0) or 0.0,
             prices=prices,
         )
-        return decisions
-    else:
-        print("WEAK-MARKET: market NOT weak (no filter applied).")
-        return decisions
+
+    # Enforce the secondary-entry count after every candidate/override exists.
+    new_secondaries = [sym for sym in core_symbols if sym in ("AAPL", "ABBV", "PLTR")
+                       and shares_now.get(sym, 0.0) <= 0
+                       and (decisions.get(sym) or {}).get("action") == "buy"]
+    nvda_new_buy = ((decisions.get("NVDA") or {}).get("action") == "buy"
+                    and shares_now.get("NVDA", 0.0) <= 0)
+    secondary_limit = max(0, int(MAX_NEW_SECONDARY_BUYS_WITH_NVDA if nvda_new_buy
+                                 else MAX_NEW_SECONDARY_BUYS_PER_CYCLE))
+    new_secondaries.sort(key=lambda sym: (preds.get(sym, 0.0), sym), reverse=True)
+    for sym in new_secondaries[secondary_limit:]:
+        decisions[sym] = make_decision("hold", 0, f"{sym}: secondary-entry cycle limit.")
+
+    # Reserve one shared budget, NVDA first. Only whole-share funding actually
+    # needed for each capped purchase is planned; no placeholders or all-in flags.
+    budget = cash_now + independent_proceeds
+    targets = [sym for sym in core_symbols if (decisions.get(sym) or {}).get("action") == "buy"]
+    targets.sort(key=lambda sym: (sym != "NVDA", -preds.get(sym, 0.0), sym))
+    reserved_sources = set()
+    for rank, sym in enumerate(targets, 1):
+        decision = decisions[sym]
+        price = float(prices.get(sym, 0.0) or 0.0)
+        current_value = max(0.0, shares_now.get(sym, 0.0)) * price
+        sources = [source for source in funding_sources(sym)
+                   if source["symbol"] not in reserved_sources]
+        potential_cash = budget + sum(int(source["shares"]) * float(source["price"] or 0.0)
+                                      for source in sources if not source["independently_buying"])
+        if current_value > 0:
+            potential_cash = budget
+            sources = []  # Never liquidate another position for a pyramid.
+        qty = apply_position_limits(
+            int(decision.get("qty", 0)), price, potential_cash, sym,
+            current_position_value=current_value,
+            is_pyramid=bool(decision.get("pyramid")),
+            is_confirmed_rebuy=bool(decision.get("confirmed_rebuy")),
+            initial_exposure_pct=decision.get("initial_exposure_pct"),
+        )
+        if qty <= 0 or price <= 0 or not is_new_entry_allowed(sym):
+            decisions[sym] = make_decision("hold", 0, f"{sym}: final sizing or entry policy blocked BUY.")
+            continue
+        plan = plan_entry_funding(target=sym, target_qty=qty, target_price=price,
+                                  cash=budget, sources=sources, target_validated=True,
+                                  cash_fraction=float(MAX_POSITION_SIZE_PCT))
+        # If full funding is unavailable, use only existing shared cash.
+        if not plan["funded"]:
+            qty = min(qty, int(max(0.0, budget) // price))
+        if qty <= 0:
+            decisions[sym] = make_decision("hold", 0, f"{sym}: insufficient funding.")
+            continue
+        for sale in plan["sales"]:
+            source = sale["symbol"]
+            reserved_sources.add(source)
+            decisions[source] = make_decision(
+                "sell", sale["qty"], f"{source}: Sold to fund {sym} capped BUY.",
+                funding_sell=True, funding_target=sym, priority_rank=0,
+            )
+            budget += sale["qty"] * float(prices[source])
+        decision.update(qty=qty, max_buy_qty=qty, priority_rank=rank,
+                        funding_sources=[sale["symbol"] for sale in plan["sales"]])
+        budget = max(0.0, budget - qty * price)
+
+    # SPY sees the final core decisions, including weak-market rejections.
+    if spy_candidate is not None and not (decisions.get(spy_sym) or {}).get("funding_sell"):
+        if not SPY_MUTUAL_EXCLUSIVE or not _any_stock_trade(decisions, core_symbols):
+            decisions[spy_sym] = spy_candidate
+        else:
+            decisions[spy_sym] = make_decision("hold", 0, f"{spy_sym}: mutual-exclusive core trade.")
+    return cancel_orphaned_funding_sells(decisions)

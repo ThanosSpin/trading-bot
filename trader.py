@@ -517,11 +517,19 @@ def execute_trade(action, quantity, symbol, decision=None):
             f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})"
         )
 
+        # Keep the batch from spending proceeds while cancellation/terminal
+        # status is unresolved. The executor still records any confirmed fill.
+        if isinstance(decision, dict):
+            decision["execution_pending"] = True
         result = _wait_for_terminal_order(client, order.id)
 
         filled_qty = float(getattr(result, "filled_qty", 0) or 0)
         filled_price = float(getattr(result, "filled_avg_price", 0) or 0)
         final_status = str(getattr(result, "status", "unknown")).lower()
+        if isinstance(decision, dict):
+            decision["execution_pending"] = final_status not in {
+                "filled", "canceled", "cancelled", "rejected", "expired"
+            }
 
         if filled_qty <= 0:
             print(f"[LIVE] Order for {symU} ended status={final_status} with no fill.")
