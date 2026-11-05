@@ -1775,7 +1775,9 @@ def should_trade(
                     f"from entry ${avg_cost:.2f} (chasing prevention).",
                 )
 
-        # -- Guard 2c: block pyramid if SPY is declining -------------------
+        # -- Guard 2c: reduce pyramid size if SPY is declining -------------
+        pyramid_size_multiplier = 1.0
+        pyramid_market_note = ""
         try:
             spy_df = fetch_historical_data("SPY", period="5d", interval="15m")
             if spy_df is not None and len(spy_df) >= 8:
@@ -1786,11 +1788,10 @@ def should_trade(
                 spy_2h_ago = float(spy_close.iloc[-8])  # ~2h ago (8 x 15min bars)
                 spy_trend = (spy_recent - spy_2h_ago) / spy_2h_ago
                 if spy_trend < -0.01:  # SPY down more than 1% across eight bars
-                    return make_decision(
-                        "hold",
-                        0,
-                        explain + f"HOLD - pyramid blocked, SPY declining "
-                        f"{spy_trend:.2%} over 2h.",
+                    pyramid_size_multiplier = 0.50
+                    pyramid_market_note = (
+                        f" Size reduced 50% because SPY declined "
+                        f"{spy_trend:.2%} over 2h."
                     )
         except Exception:
             pass
@@ -1823,6 +1824,10 @@ def should_trade(
             current_position_value=shares * price,
             is_pyramid=True,
         )
+        if qty > 0 and pyramid_size_multiplier < 1.0:
+            # Preserve a valid one-share opportunity while halving every
+            # larger addition after the ordinary cash and exposure caps.
+            qty = max(1, int(qty * pyramid_size_multiplier))
 
         # A sell cooldown blocks every new BUY, including pyramid adds.
         allowed, cooldown_reason = _rebuy_allowed(
@@ -1843,7 +1848,8 @@ def should_trade(
                 "buy",
                 qty,
                 explain + f"PYRAMID BUY - adding to position "
-                f"(current={shares:g}, new={qty}, prob={prob_up:.3f}).",
+                f"(current={shares:g}, new={qty}, prob={prob_up:.3f})."
+                + pyramid_market_note,
                 pyramid=True,
             )
         else:

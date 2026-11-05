@@ -494,7 +494,8 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertIn("entry blocked while session return", decision["explain"])
 
     def _pyramid_decision(self, *, price=101.0, avg_price=100.0,
-                          session_return=0.01, intraday_mom=0.005):
+                          session_return=0.01, intraday_mom=0.005,
+                          spy_return=None):
         pm = SimpleNamespace(
             data={
                 "shares": 10,
@@ -517,10 +518,15 @@ class ExecutionGuardTests(unittest.TestCase):
                 "volume_time_ratio": 1.1,
             }
         }
+        spy_history = None
+        if spy_return is not None:
+            spy_history = strategy.pd.DataFrame(
+                {"Close": [100.0] * 7 + [100.0 * (1.0 + spy_return)]}
+            )
         with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
             strategy, "fetch_latest_price", return_value=price
         ), patch.object(
-            strategy, "fetch_historical_data", return_value=None
+            strategy, "fetch_historical_data", return_value=spy_history
         ), patch.object(
             strategy.account_cache,
             "get_account",
@@ -548,6 +554,20 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(decision["action"], "buy")
         self.assertTrue(decision["pyramid"])
         self.assertEqual(decision["qty"], 831)
+
+    def test_spy_decline_halves_pyramid_instead_of_blocking(self):
+        decision = self._pyramid_decision(spy_return=-0.0271)
+        self.assertEqual(decision["action"], "buy")
+        self.assertTrue(decision["pyramid"])
+        self.assertEqual(decision["qty"], 415)
+        self.assertIn("Size reduced 50%", decision["explain"])
+        self.assertIn("SPY declined -2.71% over 2h", decision["explain"])
+
+    def test_spy_decline_above_trigger_keeps_full_pyramid_size(self):
+        decision = self._pyramid_decision(spy_return=-0.009)
+        self.assertEqual(decision["action"], "buy")
+        self.assertEqual(decision["qty"], 831)
+        self.assertNotIn("Size reduced", decision["explain"])
 
     def test_pyramid_requires_vwap_relative_strength_and_normalized_volume(self):
         pm = SimpleNamespace(
