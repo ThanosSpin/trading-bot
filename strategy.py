@@ -81,6 +81,7 @@ from config import (
     COST_AWARE_MIN_HYSTERESIS,
     MODEL_REBUY_BUFFER,
     MODEL_PYRAMID_BUFFER,
+    MODEL_FULL_PYRAMID_BUFFER,
     MODEL_MIN_CLASS_BOUNDARY,
     AAPL_MODEL_MIN_CLASS_BOUNDARY,
     BUY_SESSION_RETURN_FLOOR,
@@ -918,6 +919,13 @@ def _effective_pyramid_threshold(
     return round(min(0.99, base_buy + float(MODEL_PYRAMID_BUFFER)), 12)
 
 
+def _effective_full_pyramid_threshold(
+    sym: str, diagnostics: Dict[str, dict] = None
+) -> float:
+    base_buy = _effective_buy_threshold(sym, diagnostics)
+    return round(min(0.99, base_buy + float(MODEL_FULL_PYRAMID_BUFFER)), 12)
+
+
 def exceptional_initial_exposure_pct(
     sym: str,
     probability: float,
@@ -1619,6 +1627,9 @@ def should_trade(
     effective_buy_threshold = _effective_buy_threshold(symbol, diagnostics)
     effective_sell_threshold = _effective_sell_threshold(symbol, diagnostics)
     effective_pyramid_threshold = _effective_pyramid_threshold(symbol, diagnostics)
+    effective_full_pyramid_threshold = _effective_full_pyramid_threshold(
+        symbol, diagnostics
+    )
 
     if shares > 0 or prob_up < effective_buy_threshold:
         _session_state["mr_reversal_counts"].pop(symbol.upper(), None)
@@ -1777,7 +1788,13 @@ def should_trade(
 
         # -- Guard 2c: reduce pyramid size if SPY is declining -------------
         pyramid_size_multiplier = 1.0
-        pyramid_market_note = ""
+        pyramid_size_reasons = []
+        if prob_up < effective_full_pyramid_threshold:
+            pyramid_size_multiplier *= 0.50
+            pyramid_size_reasons.append(
+                f"probability {prob_up:.3f} is below the full-size threshold "
+                f"{effective_full_pyramid_threshold:.3f}"
+            )
         try:
             spy_df = fetch_historical_data("SPY", period="5d", interval="15m")
             if spy_df is not None and len(spy_df) >= 8:
@@ -1788,13 +1805,19 @@ def should_trade(
                 spy_2h_ago = float(spy_close.iloc[-8])  # ~2h ago (8 x 15min bars)
                 spy_trend = (spy_recent - spy_2h_ago) / spy_2h_ago
                 if spy_trend < -0.01:  # SPY down more than 1% across eight bars
-                    pyramid_size_multiplier = 0.50
-                    pyramid_market_note = (
-                        f" Size reduced 50% because SPY declined "
-                        f"{spy_trend:.2%} over 2h."
+                    pyramid_size_multiplier *= 0.50
+                    pyramid_size_reasons.append(
+                        f"SPY declined {spy_trend:.2%} over 2h"
                     )
         except Exception:
             pass
+        pyramid_size_note = ""
+        if pyramid_size_reasons:
+            pyramid_size_note = (
+                f" Size reduced to {pyramid_size_multiplier:.0%} because "
+                + " and ".join(pyramid_size_reasons)
+                + "."
+            )
 
         # ---------------------------------------------------------
         # Only allow pyramiding above the stronger pyramid threshold
@@ -1849,7 +1872,7 @@ def should_trade(
                 qty,
                 explain + f"PYRAMID BUY - adding to position "
                 f"(current={shares:g}, new={qty}, prob={prob_up:.3f})."
-                + pyramid_market_note,
+                + pyramid_size_note,
                 pyramid=True,
             )
         else:

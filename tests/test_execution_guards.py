@@ -422,7 +422,7 @@ class ExecutionGuardTests(unittest.TestCase):
             threshold = strategy._effective_buy_threshold("NVDA", diagnostics)
         self.assertAlmostEqual(threshold, 0.57)
 
-    def test_reduced_pyramid_buffer_keeps_absolute_confidence_floor(self):
+    def test_pyramid_thresholds_have_half_and_full_size_tiers(self):
         diagnostics = {
             "NVDA": {
                 "decision_threshold": 0.45,
@@ -437,10 +437,16 @@ class ExecutionGuardTests(unittest.TestCase):
             strategy, "FINAL_15_MIN_BUY_BUFFER", 0.0
         ):
             self.assertAlmostEqual(
-                strategy._effective_pyramid_threshold("NVDA", diagnostics), 0.65
+                strategy._effective_pyramid_threshold("NVDA", diagnostics), 0.575
             )
             self.assertAlmostEqual(
-                strategy._effective_pyramid_threshold("AAPL", diagnostics), 0.67
+                strategy._effective_pyramid_threshold("AAPL", diagnostics), 0.625
+            )
+            self.assertAlmostEqual(
+                strategy._effective_full_pyramid_threshold("NVDA", diagnostics), 0.60
+            )
+            self.assertAlmostEqual(
+                strategy._effective_full_pyramid_threshold("AAPL", diagnostics), 0.65
             )
 
     def test_invalid_artifact_threshold_uses_valid_daily_value(self):
@@ -495,7 +501,7 @@ class ExecutionGuardTests(unittest.TestCase):
 
     def _pyramid_decision(self, *, price=101.0, avg_price=100.0,
                           session_return=0.01, intraday_mom=0.005,
-                          spy_return=None):
+                          spy_return=None, probability=0.90):
         pm = SimpleNamespace(
             data={
                 "shares": 10,
@@ -532,7 +538,7 @@ class ExecutionGuardTests(unittest.TestCase):
             "get_account",
             return_value={"equity": 100000.0},
         ):
-            return strategy.should_trade("NVDA", 0.90, diagnostics=diagnostics)
+            return strategy.should_trade("NVDA", probability, diagnostics=diagnostics)
 
     def test_pyramid_requires_profitable_existing_position(self):
         decision = self._pyramid_decision(price=99.8, avg_price=100.0)
@@ -560,7 +566,7 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(decision["action"], "buy")
         self.assertTrue(decision["pyramid"])
         self.assertEqual(decision["qty"], 415)
-        self.assertIn("Size reduced 50%", decision["explain"])
+        self.assertIn("Size reduced to 50%", decision["explain"])
         self.assertIn("SPY declined -2.71% over 2h", decision["explain"])
 
     def test_spy_decline_above_trigger_keeps_full_pyramid_size(self):
@@ -568,6 +574,26 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(decision["action"], "buy")
         self.assertEqual(decision["qty"], 831)
         self.assertNotIn("Size reduced", decision["explain"])
+
+    def test_intermediate_confidence_allows_half_size_pyramid(self):
+        decision = self._pyramid_decision(probability=0.59)
+        self.assertEqual(decision["action"], "buy")
+        self.assertEqual(decision["qty"], 415)
+        self.assertIn("Size reduced to 50%", decision["explain"])
+        self.assertIn("full-size threshold 0.600", decision["explain"])
+
+    def test_below_minimum_pyramid_buffer_remains_blocked(self):
+        decision = self._pyramid_decision(probability=0.574)
+        self.assertEqual(decision["action"], "hold")
+        self.assertIn("pyramiding requires prob>=0.575", decision["explain"])
+
+    def test_confidence_and_spy_reductions_compound_to_quarter_size(self):
+        decision = self._pyramid_decision(
+            probability=0.59, spy_return=-0.0271
+        )
+        self.assertEqual(decision["action"], "buy")
+        self.assertEqual(decision["qty"], 207)
+        self.assertIn("Size reduced to 25%", decision["explain"])
 
     def test_pyramid_requires_vwap_relative_strength_and_normalized_volume(self):
         pm = SimpleNamespace(

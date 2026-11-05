@@ -110,7 +110,10 @@ COST_AWARE_BUY_FLOOR = 0.55
 COST_AWARE_SELL_CEILING = 0.52
 COST_AWARE_MIN_HYSTERESIS = 0.03
 MODEL_REBUY_BUFFER = 0.03
-MODEL_PYRAMID_BUFFER = 0.05
+# A moderately stronger signal may add at half size; retain the prior +0.05
+# confirmation requirement for a full-size pyramid addition.
+MODEL_PYRAMID_BUFFER = 0.025
+MODEL_FULL_PYRAMID_BUFFER = 0.05
 # A trained, cost-aware artifact may lower the legacy entry floor, but never
 # below a neutral class boundary. AAPL retains a slightly higher safety floor.
 MODEL_MIN_CLASS_BOUNDARY = 0.50
