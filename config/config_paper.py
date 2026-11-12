@@ -43,7 +43,7 @@ INITIAL_CAPITAL = 100000
 USE_LIVE_TRADING = True
 ENV_NAME = "paper"
 
-# Shared equity-based sizing now caps initial entries at 25% and confirmed
+# Shared equity-based sizing now caps initial entries at 30% and confirmed
 # pyramids at their total-position ceiling. Keep these legacy per-order limits
 # out of the way so paper exercises the same scaling policy as live.
 MAX_POSITION_SIZE_PCT = 0.90

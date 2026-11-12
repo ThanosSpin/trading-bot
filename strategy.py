@@ -931,7 +931,7 @@ def exceptional_initial_exposure_pct(
     probability: float,
     diagnostics: Dict[str, dict] = None,
 ) -> float:
-    """Keep initial exposure at 25%, including broadly confirmed entries."""
+    """Keep initial exposure at 30%, including broadly confirmed entries."""
     sym = sym.upper()
     default = float(INITIAL_POSITION_EQUITY_PCT)
     core_symbols = {str(s).upper() for s in CORE_CONFIRMED_POSITION_SYMBOLS}

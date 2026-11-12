@@ -97,7 +97,7 @@ NVDA_MOMENTUM_FINAL_PROB_MIN = 0.53
 NVDA_MOMENTUM_MIN_RELATIVE_SESSION = 0.0
 NVDA_MOMENTUM_MIN_RELATIVE_60M = 0.0
 NVDA_MOMENTUM_MIN_VOLUME_TIME_RATIO = 0.20
-NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT = 0.25
+NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT = 0.30
 
 USE_ARTIFACT_THRESHOLDS = True
 ARTIFACT_THRESHOLD_FALLBACK = 0.55
@@ -120,7 +120,7 @@ MODEL_MIN_CLASS_BOUNDARY = 0.50
 AAPL_MODEL_MIN_CLASS_BOUNDARY = 0.55
 # Below this session-return level, a fresh entry needs positive intraday
 # momentum or the confirmed mean-reversion reversal path.
-BUY_SESSION_RETURN_FLOOR = -0.005
+BUY_SESSION_RETURN_FLOOR = -0.01
 # Core-entry volume must be compared with the expected cumulative volume at
 # the same time of day. A partial-session/full-day ratio is structurally low
 # near the open and incorrectly rejects early trends.
@@ -135,7 +135,7 @@ MR_REVERSAL_MIN_RELATIVE_ACCEL = 0.0010
 MR_REVERSAL_MIN_RELATIVE_60M = 0.0
 MR_REVERSAL_MIN_VOLUME_TIME_RATIO = 0.30
 MR_REVERSAL_CONFIRM_CYCLES = 2
-MR_REVERSAL_INITIAL_POSITION_EQUITY_PCT = 0.125
+MR_REVERSAL_INITIAL_POSITION_EQUITY_PCT = 0.15
 
 SPY_USE_ARTIFACT_THRESHOLDS = True
 SPY_MODEL_ENTRY_BUFFER = 0.03
@@ -236,13 +236,13 @@ PROFIT_TRIGGER_PCT = 0.02  # +2% intraday profit trigger
 MAX_POSITION_SIZE_PCT = 0.90
 MAX_POSITION_SIZE_DOLLARS = None
 # New positions start small enough to leave room for confirmation-based adds.
-INITIAL_POSITION_EQUITY_PCT = 0.25
-EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT = 0.25
+INITIAL_POSITION_EQUITY_PCT = 0.30
+EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT = 0.30
 EXCEPTIONAL_ENTRY_MIN_VOLUME_TIME_RATIO = 0.80
-# Every new position starts at no more than 25%. A confirmed, non-stop same-day
-# rebuy may restart at 50%; NVDA and AAPL may then scale to 85% only after the
+# Every new position starts at no more than 30%. A confirmed, non-stop same-day
+# rebuy may restart at 60%; NVDA and AAPL may then scale to 85% only after the
 # prediction and live confirmation features continue to agree.
-CONFIRMED_REBUY_POSITION_EQUITY_PCT = 0.50
+CONFIRMED_REBUY_POSITION_EQUITY_PCT = 0.60
 CONFIRMED_REBUY_MIN_VOLUME_TIME_RATIO = 0.80
 CORE_CONFIRMED_POSITION_EQUITY_PCT = 0.85
 OTHER_CONFIRMED_POSITION_EQUITY_PCT = 0.75

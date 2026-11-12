@@ -155,7 +155,7 @@ class ExecutionGuardTests(unittest.TestCase):
 
         self.assertTrue(qualifies)
         self.assertIn("NVDA GUARDED MOMENTUM", reason)
-        self.assertIn("initial_exposure=25%", reason)
+        self.assertIn("initial_exposure=30%", reason)
 
     def test_nvda_guarded_momentum_entry_rejects_weak_probability(self):
         diagnostics = {
@@ -486,7 +486,7 @@ class ExecutionGuardTests(unittest.TestCase):
             "ABBV": {
                 "decision_threshold": 0.45,
                 "movement_expected": True,
-                "session_return": -0.006,
+                "session_return": -0.011,
             }
         }
         with patch.object(strategy, "PortfolioManager", return_value=pm), patch.object(
@@ -626,16 +626,16 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(decision["action"], "hold")
         self.assertIn("pyramid confirmation incomplete", decision["explain"])
 
-    def test_initial_position_is_capped_at_twenty_five_percent_equity(self):
+    def test_initial_position_is_capped_at_thirty_percent_equity(self):
         with patch.object(
             strategy.account_cache,
             "get_account",
             return_value={"equity": 100000.0},
         ):
             qty = strategy.apply_position_limits(1000, 100.0, 100000.0, "NVDA")
-        self.assertEqual(qty, 250)
+        self.assertEqual(qty, 300)
 
-    def test_confirmed_rebuy_restarts_at_fifty_percent_equity(self):
+    def test_confirmed_rebuy_restarts_at_sixty_percent_equity(self):
         pm = SimpleNamespace(
             data={"shares": 0, "cash": 100000.0, "avg_price": 0.0},
             refresh_live=lambda: None,
@@ -670,10 +670,10 @@ class ExecutionGuardTests(unittest.TestCase):
 
         self.assertEqual(decision["action"], "buy")
         self.assertTrue(decision["confirmed_rebuy"])
-        self.assertEqual(decision["initial_exposure_pct"], 0.50)
-        self.assertEqual(decision["qty"], 500)
+        self.assertEqual(decision["initial_exposure_pct"], 0.60)
+        self.assertEqual(decision["qty"], 600)
 
-    def test_post_stop_rebuy_keeps_twenty_five_percent_cap(self):
+    def test_post_stop_rebuy_keeps_standard_thirty_percent_cap(self):
         strategy._session_state["buys"].add("NVDA")
         strategy._session_state["stop_exits"]["NVDA"] = {
             "timestamp": (
@@ -696,7 +696,7 @@ class ExecutionGuardTests(unittest.TestCase):
 
         self.assertEqual(
             strategy.confirmed_rebuy_exposure_pct("NVDA", 0.90, diagnostics),
-            0.25,
+            0.30,
         )
 
     def test_confirmed_mr_reversal_enters_small_before_momentum_crosses_zero(self):
@@ -731,7 +731,7 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(first["action"], "hold")
         self.assertIn("reversal confirmation 1/2", first["explain"])
         self.assertEqual(second["action"], "buy")
-        self.assertEqual(second["qty"], 125)
+        self.assertEqual(second["qty"], 150)
         self.assertTrue(second["mr_reversal"])
         self.assertIn("MR REVERSAL BUY", second["explain"])
 
@@ -777,7 +777,7 @@ class ExecutionGuardTests(unittest.TestCase):
             )
         self.assertEqual(qty, 125)
 
-    def test_confirmed_initial_entry_remains_at_twenty_five_percent(self):
+    def test_confirmed_initial_entry_remains_at_thirty_percent(self):
         diagnostics = {
             "NVDA": {
                 "decision_threshold": 0.50,
@@ -807,8 +807,8 @@ class ExecutionGuardTests(unittest.TestCase):
                 "NVDA",
                 initial_exposure_pct=exposure_pct,
             )
-        self.assertEqual(exposure_pct, 0.25)
-        self.assertEqual(qty, 250)
+        self.assertEqual(exposure_pct, 0.30)
+        self.assertEqual(qty, 300)
 
     def test_confirmed_half_percent_loss_bypasses_minimum_hold(self):
         pm = SimpleNamespace(
@@ -961,7 +961,7 @@ class ExecutionGuardTests(unittest.TestCase):
         }
         self.assertEqual(
             strategy.exceptional_initial_exposure_pct("NVDA", 0.75, diagnostics),
-            0.25,
+            0.30,
         )
 
     def test_secondary_pyramid_total_exposure_is_capped_at_fifty_percent(self):
