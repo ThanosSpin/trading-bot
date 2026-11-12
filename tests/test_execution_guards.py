@@ -437,16 +437,16 @@ class ExecutionGuardTests(unittest.TestCase):
             strategy, "FINAL_15_MIN_BUY_BUFFER", 0.0
         ):
             self.assertAlmostEqual(
-                strategy._effective_pyramid_threshold("NVDA", diagnostics), 0.575
+                strategy._effective_pyramid_threshold("NVDA", diagnostics), 0.555
             )
             self.assertAlmostEqual(
-                strategy._effective_pyramid_threshold("AAPL", diagnostics), 0.625
+                strategy._effective_pyramid_threshold("AAPL", diagnostics), 0.605
             )
             self.assertAlmostEqual(
-                strategy._effective_full_pyramid_threshold("NVDA", diagnostics), 0.60
+                strategy._effective_full_pyramid_threshold("NVDA", diagnostics), 0.575
             )
             self.assertAlmostEqual(
-                strategy._effective_full_pyramid_threshold("AAPL", diagnostics), 0.65
+                strategy._effective_full_pyramid_threshold("AAPL", diagnostics), 0.625
             )
 
     def test_invalid_artifact_threshold_uses_valid_daily_value(self):
@@ -576,16 +576,16 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertNotIn("Size reduced", decision["explain"])
 
     def test_intermediate_confidence_allows_half_size_pyramid(self):
-        decision = self._pyramid_decision(probability=0.59)
+        decision = self._pyramid_decision(probability=0.56)
         self.assertEqual(decision["action"], "buy")
         self.assertEqual(decision["qty"], 415)
         self.assertIn("Size reduced to 50%", decision["explain"])
-        self.assertIn("full-size threshold 0.600", decision["explain"])
+        self.assertIn("full-size threshold 0.575", decision["explain"])
 
     def test_below_minimum_pyramid_buffer_remains_blocked(self):
-        decision = self._pyramid_decision(probability=0.574)
+        decision = self._pyramid_decision(probability=0.554)
         self.assertEqual(decision["action"], "hold")
-        self.assertIn("pyramiding requires prob>=0.575", decision["explain"])
+        self.assertIn("pyramiding requires prob>=0.555", decision["explain"])
 
     def test_confidence_and_spy_reductions_compound_to_quarter_size(self):
         decision = self._pyramid_decision(
