@@ -1996,6 +1996,11 @@ def compute_signals(
     market_session = get_market_session()
     results["market_session"] = market_session
     is_extended_session = market_session in {"pre_market", "after_hours"}
+    if is_extended_session:
+        results["intraday_momentum_fresh"] = False
+        results["intraday_momentum_freshness_reason"] = (
+            "current_session_momentum_not_confirmed"
+        )
 
     model_daily = load_model(symU, mode="daily")
     model_intra_mr = load_model(symU, mode="intraday_mr")
