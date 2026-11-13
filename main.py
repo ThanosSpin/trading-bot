@@ -7,7 +7,7 @@ from predictive_model.data_loader import (
     fetch_latest_price,
     fetch_previous_close,
 )
-from market import is_market_open, debug_market, is_trading_day
+from market import is_market_open, is_extended_hours, debug_market, is_trading_day
 from predictive_model.model_xgb import compute_signals
 from strategy import (
     compute_strategy_decisions,
@@ -59,6 +59,7 @@ from config import (
     SPY_EXIT_THRESHOLD,
     SPY_MUTUAL_EXCLUSIVE,
     MAX_POSITION_SIZE_PCT,
+    EXTENDED_HOURS_TRADING_ENABLED,
     PAPER_TRADE_SYMBOLS,
     USE_LIVE_TRADING,
     PAPER_TRADE_NOTES,
@@ -1699,7 +1700,10 @@ def main():
 
     # Optional market-hours guard
     force_run_closed = os.getenv("FORCE_RUN_CLOSED", "0") == "1"
-    if not force_run_closed and not is_market_open():
+    session_open = is_market_open() or (
+        EXTENDED_HOURS_TRADING_ENABLED and is_extended_hours()
+    )
+    if not force_run_closed and not session_open:
         print("⏳ Market is closed. Exiting.")
         return
 

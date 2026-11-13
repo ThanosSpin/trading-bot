@@ -8,9 +8,16 @@ from collections import defaultdict
 from broker import get_trading_api
 from pdt.pdt_tracker import add_opened_today, reduce_opened_today
 
-from config import USE_LIVE_TRADING, PAPER_TRADE_SYMBOLS, ORDER_FILL_TIMEOUT_SECONDS
+from config import (
+    USE_LIVE_TRADING,
+    PAPER_TRADE_SYMBOLS,
+    ORDER_FILL_TIMEOUT_SECONDS,
+    EXTENDED_HOURS_TRADING_ENABLED,
+    EXTENDED_HOURS_MAX_SPREAD_PCT,
+    EXTENDED_HOURS_MAX_QUOTE_AGE_SECONDS,
+)
 from entry_policy import is_new_entry_allowed
-from market import is_market_open, is_trading_day
+from market import is_market_open, is_trading_day, get_market_session
 from predictive_model.data_loader import fetch_latest_price
 from portfolio import PortfolioManager
 
@@ -269,6 +276,55 @@ def _get_live_price(symbol):
     return fetch_latest_price(symU)
 
 
+def _extended_hours_limit_price(client, symbol, side):
+    """Use a fresh, sane NBBO quote as a protective extended-hours limit."""
+    try:
+        quote = client.get_latest_quote(symbol)
+        bid = float(getattr(quote, "bidprice", getattr(quote, "bid_price", 0)) or 0)
+        ask = float(getattr(quote, "askprice", getattr(quote, "ask_price", 0)) or 0)
+        timestamp = getattr(quote, "timestamp", getattr(quote, "t", None))
+    except Exception as exc:
+        print(f"[EXTENDED HOURS] No quote for {symbol}; skipping order: {exc}")
+        return None
+
+    if bid <= 0 or ask <= 0 or ask < bid or timestamp is None:
+        print(f"[EXTENDED HOURS] Invalid quote for {symbol}; skipping order.")
+        return None
+
+    if isinstance(timestamp, str):
+        try:
+            timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            timestamp = None
+    if timestamp is None:
+        print(f"[EXTENDED HOURS] Invalid quote timestamp for {symbol}; skipping order.")
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    quote_age = (
+        datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)
+    ).total_seconds()
+    if quote_age < -5 or quote_age > float(EXTENDED_HOURS_MAX_QUOTE_AGE_SECONDS):
+        print(
+            f"[EXTENDED HOURS] Stale quote for {symbol} ({quote_age:.0f}s); "
+            "skipping order."
+        )
+        return None
+
+    midpoint = (bid + ask) / 2.0
+    spread_pct = (ask - bid) / midpoint
+    if spread_pct > float(EXTENDED_HOURS_MAX_SPREAD_PCT):
+        print(
+            f"[EXTENDED HOURS] Wide spread for {symbol} ({spread_pct:.2%}); "
+            "skipping order."
+        )
+        return None
+
+    limit_price = ask if side == "buy" else bid
+    decimals = 2 if limit_price >= 1 else 4
+    return round(limit_price, decimals)
+
+
 # =====================================================================
 # Log paper trade
 # =====================================================================
@@ -348,7 +404,12 @@ def execute_trade(action, quantity, symbol, decision=None):
     # -------------------------------------------------------
     # Market closed?
     # -------------------------------------------------------
-    if not is_trading_day() or not is_market_open():
+    session = get_market_session()
+    extended_session = (
+        EXTENDED_HOURS_TRADING_ENABLED
+        and session in {"pre_market", "after_hours"}
+    )
+    if not is_trading_day() or not (is_market_open() or extended_session):
         print(f"⏳ Market closed → skipping {action.upper()} {symU}.")
         return 0.0, None
 
@@ -437,9 +498,13 @@ def execute_trade(action, quantity, symbol, decision=None):
             # if not is_buy_allowed_by_margin(client, symU, quantity):
             #     return 0.0, None
 
-            price = _get_live_price(symU)
+            price = (
+                _extended_hours_limit_price(client, symU, action)
+                if extended_session
+                else _get_live_price(symU)
+            )
             if not price or price <= 0:
-                print(f"[WARN] No live price for {symU} — skipping BUY.")
+                print(f"[WARN] No usable live price for {symU} — skipping BUY.")
                 return 0.0, None
 
             bp = float(getattr(acct, "buying_power", 0) or 0)
@@ -500,19 +565,36 @@ def execute_trade(action, quantity, symbol, decision=None):
                     f"(broker long position={current_long_qty})"
                 )
 
+            if extended_session:
+                price = _extended_hours_limit_price(client, symU, action)
+                if not price or price <= 0:
+                    return 0.0, None
+
         else:
             print(f"[WARN] Unknown action '{action}' for {symU}")
             return 0.0, None
 
         quantity = float(allowed_qty)
 
-        order = client.submit_order(
-            symbol=symU,
-            qty=quantity,
-            side=action,
-            type="market",
-            time_in_force="gtc",
-        )
+        order_params = {
+            "symbol": symU,
+            "qty": quantity,
+            "side": action,
+        }
+        if extended_session:
+            order_params.update(
+                type="limit",
+                time_in_force="day",
+                limit_price=price,
+                extended_hours=True,
+            )
+            print(
+                f"[EXTENDED HOURS] {action.upper()} {quantity:g} {symU} "
+                f"limit @ ${price:.2f} ({session})"
+            )
+        else:
+            order_params.update(type="market", time_in_force="gtc")
+        order = client.submit_order(**order_params)
         print(
             f"🟢 [LIVE] Submitted {action.upper()} {quantity:g} {symU} (id={order.id})"
         )

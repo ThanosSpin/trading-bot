@@ -24,6 +24,37 @@ def is_trading_day(date=None):
     return not schedule.empty
 
 
+def get_market_session(now=None):
+    """Return the NYSE session currently in progress, including pre/post market."""
+    now_ny = datetime.now(NY_TZ) if now is None else now
+    if now_ny.tzinfo is None:
+        now_ny = NY_TZ.localize(now_ny)
+    else:
+        now_ny = now_ny.astimezone(NY_TZ)
+
+    schedule = nyse.schedule(start_date=now_ny.date(), end_date=now_ny.date())
+    if schedule.empty:
+        return "closed"
+
+    market_open = schedule.iloc[0]["market_open"].astimezone(NY_TZ)
+    market_close = schedule.iloc[0]["market_close"].astimezone(NY_TZ)
+    pre_market_open = now_ny.replace(hour=4, minute=0, second=0, microsecond=0)
+    extended_close = now_ny.replace(hour=20, minute=0, second=0, microsecond=0)
+
+    if market_open <= now_ny <= market_close:
+        return "market_hours"
+    if pre_market_open <= now_ny < market_open:
+        return "pre_market"
+    if market_close < now_ny <= extended_close:
+        return "after_hours"
+    return "closed"
+
+
+def is_extended_hours():
+    """True during weekday pre-market and after-hours sessions supported by Alpaca."""
+    return get_market_session() in {"pre_market", "after_hours"}
+
+
 def is_market_open():
     """
     Accurate, Alpaca-independent market open detection:
