@@ -582,6 +582,10 @@ def get_predictions(symbols, debug=True):
             "intraday_momentum_current_price_time": sig.get(
                 "intraday_momentum_current_price_time"
             ),
+            "pyramid_yahoo_price_fresh": sig.get("pyramid_yahoo_price_fresh"),
+            "pyramid_yahoo_price_age_seconds": sig.get(
+                "pyramid_yahoo_price_age_seconds"
+            ),
             "intraday_momentum_reference_price": sig.get(
                 "intraday_momentum_reference_price"
             ),
@@ -598,10 +602,12 @@ def get_predictions(symbols, debug=True):
             "vwap_slope_4": sig.get("vwap_slope_4"),
             "above_vwap": sig.get("above_vwap"),
             "volume_time_ratio": sig.get("volume_time_ratio"),
+            "volume_time_ratio_source": sig.get("volume_time_ratio_source"),
             "session_volume_pace": sig.get("session_volume_pace"),
             "relative_return_1": sig.get("relative_return_1"),
             "relative_return_2": sig.get("relative_return_2"),
             "relative_return_4": sig.get("relative_return_4"),
+            "relative_return_4_source": sig.get("relative_return_4_source"),
             "relative_strength_accel": sig.get("relative_strength_accel"),
             "relative_session_return": sig.get("relative_session_return"),
             "relative_vwap_strength": sig.get("relative_vwap_strength"),
@@ -786,16 +792,36 @@ def print_signal_diagnostics(decisions, diagnostics):
                 f"{sig.get('intraday_momentum_reference_time') or 'NA'} "
                 f"confirmed={sig.get('intraday_momentum_confirmed')}"
             )
-        if sig.get("relative_market_available"):
+        if (
+            sig.get("relative_market_available")
+            or str(sig.get("relative_return_4_source", "")).startswith(
+                "yfinance_1m_prepost"
+            )
+        ):
             print(
                 f"    [RELATIVE] {sym}: "
                 f"session_vs_SPY={fmt(sig.get('relative_session_return'), 4)} "
                 f"rel_60m={fmt(sig.get('relative_return_4'), 4)} "
+                f"rel_60m_source={sig.get('relative_return_4_source')} "
                 f"accel={fmt(sig.get('relative_strength_accel'), 4)} "
                 f"VWAP={fmt(sig.get('vwap_distance'), 4)} "
                 f"VWAP_slope_2={fmt(sig.get('vwap_slope_2'), 4)} "
                 f"VWAP_slope={fmt(sig.get('vwap_slope_4'), 4)} "
-                f"volume_time={fmt(sig.get('volume_time_ratio'), 2)}"
+                f"volume_time={fmt(sig.get('volume_time_ratio'), 2)} "
+                f"volume_source={sig.get('volume_time_ratio_source')}"
+            )
+        if (
+            sig.get("intraday_momentum_source") == "yfinance_1m_prepost"
+            or sig.get("volume_time_ratio_source") == "extended_session_neutral"
+        ):
+            print(
+                f"    [PYRAMID DATA] price={fmt(sig.get('price'), 4)} "
+                f"yahoo_price_fresh={sig.get('pyramid_yahoo_price_fresh')} "
+                f"yahoo_price_age={fmt(sig.get('pyramid_yahoo_price_age_seconds'), 1)}s "
+                f"rel_60m={fmt(sig.get('relative_return_4'), 4)} "
+                f"rel_source={sig.get('relative_return_4_source')} "
+                f"volume_time={fmt(sig.get('volume_time_ratio'), 2)} "
+                f"volume_source={sig.get('volume_time_ratio_source')}"
             )
 
 
@@ -1279,7 +1305,24 @@ def execute_decisions(decisions, diagnostics=None):
     for sym in buy_syms_sorted:
         decision = decisions[sym]
         explain = decision.get("explain", "") or ""
-        price = fetch_latest_price(sym)
+        decision_diag = diagnostics.get(sym, {}) or {}
+        yahoo_price_fresh = decision_diag.get("pyramid_yahoo_price_fresh") is True
+        if (
+            decision.get("pyramid")
+            and decision_diag.get("intraday_momentum_source")
+            == "yfinance_1m_prepost"
+            and not yahoo_price_fresh
+        ):
+            print(
+                f"[PYRAMID PRICE GUARD] {sym}: Yahoo 1m price is not fresh "
+                "enough for sizing; skipping BUY."
+            )
+            continue
+        price = (
+            float(decision_diag["intraday_momentum_current_price"])
+            if yahoo_price_fresh
+            else fetch_latest_price(sym)
+        )
 
         print(f"\n--- {sym} Decision ---")
         print(f"Action: BUY | Price: {price}")

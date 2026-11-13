@@ -1608,6 +1608,8 @@ def should_trade(
     diagnostics: Dict[str, dict] = None,
 ):
 
+    d_diag = (diagnostics or {}).get(symbol.upper(), {}) or {}
+
     pm = PortfolioManager(symbol)
     try:
         pm.refresh_live()
@@ -1616,7 +1618,10 @@ def should_trade(
 
     shares = float(pm.data.get("shares", 0.0))
     cash = float(pm.data.get("cash", 0.0))
-    price = fetch_latest_price(symbol)
+    if d_diag.get("pyramid_yahoo_price_fresh") is True:
+        price = _safe_float(d_diag.get("intraday_momentum_current_price"), None)
+    else:
+        price = fetch_latest_price(symbol)
 
     if price is None or price <= 0:
         return make_decision("hold", 0, f"{symbol}: no valid price.")
@@ -1661,7 +1666,6 @@ def should_trade(
     # Intraday momentum (price-direction filter)
     # Use diagnostics: intraday_mom > 0 => price going up
     # ---------------------------------------------------------
-    d_diag = (diagnostics or {}).get(symbol.upper(), {}) or {}
     intraday_mom = d_diag.get("intraday_mom")
     momentum_confirmed = _momentum_is_confirmed(d_diag)
 
@@ -1712,6 +1716,18 @@ def should_trade(
     if shares > 0 and prob_up >= effective_buy_threshold:
 
         # -- Guard 2: add only after the existing position confirms --------
+        if (
+            d_diag.get("intraday_momentum_source") == "yfinance_1m_prepost"
+            and d_diag.get("pyramid_yahoo_price_fresh") is not True
+        ):
+            return make_decision(
+                "hold",
+                0,
+                explain
+                + "HOLD - pyramid requires a Yahoo 1-minute price no more than "
+                "90 seconds old when Alpaca bars are unavailable.",
+            )
+
         avg_cost = float(pm.data.get("avg_price", 0.0))
         if avg_cost <= 0:
             return make_decision(
