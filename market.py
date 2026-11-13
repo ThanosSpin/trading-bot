@@ -50,6 +50,25 @@ def get_market_session(now=None):
     return "closed"
 
 
+def get_extended_session_start(now=None):
+    """Return the current pre/post-market session start in New York time."""
+    now_ny = datetime.now(NY_TZ) if now is None else now
+    if now_ny.tzinfo is None:
+        now_ny = NY_TZ.localize(now_ny)
+    else:
+        now_ny = now_ny.astimezone(NY_TZ)
+
+    session = get_market_session(now_ny)
+    if session == "pre_market":
+        return now_ny.replace(hour=4, minute=0, second=0, microsecond=0)
+    if session == "after_hours":
+        schedule = nyse.schedule(start_date=now_ny.date(), end_date=now_ny.date())
+        if schedule.empty:
+            return None
+        return schedule.iloc[0]["market_close"].astimezone(NY_TZ)
+    return None
+
+
 def is_extended_hours():
     """True during weekday pre-market and after-hours sessions supported by Alpaca."""
     return get_market_session() in {"pre_market", "after_hours"}

@@ -49,7 +49,10 @@ from config import (
     MODEL_TRAIN_N_JOBS,
     MODEL_DIR as CONFIG_MODEL_DIR,
     USE_TWO_STAGE_TARGETS,
+    EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES,
+    EXTENDED_HOURS_MIN_MOMENTUM_BARS,
 )
+from market import get_market_session, get_extended_session_start
 
 # Resolve artifacts from the checkout, independent of the caller's current
 # working directory.  Retraining and promotion code use config.MODEL_DIR too,
@@ -1970,6 +1973,11 @@ def compute_signals(
         "intraday_mom": None,
         "intraday_latest_bar_time": None,
         "intraday_bar_age_minutes": None,
+        "intraday_momentum_fresh": None,
+        "intraday_momentum_bars": 0,
+        "intraday_momentum_start_bar_time": None,
+        "intraday_momentum_freshness_reason": None,
+        "market_session": None,
         "intraday_regime": None,
         "daily_prediction": None,
         "intraday_prediction": None,
@@ -1985,6 +1993,9 @@ def compute_signals(
     }
 
     symU = str(symbol).upper().strip()
+    market_session = get_market_session()
+    results["market_session"] = market_session
+    is_extended_session = market_session in {"pre_market", "after_hours"}
 
     model_daily = load_model(symU, mode="daily")
     model_intra_mr = load_model(symU, mode="intraday_mr")
@@ -2118,14 +2129,7 @@ def compute_signals(
             0 if df_intra_resampled is None else len(df_intra_resampled)
         )
 
-        if (
-            df_intra_resampled is None
-            or len(df_intra_resampled) < MIN_INTRADAY_BARS_FOR_FEATURES
-        ):
-            results["allow_intraday"] = False
-            results["intraday_prob"] = None
-            results["intraday_quality_score"] = 0.0
-        else:
+        if df_intra_resampled is not None and not df_intra_resampled.empty:
             latest_bar_time = pd.Timestamp(df_intra_resampled.index[-1])
             if latest_bar_time.tzinfo is None:
                 latest_bar_time = latest_bar_time.tz_localize("UTC")
@@ -2138,6 +2142,19 @@ def compute_signals(
                 2,
             )
 
+        if (
+            df_intra_resampled is None
+            or len(df_intra_resampled) < MIN_INTRADAY_BARS_FOR_FEATURES
+        ):
+            results["allow_intraday"] = False
+            results["intraday_prob"] = None
+            results["intraday_quality_score"] = 0.0
+            if is_extended_session:
+                results["intraday_momentum_fresh"] = False
+                results["intraday_momentum_freshness_reason"] = (
+                    "insufficient_intraday_history"
+                )
+        else:
             close = df_intra_resampled["Close"]
             close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
             close = close.dropna()
@@ -2147,9 +2164,108 @@ def compute_signals(
             if len(close) >= 12:
                 vol = close.pct_change().rolling(12).std().iloc[-1]
                 results["intraday_vol"] = float(vol) if not pd.isna(vol) else None
-            if len(close) >= 4:
-                mom1h = close.pct_change(4).iloc[-1]
-                results["intraday_mom"] = float(mom1h) if not pd.isna(mom1h) else None
+
+            momentum_close = close
+            if is_extended_session:
+                session_start = get_extended_session_start()
+                session_frame = df_intra_resampled.iloc[0:0].copy()
+                if session_start is not None:
+                    session_start_utc = pd.Timestamp(session_start).tz_convert("UTC")
+                    session_index = pd.to_datetime(
+                        df_intra_resampled.index, utc=True, errors="coerce"
+                    )
+                    session_data = df_intra_resampled.copy()
+                    session_data.index = session_index
+                    session_frame = session_data.loc[
+                        session_data.index >= session_start_utc
+                    ]
+
+                momentum_close = session_frame["Close"]
+                momentum_close = (
+                    momentum_close.iloc[:, 0]
+                    if isinstance(momentum_close, pd.DataFrame)
+                    else momentum_close
+                )
+                momentum_close = momentum_close.dropna()
+
+                results["intraday_momentum_bars"] = len(momentum_close)
+                latest_session_index = (
+                    momentum_close.index[-1] if not momentum_close.empty else None
+                )
+                if (
+                    latest_session_index is not None
+                    and len(momentum_close)
+                    >= int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)
+                ):
+                    momentum_start_index = len(momentum_close) - int(
+                        EXTENDED_HOURS_MIN_MOMENTUM_BARS
+                    )
+                    start_bar_time = pd.Timestamp(
+                        momentum_close.index[momentum_start_index]
+                    )
+                    results["intraday_momentum_start_bar_time"] = (
+                        start_bar_time.isoformat()
+                    )
+
+                session_bar_age = None
+                if latest_session_index is not None:
+                    session_bar_time = pd.Timestamp(latest_session_index)
+                    if session_bar_time.tzinfo is None:
+                        session_bar_time = session_bar_time.tz_localize("UTC")
+                    else:
+                        session_bar_time = session_bar_time.tz_convert("UTC")
+                    session_bar_age = (
+                        pd.Timestamp.now(tz="UTC") - session_bar_time
+                    ).total_seconds() / 60.0
+
+                if session_start is None:
+                    results["intraday_momentum_freshness_reason"] = (
+                        "current_extended_session_start_unavailable"
+                    )
+                elif len(momentum_close) < int(EXTENDED_HOURS_MIN_MOMENTUM_BARS):
+                    results["intraday_momentum_freshness_reason"] = (
+                        f"need_{int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)}_session_bars_"
+                        f"have_{len(momentum_close)}"
+                    )
+                elif (
+                    session_bar_age is None
+                    or session_bar_age < -5
+                    or session_bar_age
+                    > float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
+                ):
+                    results["intraday_momentum_freshness_reason"] = (
+                        "latest_current_session_bar_stale"
+                    )
+                else:
+                    momentum_window_minutes = (
+                        pd.Timestamp(momentum_close.index[-1])
+                        - pd.Timestamp(
+                            momentum_close.index[
+                                -int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)
+                            ]
+                        )
+                    ).total_seconds() / 60.0
+                    if not 45.0 <= momentum_window_minutes <= 90.0:
+                        results["intraday_momentum_freshness_reason"] = (
+                            "current_session_momentum_window_not_about_one_hour"
+                        )
+                    else:
+                        results["intraday_momentum_fresh"] = True
+                        results["intraday_momentum_freshness_reason"] = "fresh"
+            else:
+                results["intraday_momentum_fresh"] = True
+
+            min_momentum_bars = (
+                int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)
+                if is_extended_session
+                else 5
+            )
+            if len(momentum_close) >= min_momentum_bars:
+                mom1h = momentum_close.pct_change(4).iloc[-1]
+                if not pd.isna(mom1h):
+                    results["intraday_mom"] = float(mom1h)
+            if is_extended_session and results["intraday_momentum_fresh"] is not True:
+                results["intraday_mom"] = None
 
             regime_config = None
             for artifact in (model_intra_mom, model_intra_mr):

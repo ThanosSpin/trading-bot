@@ -232,6 +232,11 @@ def log_signal_snapshot(
             "intradaymom",
             "intradaylatestbartime",
             "intradaybarageminutes",
+            "intradaymomentumfresh",
+            "intradaymomentumbars",
+            "intradaymomentumstartbartime",
+            "intradaymomentumfreshnessreason",
+            "marketsession",
             "intradayregime",  # ✅ NEW field
             "allowintraday",  # ✅ NEW field
             "buythreshold",
@@ -266,6 +271,15 @@ def log_signal_snapshot(
             "intradaymom": sig.get("intraday_mom"),
             "intradaylatestbartime": sig.get("intraday_latest_bar_time"),
             "intradaybarageminutes": sig.get("intraday_bar_age_minutes"),
+            "intradaymomentumfresh": sig.get("intraday_momentum_fresh"),
+            "intradaymomentumbars": sig.get("intraday_momentum_bars"),
+            "intradaymomentumstartbartime": sig.get(
+                "intraday_momentum_start_bar_time"
+            ),
+            "intradaymomentumfreshnessreason": sig.get(
+                "intraday_momentum_freshness_reason"
+            ),
+            "marketsession": sig.get("market_session"),
             "intradayregime": sig.get("intraday_regime"),  # ✅ NEW
             "allowintraday": sig.get("allow_intraday"),  # ✅ NEW
             "buythreshold": diag.get("buy_threshold"),
@@ -523,6 +537,15 @@ def get_predictions(symbols, debug=True):
             "intraday_mom": sig.get("intraday_mom"),
             "intraday_latest_bar_time": sig.get("intraday_latest_bar_time"),
             "intraday_bar_age_minutes": sig.get("intraday_bar_age_minutes"),
+            "intraday_momentum_fresh": sig.get("intraday_momentum_fresh"),
+            "intraday_momentum_bars": sig.get("intraday_momentum_bars"),
+            "intraday_momentum_start_bar_time": sig.get(
+                "intraday_momentum_start_bar_time"
+            ),
+            "intraday_momentum_freshness_reason": sig.get(
+                "intraday_momentum_freshness_reason"
+            ),
+            "market_session": sig.get("market_session"),
             "intraday_regime": sig.get("intraday_regime"),
             "allow_intraday": sig.get("allow_intraday"),
             "intraday_volume": sig.get("intraday_volume"),
@@ -702,6 +725,8 @@ def print_signal_diagnostics(decisions, diagnostics):
             f"| q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} "
             f"| intraday_bar={sig.get('intraday_latest_bar_time') or 'NA'} "
             f"age={fmt(sig.get('intraday_bar_age_minutes'), 1)}m "
+            f"mom_fresh={sig.get('intraday_momentum_fresh')} "
+            f"session={sig.get('market_session')} "
             f"| regime={sig.get('intraday_regime')} | model={model_used} | {action}"
         )
         if sig.get("relative_market_available"):
@@ -1447,6 +1472,36 @@ def process_all_symbols(symbols):
             f"{sym} shares={shares} "
             f"prob_up={sig_prob:.3f}"
         )
+
+    # New BUYs during pre-market/after-hours must have a one-hour momentum
+    # window made entirely from fresh bars in the current extended session.
+    if EXTENDED_HOURS_TRADING_ENABLED and is_extended_hours():
+        for sym, decision in list(decisions.items()):
+            if str(decision.get("action", "")).lower() != "buy":
+                continue
+            if decision.get("buy_to_cover") or decision.get("position_reducing"):
+                continue
+            signal_diag = diagnostics.get(sym, {}) or {}
+            if signal_diag.get("intraday_momentum_fresh") is True:
+                continue
+
+            reason = signal_diag.get("intraday_momentum_freshness_reason")
+            latest_bar = signal_diag.get("intraday_latest_bar_time") or "unavailable"
+            age_minutes = signal_diag.get("intraday_bar_age_minutes")
+            age_text = (
+                "unknown" if age_minutes is None else f"{float(age_minutes):.1f}m"
+            )
+            decision = dict(decision)
+            decision["action"] = "hold"
+            decision["qty"] = 0
+            decision["entry_blocked"] = True
+            decision["explain"] = (
+                f"{decision.get('explain', '')} HOLD - extended-hours BUY blocked: "
+                "no fresh one-hour momentum window from the current session "
+                f"(reason={reason or 'not_confirmed'}, latest_bar_utc={latest_bar}, "
+                f"age={age_text})."
+            )
+            decisions[sym] = decision
 
     log_guard_decision_snapshot(decisions)
 
