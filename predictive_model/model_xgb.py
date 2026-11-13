@@ -50,6 +50,7 @@ from config import (
     MODEL_TRAIN_N_JOBS,
     MODEL_DIR as CONFIG_MODEL_DIR,
     USE_TWO_STAGE_TARGETS,
+    EXTENDED_HOURS_MAX_FALLBACK_PRICE_AGE_SECONDS,
     EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES,
     EXTENDED_HOURS_MIN_MOMENTUM_BARS,
 )
@@ -1983,8 +1984,12 @@ def compute_signals(
         "intraday_momentum_window_minutes": None,
         "intraday_momentum_current_price": None,
         "intraday_momentum_current_price_time": None,
+        "pyramid_yahoo_price_fresh": False,
+        "pyramid_yahoo_price_age_seconds": None,
         "intraday_momentum_reference_price": None,
         "intraday_momentum_reference_time": None,
+        "relative_return_4_source": None,
+        "volume_time_ratio_source": None,
         "market_session": None,
         "intraday_regime": None,
         "daily_prediction": None,
@@ -2196,6 +2201,8 @@ def compute_signals(
             )
             momentum_source = "alpaca_iex_bars"
             momentum_frame = session_frame
+            yahoo_relative_return_4 = None
+            yahoo_relative_return_4_source = None
 
             # If IEX bars are absent, stale, or too sparse for the one-hour
             # reference, try uncached, timestamped 1-minute extended-session
@@ -2275,6 +2282,21 @@ def compute_signals(
                     current_time.isoformat()
                 )
                 results["intraday_momentum_source"] = momentum_source
+                current_age_seconds = current_age_minutes * 60.0
+                yahoo_price_fresh = (
+                    momentum_source == "yfinance_1m_prepost"
+                    and -5.0
+                    <= current_age_seconds
+                    <= float(EXTENDED_HOURS_MAX_FALLBACK_PRICE_AGE_SECONDS)
+                )
+                results["pyramid_yahoo_price_fresh"] = bool(yahoo_price_fresh)
+                results["pyramid_yahoo_price_age_seconds"] = round(
+                    current_age_seconds, 1
+                )
+                if yahoo_price_fresh:
+                    # Use the same fresh extended-session price for session
+                    # return and later position/exposure sizing.
+                    results["price"] = current_price
                 results["intraday_momentum_fresh"] = (
                     -5.0 <= current_age_minutes
                     <= float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
@@ -2336,6 +2358,72 @@ def compute_signals(
                             results["intraday_momentum_freshness_reason"] = "latest_price_stale"
                         else:
                             results["intraday_momentum_freshness_reason"] = "short_window_unconfirmed"
+
+                        if momentum_source == "yfinance_1m_prepost":
+                            yahoo_relative_return_4_source = (
+                                "yfinance_1m_prepost_unavailable"
+                            )
+                            if confirmed:
+                                try:
+                                    spy_frame = fetch_intraday_price_fallback("SPY")
+                                    if spy_frame is not None and not spy_frame.empty:
+                                        spy_close = spy_frame["Close"]
+                                        if isinstance(spy_close, pd.DataFrame):
+                                            spy_close = spy_close.iloc[:, 0]
+                                        spy_close = pd.to_numeric(
+                                            spy_close, errors="coerce"
+                                        ).dropna()
+                                        spy_close.index = pd.to_datetime(
+                                            spy_close.index,
+                                            utc=True,
+                                            errors="coerce",
+                                        )
+                                        spy_close = spy_close.loc[
+                                            ~spy_close.index.isna()
+                                        ].sort_index()
+                                        if session_start_utc is not None:
+                                            spy_close = spy_close.loc[
+                                                spy_close.index >= session_start_utc
+                                            ]
+
+                                        def _spy_asof(target_time):
+                                            available = spy_close.loc[
+                                                spy_close.index <= target_time
+                                            ]
+                                            if available.empty:
+                                                return None
+                                            spy_time = available.index[-1]
+                                            if (
+                                                target_time - spy_time
+                                            ).total_seconds() > 300:
+                                                return None
+                                            return float(available.iloc[-1])
+
+                                        spy_current = _spy_asof(current_time)
+                                        spy_reference = _spy_asof(reference_time)
+                                        if (
+                                            spy_current is not None
+                                            and spy_reference is not None
+                                            and spy_reference > 0
+                                            and reference_price > 0
+                                        ):
+                                            asset_return = (
+                                                current_price / reference_price - 1.0
+                                            )
+                                            spy_return = (
+                                                spy_current / spy_reference - 1.0
+                                            )
+                                            yahoo_relative_return_4 = (
+                                                asset_return - spy_return
+                                            )
+                                            yahoo_relative_return_4_source = (
+                                                "yfinance_1m_prepost"
+                                            )
+                                except Exception as exc:
+                                    print(
+                                        f"[RELATIVE YAHOO FALLBACK] {symU}: "
+                                        f"SPY alignment unavailable: {exc}"
+                                    )
                 elif momentum_source == "stale_historical_bars":
                     results["intraday_momentum_freshness_reason"] = "no_historical_reference"
                 else:
@@ -2517,6 +2605,29 @@ def compute_signals(
                             results[context_name] = (
                                 float(value) if pd.notna(value) else None
                             )
+                    if results.get("intraday_momentum_source") == "yfinance_1m_prepost":
+                        # Never carry a stale Alpaca relative-return value into
+                        # a Yahoo-based pyramid confirmation.
+                        results["relative_return_4"] = yahoo_relative_return_4
+                        results["relative_market_available"] = int(
+                            yahoo_relative_return_4 is not None
+                        )
+                        results["relative_return_4_source"] = (
+                            yahoo_relative_return_4_source
+                            or "yfinance_1m_prepost_unavailable"
+                        )
+                    else:
+                        results["relative_return_4_source"] = "intraday_features"
+                    if is_extended_session:
+                        # The regular-session volume baseline is undefined
+                        # pre/post market. Treat it as neutral, never as a
+                        # measured Yahoo/Alpaca volume ratio.
+                        results["volume_time_ratio"] = 1.0
+                        results["volume_time_ratio_source"] = (
+                            "extended_session_neutral"
+                        )
+                    else:
+                        results["volume_time_ratio_source"] = "intraday_features"
                     intraday_prediction = None
                     model_used = None
 

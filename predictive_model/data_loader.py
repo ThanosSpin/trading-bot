@@ -412,7 +412,25 @@ def fetch_intraday_history(
         interval=interval,
     )
     if df is not None and not df.empty:
-        return df.tail(bars_needed)
+        latest_bar_time = pd.Timestamp(df.index[-1])
+        if latest_bar_time.tzinfo is None:
+            latest_bar_time = latest_bar_time.tz_localize("UTC")
+        else:
+            latest_bar_time = latest_bar_time.tz_convert("UTC")
+        age_minutes = (
+            pd.Timestamp.now(tz="UTC") - latest_bar_time
+        ).total_seconds() / 60.0
+        from config import EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES
+
+        if (
+            -5.0 <= age_minutes
+            <= float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
+        ):
+            return df.tail(bars_needed)
+        logger.warning(
+            f"Alpaca intraday bars for {symbol} are stale "
+            f"({age_minutes:.1f}m); trying Yahoo history instead"
+        )
 
     try:
         yf_interval = "15m" if interval_key in ("15m", "15min", "15t") else "1m"
