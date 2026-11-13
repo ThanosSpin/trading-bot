@@ -230,6 +230,8 @@ def log_signal_snapshot(
             "intradayqualityscore",
             "intradayvol",
             "intradaymom",
+            "intradaylatestbartime",
+            "intradaybarageminutes",
             "intradayregime",  # ✅ NEW field
             "allowintraday",  # ✅ NEW field
             "buythreshold",
@@ -262,6 +264,8 @@ def log_signal_snapshot(
             "intradayqualityscore": sig.get("intraday_quality_score"),
             "intradayvol": sig.get("intraday_vol"),
             "intradaymom": sig.get("intraday_mom"),
+            "intradaylatestbartime": sig.get("intraday_latest_bar_time"),
+            "intradaybarageminutes": sig.get("intraday_bar_age_minutes"),
             "intradayregime": sig.get("intraday_regime"),  # ✅ NEW
             "allowintraday": sig.get("allow_intraday"),  # ✅ NEW
             "buythreshold": diag.get("buy_threshold"),
@@ -517,6 +521,8 @@ def get_predictions(symbols, debug=True):
             "intraday_quality_score": sig.get("intraday_quality_score"),
             "intraday_vol": sig.get("intraday_vol"),
             "intraday_mom": sig.get("intraday_mom"),
+            "intraday_latest_bar_time": sig.get("intraday_latest_bar_time"),
+            "intraday_bar_age_minutes": sig.get("intraday_bar_age_minutes"),
             "intraday_regime": sig.get("intraday_regime"),
             "allow_intraday": sig.get("allow_intraday"),
             "intraday_volume": sig.get("intraday_volume"),
@@ -694,6 +700,8 @@ def print_signal_diagnostics(decisions, diagnostics):
             f"  {sym:<5} D={fmt(dp)} I={fmt(ip)} Δ={div} W={fmt(w):>5} → F={fmt(fp)} "
             f"| buy>={buy_thr:.3f} sell<={sell_thr:.3f} "
             f"| q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} "
+            f"| intraday_bar={sig.get('intraday_latest_bar_time') or 'NA'} "
+            f"age={fmt(sig.get('intraday_bar_age_minutes'), 1)}m "
             f"| regime={sig.get('intraday_regime')} | model={model_used} | {action}"
         )
         if sig.get("relative_market_available"):

@@ -1968,6 +1968,8 @@ def compute_signals(
         "intraday_model_used": None,
         "intraday_vol": None,
         "intraday_mom": None,
+        "intraday_latest_bar_time": None,
+        "intraday_bar_age_minutes": None,
         "intraday_regime": None,
         "daily_prediction": None,
         "intraday_prediction": None,
@@ -2124,6 +2126,18 @@ def compute_signals(
             results["intraday_prob"] = None
             results["intraday_quality_score"] = 0.0
         else:
+            latest_bar_time = pd.Timestamp(df_intra_resampled.index[-1])
+            if latest_bar_time.tzinfo is None:
+                latest_bar_time = latest_bar_time.tz_localize("UTC")
+            else:
+                latest_bar_time = latest_bar_time.tz_convert("UTC")
+            results["intraday_latest_bar_time"] = latest_bar_time.isoformat()
+            results["intraday_bar_age_minutes"] = round(
+                (pd.Timestamp.now(tz="UTC") - latest_bar_time).total_seconds()
+                / 60.0,
+                2,
+            )
+
             close = df_intra_resampled["Close"]
             close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
             close = close.dropna()
