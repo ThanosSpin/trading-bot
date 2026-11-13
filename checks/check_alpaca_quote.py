@@ -2,6 +2,7 @@
 """Read-only diagnostic for the active Alpaca account's latest quotes."""
 
 import os
+import re
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -68,6 +69,11 @@ def main():
             try:
                 parsed_timestamp = timestamp
                 if isinstance(parsed_timestamp, str):
+                    parsed_timestamp = re.sub(
+                        r"(\.\d{6})\d+(?=[+-]\d{2}:?\d{2}$|Z$)",
+                        r"\1",
+                        parsed_timestamp,
+                    )
                     parsed_timestamp = datetime.fromisoformat(
                         parsed_timestamp.replace("Z", "+00:00")
                     )

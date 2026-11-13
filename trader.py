@@ -1,5 +1,7 @@
 # trader.py
 import time
+import re
+import math
 import pytz
 
 from datetime import datetime, timedelta, timezone
@@ -15,10 +17,14 @@ from config import (
     EXTENDED_HOURS_TRADING_ENABLED,
     EXTENDED_HOURS_MAX_SPREAD_PCT,
     EXTENDED_HOURS_MAX_QUOTE_AGE_SECONDS,
+    EXTENDED_HOURS_MAX_FALLBACK_PRICE_AGE_SECONDS,
 )
 from entry_policy import is_new_entry_allowed
 from market import is_market_open, is_trading_day, get_market_session
-from predictive_model.data_loader import fetch_latest_price
+from predictive_model.data_loader import (
+    fetch_latest_price,
+    fetch_intraday_price_fallback,
+)
 from portfolio import PortfolioManager
 
 UTC = pytz.UTC
@@ -277,15 +283,64 @@ def _get_live_price(symbol):
 
 
 def _extended_hours_limit_price(client, symbol, side):
-    """Use a fresh, sane NBBO quote as a protective extended-hours limit."""
+    """Use Alpaca's valid quote or a fresh Yahoo 1m close as a limit reference."""
+
+    def yahoo_fallback(reason):
+        print(
+            f"[EXTENDED HOURS] Trying Yahoo 1m limit-price fallback for {symbol}: {reason}."
+        )
+        bars = fetch_intraday_price_fallback(symbol)
+        if bars is None or bars.empty or "Close" not in bars.columns:
+            print(
+                f"[EXTENDED HOURS] No usable Alpaca quote or Yahoo 1m price for {symbol}; "
+                "skipping order."
+            )
+            return None
+
+        timestamp = bars.index[-1]
+        if timestamp.tzinfo is None:
+            print(
+                f"[EXTENDED HOURS] Yahoo 1m timestamp is timezone-naive for {symbol}; "
+                "skipping order."
+            )
+            return None
+        price = float(bars["Close"].iloc[-1])
+        age_seconds = (
+            datetime.now(timezone.utc) - timestamp.to_pydatetime().astimezone(timezone.utc)
+        ).total_seconds()
+        max_age = float(EXTENDED_HOURS_MAX_FALLBACK_PRICE_AGE_SECONDS)
+        if (
+            not math.isfinite(price)
+            or price <= 0
+            or age_seconds < -5
+            or age_seconds > max_age
+        ):
+            print(
+                f"[EXTENDED HOURS] Yahoo 1m price unusable for {symbol} "
+                f"(price={price:.4f}, age={age_seconds:.1f}s, limit={max_age:.1f}s); "
+                "skipping order."
+            )
+            return None
+
+        # Use the last observed bar close as the limit itself. This caps buy
+        # prices and floors sell prices without inventing a spread or offset.
+        decimals = 2 if price >= 1 else 4
+        limit_price = round(price, decimals)
+        print(
+            f"[EXTENDED HOURS PRICE FALLBACK] {symbol} side={side} source=Yahoo-1m "
+            f"bar_close={price:.4f} timestamp={timestamp.isoformat()} "
+            f"age_seconds={age_seconds:.1f} limit=${limit_price:.{decimals}f} "
+            f"(Alpaca quote rejected: {reason}; bid/ask spread unavailable)"
+        )
+        return limit_price
+
     try:
         quote = client.get_latest_quote(symbol)
         bid = float(getattr(quote, "bidprice", getattr(quote, "bid_price", 0)) or 0)
         ask = float(getattr(quote, "askprice", getattr(quote, "ask_price", 0)) or 0)
         timestamp = getattr(quote, "timestamp", getattr(quote, "t", None))
     except Exception as exc:
-        print(f"[EXTENDED HOURS] No quote for {symbol}; skipping order: {exc}")
-        return None
+        return yahoo_fallback(f"quote request failed: {exc}")
 
     timestamp_text = timestamp.isoformat() if hasattr(timestamp, "isoformat") else repr(timestamp)
     print(
@@ -294,31 +349,31 @@ def _extended_hours_limit_price(client, symbol, side):
     )
 
     if bid <= 0 or ask <= 0 or ask < bid or timestamp is None:
-        print(
-            f"[EXTENDED HOURS] Invalid quote for {symbol} "
-            f"(bid_positive={bid > 0}, ask_positive={ask > 0}, "
-            f"not_crossed={ask >= bid}, has_timestamp={timestamp is not None}); "
-            "skipping order."
+        return yahoo_fallback(
+            f"invalid quote (bid_positive={bid > 0}, ask_positive={ask > 0}, "
+            f"not_crossed={ask >= bid}, has_timestamp={timestamp is not None})"
         )
-        return None
 
     if isinstance(timestamp, str):
         try:
             timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         except ValueError:
-            timestamp = None
+            # Alpaca timestamps may have nanoseconds, which older Python
+            # datetime parsers don't accept.
+            normalized = re.sub(
+                r"(\.\d{6})\d+(?=[+-]\d{2}:?\d{2}$|Z$)", r"\1", timestamp
+            )
+            try:
+                timestamp = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            except ValueError:
+                timestamp = None
     if timestamp is None:
-        print(f"[EXTENDED HOURS] Invalid quote timestamp for {symbol}; skipping order.")
-        return None
+        return yahoo_fallback("invalid quote timestamp")
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     quote_age = (datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds()
     if quote_age < -5 or quote_age > float(EXTENDED_HOURS_MAX_QUOTE_AGE_SECONDS):
-        print(
-            f"[EXTENDED HOURS] Stale quote for {symbol} ({quote_age:.0f}s); "
-            "skipping order."
-        )
-        return None
+        return yahoo_fallback(f"stale quote ({quote_age:.0f}s)")
 
     midpoint = (bid + ask) / 2.0
     spread_pct = (ask - bid) / midpoint
