@@ -27,6 +27,7 @@ from predictive_model.data_loader import (
     fetch_historical_data,
     fetch_intraday_history,
     fetch_latest_price,
+    fetch_intraday_price_fallback,
 )
 from predictive_model.features import build_daily_features, build_intraday_features
 from predictive_model.model_monitor import evaluate_predictions, log_prediction
@@ -52,7 +53,7 @@ from config import (
     EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES,
     EXTENDED_HOURS_MIN_MOMENTUM_BARS,
 )
-from market import get_market_session, get_extended_session_start
+from market import get_current_session_start, get_market_session
 
 # Resolve artifacts from the checkout, independent of the caller's current
 # working directory.  Retraining and promotion code use config.MODEL_DIR too,
@@ -1974,9 +1975,16 @@ def compute_signals(
         "intraday_latest_bar_time": None,
         "intraday_bar_age_minutes": None,
         "intraday_momentum_fresh": None,
+        "intraday_momentum_confirmed": False,
         "intraday_momentum_bars": 0,
         "intraday_momentum_start_bar_time": None,
         "intraday_momentum_freshness_reason": None,
+        "intraday_momentum_source": None,
+        "intraday_momentum_window_minutes": None,
+        "intraday_momentum_current_price": None,
+        "intraday_momentum_current_price_time": None,
+        "intraday_momentum_reference_price": None,
+        "intraday_momentum_reference_time": None,
         "market_session": None,
         "intraday_regime": None,
         "daily_prediction": None,
@@ -2170,107 +2178,174 @@ def compute_signals(
                 vol = close.pct_change().rolling(12).std().iloc[-1]
                 results["intraday_vol"] = float(vol) if not pd.isna(vol) else None
 
-            momentum_close = close
-            if is_extended_session:
-                session_start = get_extended_session_start()
-                session_frame = df_intra_resampled.iloc[0:0].copy()
-                if session_start is not None:
-                    session_start_utc = pd.Timestamp(session_start).tz_convert("UTC")
-                    session_index = pd.to_datetime(
-                        df_intra_resampled.index, utc=True, errors="coerce"
-                    )
-                    session_data = df_intra_resampled.copy()
-                    session_data.index = session_index
-                    session_frame = session_data.loc[
-                        session_data.index >= session_start_utc
-                    ]
-
-                momentum_close = session_frame["Close"]
-                momentum_close = (
-                    momentum_close.iloc[:, 0]
-                    if isinstance(momentum_close, pd.DataFrame)
-                    else momentum_close
-                )
-                momentum_close = momentum_close.dropna()
-
-                results["intraday_momentum_bars"] = len(momentum_close)
-                latest_session_index = (
-                    momentum_close.index[-1] if not momentum_close.empty else None
-                )
-                if (
-                    latest_session_index is not None
-                    and len(momentum_close)
-                    >= int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)
-                ):
-                    momentum_start_index = len(momentum_close) - int(
-                        EXTENDED_HOURS_MIN_MOMENTUM_BARS
-                    )
-                    start_bar_time = pd.Timestamp(
-                        momentum_close.index[momentum_start_index]
-                    )
-                    results["intraday_momentum_start_bar_time"] = (
-                        start_bar_time.isoformat()
-                    )
-
-                session_bar_age = None
-                if latest_session_index is not None:
-                    session_bar_time = pd.Timestamp(latest_session_index)
-                    if session_bar_time.tzinfo is None:
-                        session_bar_time = session_bar_time.tz_localize("UTC")
-                    else:
-                        session_bar_time = session_bar_time.tz_convert("UTC")
-                    session_bar_age = (
-                        pd.Timestamp.now(tz="UTC") - session_bar_time
-                    ).total_seconds() / 60.0
-
-                if session_start is None:
-                    results["intraday_momentum_freshness_reason"] = (
-                        "current_extended_session_start_unavailable"
-                    )
-                elif len(momentum_close) < int(EXTENDED_HOURS_MIN_MOMENTUM_BARS):
-                    results["intraday_momentum_freshness_reason"] = (
-                        f"need_{int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)}_session_bars_"
-                        f"have_{len(momentum_close)}"
-                    )
-                elif (
-                    session_bar_age is None
-                    or session_bar_age < -5
-                    or session_bar_age
-                    > float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
-                ):
-                    results["intraday_momentum_freshness_reason"] = (
-                        "latest_current_session_bar_stale"
-                    )
-                else:
-                    momentum_window_minutes = (
-                        pd.Timestamp(momentum_close.index[-1])
-                        - pd.Timestamp(
-                            momentum_close.index[
-                                -int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)
-                            ]
-                        )
-                    ).total_seconds() / 60.0
-                    if not 45.0 <= momentum_window_minutes <= 90.0:
-                        results["intraday_momentum_freshness_reason"] = (
-                            "current_session_momentum_window_not_about_one_hour"
-                        )
-                    else:
-                        results["intraday_momentum_fresh"] = True
-                        results["intraday_momentum_freshness_reason"] = "fresh"
-            else:
-                results["intraday_momentum_fresh"] = True
-
-            min_momentum_bars = (
-                int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)
-                if is_extended_session
-                else 5
+            session_start = get_current_session_start()
+            session_start_utc = (
+                pd.Timestamp(session_start).tz_convert("UTC")
+                if session_start is not None
+                else None
             )
-            if len(momentum_close) >= min_momentum_bars:
-                mom1h = momentum_close.pct_change(4).iloc[-1]
-                if not pd.isna(mom1h):
-                    results["intraday_mom"] = float(mom1h)
-            if is_extended_session and results["intraday_momentum_fresh"] is not True:
-                results["intraday_mom"] = None
+            bars_frame = df_intra_resampled.copy()
+            bars_frame.index = pd.to_datetime(
+                bars_frame.index, utc=True, errors="coerce"
+            )
+            bars_frame = bars_frame.loc[~bars_frame.index.isna()].sort_index()
+            session_frame = (
+                bars_frame.loc[bars_frame.index >= session_start_utc]
+                if session_start_utc is not None
+                else bars_frame.iloc[0:0]
+            )
+            momentum_source = "alpaca_iex_bars"
+            momentum_frame = session_frame
+
+            # If IEX bars are absent, stale, or too sparse for the one-hour
+            # reference, try uncached, timestamped 1-minute extended-session
+            # prices. This is diagnostic input only; strategy gates separately
+            # require an explicitly confirmed 45-90 minute window.
+            bar_latest_time = (
+                session_frame.index[-1] if not session_frame.empty else None
+            )
+            bar_age_minutes = (
+                (pd.Timestamp.now(tz="UTC") - bar_latest_time).total_seconds() / 60.0
+                if bar_latest_time is not None
+                else None
+            )
+            if (
+                session_start_utc is not None
+                and (
+                    bar_latest_time is None
+                    or bar_age_minutes is None
+                    or bar_age_minutes
+                    > float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
+                    or len(session_frame) < int(EXTENDED_HOURS_MIN_MOMENTUM_BARS)
+                )
+            ):
+                fallback_frame = fetch_intraday_price_fallback(symU)
+                if fallback_frame is not None and not fallback_frame.empty:
+                    fallback_frame = fallback_frame.copy()
+                    fallback_frame.index = pd.to_datetime(
+                        fallback_frame.index, utc=True, errors="coerce"
+                    )
+                    fallback_frame = fallback_frame.loc[
+                        ~fallback_frame.index.isna()
+                    ].sort_index()
+                    fallback_frame = fallback_frame.loc[
+                        fallback_frame.index >= session_start_utc
+                    ]
+                    if not fallback_frame.empty and (
+                        bar_latest_time is None
+                        or fallback_frame.index[-1] >= bar_latest_time
+                    ):
+                        momentum_frame = fallback_frame
+                        momentum_source = "yfinance_1m_prepost"
+
+            momentum_close = (
+                momentum_frame["Close"]
+                if not momentum_frame.empty
+                else pd.Series(dtype=float)
+            )
+            momentum_close = (
+                momentum_close.iloc[:, 0]
+                if isinstance(momentum_close, pd.DataFrame)
+                else momentum_close
+            )
+            momentum_close = pd.to_numeric(momentum_close, errors="coerce").dropna()
+            results["intraday_momentum_bars"] = len(momentum_close)
+
+            # If no price point from this session exists, retain a clearly
+            # unconfirmed stale diagnostic from the most recent historical
+            # window; it is never eligible to block an ordinary new BUY.
+            if momentum_close.empty and not close.empty:
+                momentum_close = pd.to_numeric(close, errors="coerce").dropna()
+                momentum_source = "stale_historical_bars"
+
+            if len(momentum_close) >= 2:
+                momentum_index = pd.to_datetime(
+                    momentum_close.index, utc=True, errors="coerce"
+                )
+                momentum_close.index = momentum_index
+                momentum_close = momentum_close.loc[
+                    ~momentum_close.index.isna()
+                ].sort_index()
+                current_time = pd.Timestamp(momentum_close.index[-1])
+                current_price = float(momentum_close.iloc[-1])
+                now_utc = pd.Timestamp.now(tz="UTC")
+                current_age_minutes = (now_utc - current_time).total_seconds() / 60.0
+                results["intraday_momentum_current_price"] = current_price
+                results["intraday_momentum_current_price_time"] = (
+                    current_time.isoformat()
+                )
+                results["intraday_momentum_source"] = momentum_source
+                results["intraday_momentum_fresh"] = (
+                    -5.0 <= current_age_minutes
+                    <= float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
+                )
+
+                offsets = (current_time - momentum_close.index).total_seconds() / 60.0
+                reference_mask = (offsets >= 45.0) & (offsets <= 90.0)
+                reference_positions = np.flatnonzero(reference_mask)
+                reference_position = None
+                if len(reference_positions):
+                    reference_position = min(
+                        reference_positions,
+                        key=lambda pos: abs(float(offsets[pos]) - 60.0),
+                    )
+
+                confirmed = (
+                    reference_position is not None
+                    and results["intraday_momentum_fresh"] is True
+                    and session_start_utc is not None
+                    and current_time >= session_start_utc
+                    and momentum_source != "stale_historical_bars"
+                )
+
+                if reference_position is None:
+                    prior_positions = np.flatnonzero(offsets > 0.0)
+                    if len(prior_positions):
+                        reference_position = int(prior_positions[-1])
+
+                if reference_position is not None:
+                    reference_time = pd.Timestamp(
+                        momentum_close.index[reference_position]
+                    )
+                    reference_price = float(momentum_close.iloc[reference_position])
+                    window_minutes = (
+                        current_time - reference_time
+                    ).total_seconds() / 60.0
+                    if reference_price > 0 and window_minutes > 0:
+                        momentum_value = current_price / reference_price - 1.0
+                        results["intraday_mom"] = float(momentum_value)
+                        results["intraday_momentum_reference_price"] = reference_price
+                        results["intraday_momentum_reference_time"] = (
+                            reference_time.isoformat()
+                        )
+                        results["intraday_momentum_window_minutes"] = round(
+                            window_minutes, 2
+                        )
+                        results["intraday_momentum_confirmed"] = bool(confirmed)
+                        results["intraday_momentum_start_bar_time"] = (
+                            reference_time.isoformat()
+                        )
+                        if confirmed:
+                            mom1h = float(momentum_value)
+                            results["intraday_momentum_freshness_reason"] = (
+                                "confirmed_45_90m"
+                            )
+                        elif momentum_source == "stale_historical_bars":
+                            results["intraday_momentum_freshness_reason"] = "stale_historical_only"
+                        elif not results["intraday_momentum_fresh"]:
+                            results["intraday_momentum_freshness_reason"] = "latest_price_stale"
+                        else:
+                            results["intraday_momentum_freshness_reason"] = "short_window_unconfirmed"
+                elif momentum_source == "stale_historical_bars":
+                    results["intraday_momentum_freshness_reason"] = "no_historical_reference"
+                else:
+                    results["intraday_momentum_freshness_reason"] = "no_reference_price"
+            else:
+                results["intraday_momentum_fresh"] = False
+                results["intraday_momentum_freshness_reason"] = "insufficient_price_points"
+
+            # The active-regime model uses only confirmed one-hour momentum.
+            # Short-window or stale numeric readings remain diagnostics only.
 
             regime_config = None
             for artifact in (model_intra_mom, model_intra_mr):

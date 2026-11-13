@@ -249,6 +249,41 @@ def fetch_latest_price(symbol: str, prefer_yfinance=False) -> Optional[float]:
         return None
 
 
+def fetch_intraday_price_fallback(symbol: str) -> Optional[pd.DataFrame]:
+    """Fetch uncached 1-minute Yahoo bars including pre/post-market data.
+
+    This is a price-history fallback for momentum diagnostics only. It does
+    not provide an order price and callers must validate timestamps.
+    """
+    sym = str(symbol).upper().strip()
+    try:
+        df = yf.download(
+            sym,
+            period="1d",
+            interval="1m",
+            prepost=True,
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+        if df is None or df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        if "Close" not in df.columns:
+            return None
+
+        df = df.copy()
+        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+        df = df[~df.index.isna()].sort_index()
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df = df.dropna(subset=["Close"])
+        return df if not df.empty else None
+    except Exception as exc:
+        logger.warning(f"Yahoo intraday price fallback failed for {sym}: {exc}")
+        return None
+
+
 # ============================================================
 # INTRADAY — Alpaca (IEX feed)
 # ============================================================

@@ -666,6 +666,15 @@ def _safe_float(x, default=None):
         return default
 
 
+def _momentum_is_confirmed(diagnostics: dict) -> bool:
+    """Whether intraday momentum has a valid, fresh 45-90 minute reference."""
+    diagnostics = diagnostics or {}
+    if "intraday_momentum_confirmed" in diagnostics:
+        return diagnostics.get("intraday_momentum_confirmed") is True
+    # Preserve compatibility for older callers that do not supply the status.
+    return _safe_float(diagnostics.get("intraday_mom"), None) is not None
+
+
 def _core_entry_volume_block(diagnostics: dict) -> tuple:
     """Evaluate core-entry participation using a causal session-volume ratio.
 
@@ -943,7 +952,8 @@ def exceptional_initial_exposure_pct(
     checks = (
         _safe_float(probability, 0.0) >= required_probability,
         _safe_float(diag.get("session_return"), 0.0) > 0.0,
-        _safe_float(diag.get("intraday_mom"), 0.0) > 0.0,
+        _momentum_is_confirmed(diag)
+        and _safe_float(diag.get("intraday_mom"), 0.0) > 0.0,
         _safe_float(diag.get("vwap_distance"), 0.0) > 0.0,
         _safe_float(diag.get("vwap_slope_2"), 0.0) > 0.0,
         _safe_float(diag.get("relative_session_return"), 0.0) > 0.0,
@@ -979,7 +989,8 @@ def confirmed_rebuy_exposure_pct(
     checks = (
         _safe_float(probability, 0.0) >= required_probability,
         _safe_float(diag.get("session_return"), 0.0) > 0.0,
-        _safe_float(diag.get("intraday_mom"), 0.0) > 0.0,
+        _momentum_is_confirmed(diag)
+        and _safe_float(diag.get("intraday_mom"), 0.0) > 0.0,
         _safe_float(diag.get("vwap_distance"), 0.0) > 0.0,
         _safe_float(diag.get("vwap_slope_2"), 0.0) > 0.0,
         _safe_float(diag.get("relative_session_return"), 0.0) > 0.0,
@@ -1017,7 +1028,7 @@ def _confirmed_loss_exit(
         )
 
     momentum = _safe_float(diag.get("intraday_mom"), None)
-    if momentum is not None and momentum <= 0.0:
+    if _momentum_is_confirmed(diag) and momentum is not None and momentum <= 0.0:
         confirmations.append(f"momentum={momentum:.3%}<=0")
 
     vwap_distance = _safe_float(diag.get("vwap_distance"), None)
@@ -1064,7 +1075,7 @@ def _trend_protected_sell_reason(
     vwap_distance = _safe_float(diag.get("vwap_distance"), None)
     vwap_slope = _safe_float(diag.get("vwap_slope_2"), None)
 
-    if any(
+    if not _momentum_is_confirmed(diag) or any(
         value is None or value <= 0.0
         for value in (session_return, momentum, vwap_distance, vwap_slope)
     ):
@@ -1099,7 +1110,9 @@ def _confirmed_mr_reversal_entry(
     checks = (
         bool(MR_REVERSAL_ENTRY_ENABLED),
         str(diag.get("intraday_regime", "")).lower() == "mr",
-        momentum is not None and float(MR_REVERSAL_MIN_MOMENTUM) <= momentum <= 0.0,
+        _momentum_is_confirmed(diag)
+        and momentum is not None
+        and float(MR_REVERSAL_MIN_MOMENTUM) <= momentum <= 0.0,
         values["probability"] >= float(buy_threshold) + float(MR_REVERSAL_PROB_BUFFER),
         values["relative_accel"] is not None
         and values["relative_accel"] >= float(MR_REVERSAL_MIN_RELATIVE_ACCEL),
@@ -1650,6 +1663,7 @@ def should_trade(
     # ---------------------------------------------------------
     d_diag = (diagnostics or {}).get(symbol.upper(), {}) or {}
     intraday_mom = d_diag.get("intraday_mom")
+    momentum_confirmed = _momentum_is_confirmed(d_diag)
 
     # Risk exits are evaluated before should_trade() by the orchestrator. When
     # both active two-stage models expect no meaningful move, keep the current
@@ -1682,8 +1696,9 @@ def should_trade(
                 explain + "HOLD - two-stage movement gate expects no meaningful move.",
             )
         if (session_return is not None and session_return <= float(BUY_SESSION_RETURN_FLOOR)
-            and not (intraday_mom is not None and intraday_mom > 0)
-            and not (shares <= 0 and intraday_mom is not None and intraday_mom <= 0)):
+            and not (momentum_confirmed and intraday_mom is not None and intraday_mom > 0)
+            and not (shares <= 0 and momentum_confirmed
+                     and intraday_mom is not None and intraday_mom <= 0)):
             return make_decision(
                 "hold",
                 0,
@@ -1739,7 +1754,7 @@ def should_trade(
                 f"(current={detail}).",
             )
 
-        if intraday_mom is None or intraday_mom <= 0:
+        if not momentum_confirmed or intraday_mom is None or intraday_mom <= 0:
             detail = "unavailable" if intraday_mom is None else f"{intraday_mom:.3%}"
             return make_decision(
                 "hold",
@@ -1894,7 +1909,7 @@ def should_trade(
         # A confirmed mean-reversion turn may enter before the slower one-hour
         # momentum measure crosses zero. Momentum-regime entries retain the
         # original positive-momentum requirement.
-        if intraday_mom is not None and intraday_mom <= 0:
+        if momentum_confirmed and intraday_mom is not None and intraday_mom <= 0:
             reversal_confirmed, confirmation_count = _confirmed_mr_reversal_entry(
                 symbol,
                 prob_up,
@@ -2047,9 +2062,9 @@ def check_momentum_breakout(sym: str, diagnostics: dict, preds: dict) -> tuple:
     # Get momentum metrics
     mom = d.get("intraday_mom")
     vol = d.get("intraday_vol")
-    price = d.get("price")
+    price = d.get("intraday_momentum_current_price") or d.get("price")
 
-    if not all([mom is not None, price]):
+    if not _momentum_is_confirmed(d) or not all([mom is not None, price]):
         return False, ""
 
     try:
@@ -2146,6 +2161,8 @@ def _check_nvda_guarded_momentum_entry(
         return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: movement_expected=False"
     if d.get("intraday_model_used") != "intraday_mom":
         return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: momentum model inactive"
+    if not _momentum_is_confirmed(d):
+        return False, 0.0, f"[NVDA MOMENTUM REJECT] {sym}: 45-90m momentum unconfirmed"
 
     values = {}
     for name in (
@@ -2217,6 +2234,8 @@ def _check_guarded_momentum_entry(
         return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: movement_expected=False"
     if d.get("intraday_model_used") != "intraday_mom":
         return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: momentum model inactive"
+    if not _momentum_is_confirmed(d):
+        return False, 0.0, f"[GUARDED MOMENTUM REJECT] {sym}: 45-90m momentum unconfirmed"
 
     values = {}
     for name in (
@@ -2432,7 +2451,8 @@ def compute_strategy_decisions(
         session_return = _safe_float(_diag(sym).get("session_return"), None)
         momentum = _safe_float(_diag(sym).get("intraday_mom"), None)
         if (session_return is not None and session_return <= float(BUY_SESSION_RETURN_FLOOR)
-            and not (momentum is not None and momentum > 0)):
+            and not (_momentum_is_confirmed(_diag(sym))
+                     and momentum is not None and momentum > 0)):
             print(
                 f"[DEBUG _is_buy] {sym} BLOCKED: session return "
                 f"{session_return:.2%} <= {float(BUY_SESSION_RETURN_FLOOR):.2%}"
@@ -2844,7 +2864,8 @@ def compute_strategy_decisions(
         if (
             d.get("movement_expected") is False
             or (session_return is not None and session_return <= float(BUY_SESSION_RETURN_FLOOR)
-                and not ((_safe_float(d.get("intraday_mom"), None) or 0.0) > 0))
+                and not (_momentum_is_confirmed(d)
+                         and (_safe_float(d.get("intraday_mom"), None) or 0.0) > 0))
             or _block_buy_on_weak_volume(sym)
             or _block_buy_overbought(sym)
             or _momentum_entry_is_extended(d)[0]
@@ -2900,7 +2921,11 @@ def compute_strategy_decisions(
         pm = pms[sym]
         shares = float(pm.data.get("shares", 0.0))
 
-        if mom is not None and float(mom) > 0.015:  # >1.5% hourly momentum
+        if (
+            _momentum_is_confirmed(d)
+            and mom is not None
+            and float(mom) > 0.015
+        ):  # >1.5% confirmed momentum
             # If not holding and model is negative, override to neutral/buy
             if shares <= 0 and prob < 0.50:
                 # Session rebuy guard

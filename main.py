@@ -233,9 +233,16 @@ def log_signal_snapshot(
             "intradaylatestbartime",
             "intradaybarageminutes",
             "intradaymomentumfresh",
+            "intradaymomentumconfirmed",
             "intradaymomentumbars",
             "intradaymomentumstartbartime",
             "intradaymomentumfreshnessreason",
+            "intradaymomentumsource",
+            "intradaymomentumwindowminutes",
+            "intradaymomentumcurrentprice",
+            "intradaymomentumcurrentpricetime",
+            "intradaymomentumreferenceprice",
+            "intradaymomentumreferencetime",
             "marketsession",
             "intradayregime",  # ✅ NEW field
             "allowintraday",  # ✅ NEW field
@@ -272,12 +279,29 @@ def log_signal_snapshot(
             "intradaylatestbartime": sig.get("intraday_latest_bar_time"),
             "intradaybarageminutes": sig.get("intraday_bar_age_minutes"),
             "intradaymomentumfresh": sig.get("intraday_momentum_fresh"),
+            "intradaymomentumconfirmed": sig.get("intraday_momentum_confirmed"),
             "intradaymomentumbars": sig.get("intraday_momentum_bars"),
             "intradaymomentumstartbartime": sig.get(
                 "intraday_momentum_start_bar_time"
             ),
             "intradaymomentumfreshnessreason": sig.get(
                 "intraday_momentum_freshness_reason"
+            ),
+            "intradaymomentumsource": sig.get("intraday_momentum_source"),
+            "intradaymomentumwindowminutes": sig.get(
+                "intraday_momentum_window_minutes"
+            ),
+            "intradaymomentumcurrentprice": sig.get(
+                "intraday_momentum_current_price"
+            ),
+            "intradaymomentumcurrentpricetime": sig.get(
+                "intraday_momentum_current_price_time"
+            ),
+            "intradaymomentumreferenceprice": sig.get(
+                "intraday_momentum_reference_price"
+            ),
+            "intradaymomentumreferencetime": sig.get(
+                "intraday_momentum_reference_time"
             ),
             "marketsession": sig.get("market_session"),
             "intradayregime": sig.get("intraday_regime"),  # ✅ NEW
@@ -538,12 +562,31 @@ def get_predictions(symbols, debug=True):
             "intraday_latest_bar_time": sig.get("intraday_latest_bar_time"),
             "intraday_bar_age_minutes": sig.get("intraday_bar_age_minutes"),
             "intraday_momentum_fresh": sig.get("intraday_momentum_fresh"),
+            "intraday_momentum_confirmed": sig.get(
+                "intraday_momentum_confirmed"
+            ),
             "intraday_momentum_bars": sig.get("intraday_momentum_bars"),
             "intraday_momentum_start_bar_time": sig.get(
                 "intraday_momentum_start_bar_time"
             ),
             "intraday_momentum_freshness_reason": sig.get(
                 "intraday_momentum_freshness_reason"
+            ),
+            "intraday_momentum_source": sig.get("intraday_momentum_source"),
+            "intraday_momentum_window_minutes": sig.get(
+                "intraday_momentum_window_minutes"
+            ),
+            "intraday_momentum_current_price": sig.get(
+                "intraday_momentum_current_price"
+            ),
+            "intraday_momentum_current_price_time": sig.get(
+                "intraday_momentum_current_price_time"
+            ),
+            "intraday_momentum_reference_price": sig.get(
+                "intraday_momentum_reference_price"
+            ),
+            "intraday_momentum_reference_time": sig.get(
+                "intraday_momentum_reference_time"
             ),
             "market_session": sig.get("market_session"),
             "intraday_regime": sig.get("intraday_regime"),
@@ -726,9 +769,23 @@ def print_signal_diagnostics(decisions, diagnostics):
             f"| intraday_bar={sig.get('intraday_latest_bar_time') or 'NA'} "
             f"age={fmt(sig.get('intraday_bar_age_minutes'), 1)}m "
             f"mom_fresh={sig.get('intraday_momentum_fresh')} "
+            f"mom_confirmed={sig.get('intraday_momentum_confirmed')} "
+            f"mom_source={sig.get('intraday_momentum_source')} "
+            f"mom_window={fmt(sig.get('intraday_momentum_window_minutes'), 1)}m "
             f"session={sig.get('market_session')} "
             f"| regime={sig.get('intraday_regime')} | model={model_used} | {action}"
         )
+        if sig.get("intraday_momentum_current_price_time") or sig.get(
+            "intraday_momentum_reference_time"
+        ):
+            print(
+                f"    [MOMENTUM POINTS] current="
+                f"{sig.get('intraday_momentum_current_price')}@"
+                f"{sig.get('intraday_momentum_current_price_time') or 'NA'} "
+                f"reference={sig.get('intraday_momentum_reference_price')}@"
+                f"{sig.get('intraday_momentum_reference_time') or 'NA'} "
+                f"confirmed={sig.get('intraday_momentum_confirmed')}"
+            )
         if sig.get("relative_market_available"):
             print(
                 f"    [RELATIVE] {sym}: "
@@ -1473,35 +1530,17 @@ def process_all_symbols(symbols):
             f"prob_up={sig_prob:.3f}"
         )
 
-    # New BUYs during pre-market/after-hours must have a one-hour momentum
-    # window made entirely from fresh bars in the current extended session.
-    if EXTENDED_HOURS_TRADING_ENABLED and is_extended_hours():
-        for sym, decision in list(decisions.items()):
-            if str(decision.get("action", "")).lower() != "buy":
-                continue
-            if decision.get("buy_to_cover") or decision.get("position_reducing"):
-                continue
-            signal_diag = diagnostics.get(sym, {}) or {}
-            if signal_diag.get("intraday_momentum_fresh") is True:
-                continue
-
-            reason = signal_diag.get("intraday_momentum_freshness_reason")
-            latest_bar = signal_diag.get("intraday_latest_bar_time") or "unavailable"
-            age_minutes = signal_diag.get("intraday_bar_age_minutes")
-            age_text = (
-                "unknown" if age_minutes is None else f"{float(age_minutes):.1f}m"
+    # Momentum freshness is diagnostic and only activates momentum-specific
+    # guards; it must not impose a blanket BUY hold when other entry guards pass.
+    for sym, decision in decisions.items():
+        if str(decision.get("action", "")).lower() != "buy":
+            continue
+        signal_diag = diagnostics.get(sym, {}) or {}
+        if signal_diag.get("intraday_momentum_confirmed") is not True:
+            print(
+                f"[MOMENTUM] {sym} BUY not blocked by missing 45-90m confirmation; "
+                f"state={signal_diag.get('intraday_momentum_freshness_reason')}"
             )
-            decision = dict(decision)
-            decision["action"] = "hold"
-            decision["qty"] = 0
-            decision["entry_blocked"] = True
-            decision["explain"] = (
-                f"{decision.get('explain', '')} HOLD - extended-hours BUY blocked: "
-                "no fresh one-hour momentum window from the current session "
-                f"(reason={reason or 'not_confirmed'}, latest_bar_utc={latest_bar}, "
-                f"age={age_text})."
-            )
-            decisions[sym] = decision
 
     log_guard_decision_snapshot(decisions)
 
