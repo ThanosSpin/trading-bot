@@ -287,8 +287,19 @@ def _extended_hours_limit_price(client, symbol, side):
         print(f"[EXTENDED HOURS] No quote for {symbol}; skipping order: {exc}")
         return None
 
+    timestamp_text = timestamp.isoformat() if hasattr(timestamp, "isoformat") else repr(timestamp)
+    print(
+        f"[EXTENDED HOURS QUOTE] {symbol} side={side} "
+        f"bid={bid!r} ask={ask!r} timestamp={timestamp_text}"
+    )
+
     if bid <= 0 or ask <= 0 or ask < bid or timestamp is None:
-        print(f"[EXTENDED HOURS] Invalid quote for {symbol}; skipping order.")
+        print(
+            f"[EXTENDED HOURS] Invalid quote for {symbol} "
+            f"(bid_positive={bid > 0}, ask_positive={ask > 0}, "
+            f"not_crossed={ask >= bid}, has_timestamp={timestamp is not None}); "
+            "skipping order."
+        )
         return None
 
     if isinstance(timestamp, str):
@@ -301,9 +312,7 @@ def _extended_hours_limit_price(client, symbol, side):
         return None
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
-    quote_age = (
-        datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)
-    ).total_seconds()
+    quote_age = (datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds()
     if quote_age < -5 or quote_age > float(EXTENDED_HOURS_MAX_QUOTE_AGE_SECONDS):
         print(
             f"[EXTENDED HOURS] Stale quote for {symbol} ({quote_age:.0f}s); "
@@ -313,6 +322,12 @@ def _extended_hours_limit_price(client, symbol, side):
 
     midpoint = (bid + ask) / 2.0
     spread_pct = (ask - bid) / midpoint
+    print(
+        f"[EXTENDED HOURS QUOTE CHECK] {symbol} "
+        f"age_seconds={quote_age:.1f} spread_pct={spread_pct:.4%} "
+        f"age_limit_seconds={float(EXTENDED_HOURS_MAX_QUOTE_AGE_SECONDS):.1f} "
+        f"spread_limit_pct={float(EXTENDED_HOURS_MAX_SPREAD_PCT):.4%}"
+    )
     if spread_pct > float(EXTENDED_HOURS_MAX_SPREAD_PCT):
         print(
             f"[EXTENDED HOURS] Wide spread for {symbol} ({spread_pct:.2%}); "
