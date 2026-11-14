@@ -40,7 +40,6 @@ from config import (
     CORE_CONFIRMED_POSITION_EQUITY_PCT,
     OTHER_CONFIRMED_POSITION_EQUITY_PCT,
     CORE_CONFIRMED_POSITION_SYMBOLS,
-    CONFIRMED_PYRAMID_MIN_POSITION_RETURN,
     CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO,
     CONFIRMED_LOSS_EXIT_PCT,
     TREND_PROTECTED_SELL_ENABLED,
@@ -69,7 +68,6 @@ from config import (
     NVDA_MOMENTUM_MIN_RELATIVE_60M,
     NVDA_MOMENTUM_MIN_VOLUME_TIME_RATIO,
     NVDA_MOMENTUM_INITIAL_POSITION_EQUITY_PCT,
-    REBUY_THRESHOLD,
     REBUY_COOLDOWN_MINUTES,
     ALLOW_SAME_DAY_REBUY,
     USE_ARTIFACT_THRESHOLDS,
@@ -79,7 +77,6 @@ from config import (
     COST_AWARE_BUY_FLOOR,
     COST_AWARE_SELL_CEILING,
     COST_AWARE_MIN_HYSTERESIS,
-    MODEL_REBUY_BUFFER,
     MODEL_PYRAMID_BUFFER,
     MODEL_FULL_PYRAMID_BUFFER,
     MODEL_MIN_CLASS_BOUNDARY,
@@ -101,10 +98,8 @@ from config import (
     ROTATION_MIN_EDGE,
     MAX_NEW_SECONDARY_BUYS_PER_CYCLE,
     MAX_NEW_SECONDARY_BUYS_WITH_NVDA,
-    PYRAMID_COOLDOWN_MINUTES,
     MAX_PYRAMID_ADDITIONS,
     POST_STOP_REBUY_COOLDOWN_MINUTES,
-    POST_STOP_REBUY_BUFFER,
     RELATIVE_MOMENTUM_ENTRY_ENABLED,
 )
 from portfolio import PortfolioManager
@@ -333,17 +328,6 @@ def _pyramid_allowed(sym: str) -> tuple:
             f"{sym}: pyramid blocked - maximum {MAX_PYRAMID_ADDITIONS} "
             f"adds reached for this position."
         )
-    last_add = _session_state["last_pyramid_times"].get(sym)
-    if last_add is not None:
-        if last_add.tzinfo is None:
-            last_add = last_add.replace(tzinfo=timezone.utc)
-        elapsed = (_dt.now(timezone.utc) - last_add).total_seconds() / 60.0
-        if elapsed < float(PYRAMID_COOLDOWN_MINUTES):
-            remaining = float(PYRAMID_COOLDOWN_MINUTES) - elapsed
-            return False, (
-                f"{sym}: pyramid cooldown active ({elapsed:.0f}min elapsed; "
-                f"{remaining:.0f}min remaining)."
-            )
     return True, ""
 
 
@@ -435,11 +419,17 @@ def mark_session_flattened(sym: str):
 
 
 def _rebuy_allowed(
-    sym: str, prob_up: float, diagnostics: Dict[str, dict] = None
+    sym: str,
+    prob_up: float,
+    diagnostics: Dict[str, dict] = None,
+    *,
+    is_pyramid: bool = False,
 ) -> tuple:
     """
     Returns (allowed: bool, reason: str).
-    Called when shares=0 but symbol was already bought today.
+    Enforces session and time-based rebuy locks. Same-day re-entry and pyramid
+    probability floors use the effective pyramid threshold, without a separate
+    legacy rebuy probability buffer.
     """
     sym = sym.upper()
 
@@ -466,7 +456,7 @@ def _rebuy_allowed(
             pass
 
     last_sell_time = _session_state["sell_times"].get(sym)
-    if last_sell_time is not None:
+    if last_sell_time is not None and not is_pyramid:
         elapsed_min = (_dt.now(timezone.utc) - last_sell_time).total_seconds() / 60
 
         if elapsed_min < REBUY_COOLDOWN_MINUTES:
@@ -480,50 +470,20 @@ def _rebuy_allowed(
     if sym not in _session_state["buys"]:
         return True, ""
 
-    required_prob = _effective_rebuy_threshold(sym, diagnostics)
-
-    if stop_info:
-        required_prob = max(
-            required_prob,
-            _effective_buy_threshold(sym, diagnostics) + float(POST_STOP_REBUY_BUFFER),
-        )
-
-    if sym == "PLTR":
-        required_prob = max(
-            required_prob, _effective_buy_threshold(sym, diagnostics) + 0.04
-        )
-    else:
-        required_prob = _effective_rebuy_threshold(sym, diagnostics)
-
-    # --- NEW: extra penalty after a same-day soft stop ---
-    soft_ts = _session_state.get("soft_stops", {}).get(sym)
-    if soft_ts is not None:
-        # use MODEL_REBUY_BUFFER as penalty, or define a new constant if you prefer
-        penalty = float(MODEL_REBUY_BUFFER)
-        required_prob = max(
-            required_prob, _effective_buy_threshold(sym, diagnostics) + penalty
-        )
+    required_prob = max(
+        _effective_buy_threshold(sym, diagnostics),
+        _effective_pyramid_threshold(sym, diagnostics),
+    )
 
     if prob_up < required_prob:
         return False, (
             f"{sym}: same-day rebuy blocked - prob={prob_up:.3f} < "
-            f"required_rebuy_threshold={required_prob:.3f}."
+            f"required_effective_threshold={required_prob:.3f}."
         )
 
-    last_sell_time = _session_state["sell_times"].get(sym)
-    if last_sell_time is not None:
-        elapsed_min = (_dt.now(timezone.utc) - last_sell_time).total_seconds() / 60
-        if elapsed_min < REBUY_COOLDOWN_MINUTES:
-            remaining = REBUY_COOLDOWN_MINUTES - elapsed_min
-            return False, (
-                f"{sym}: same-day rebuy blocked - sell cooldown active "
-                f"({elapsed_min:.0f}min elapsed since sell, need {REBUY_COOLDOWN_MINUTES}min, "
-                f"{remaining:.0f}min remaining)."
-            )
-
     return True, (
-        f"{sym}: same-day rebuy ALLOWED - "
-        f"prob={prob_up:.3f} >= required_rebuy_threshold={required_prob:.3f}."
+        f"{sym}: same-day rebuy/add ALLOWED - "
+        f"prob={prob_up:.3f} >= required_effective_threshold={required_prob:.3f}."
     )
 
 
@@ -915,12 +875,6 @@ def _effective_sell_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> 
     return float(SELL_THRESHOLD)
 
 
-def _effective_rebuy_threshold(sym: str, diagnostics: Dict[str, dict] = None) -> float:
-    base_buy = _effective_buy_threshold(sym, diagnostics)
-    legacy = float(REBUY_THRESHOLD)
-    return round(max(legacy, min(0.98, base_buy + float(MODEL_REBUY_BUFFER))), 12)
-
-
 def _effective_pyramid_threshold(
     sym: str, diagnostics: Dict[str, dict] = None
 ) -> float:
@@ -970,7 +924,7 @@ def confirmed_rebuy_exposure_pct(
     probability: float,
     diagnostics: Dict[str, dict] = None,
 ) -> float:
-    """Return a larger restart size only for a fully confirmed non-stop rebuy."""
+    """Return the confirmed same-day re-entry target, capped by configuration."""
     sym = sym.upper()
     default = float(INITIAL_POSITION_EQUITY_PCT)
 
@@ -983,7 +937,7 @@ def confirmed_rebuy_exposure_pct(
 
     diag = (diagnostics or {}).get(sym, {}) or {}
     required_probability = max(
-        _effective_rebuy_threshold(sym, diagnostics),
+        _effective_buy_threshold(sym, diagnostics),
         _effective_pyramid_threshold(sym, diagnostics),
     )
     checks = (
@@ -992,9 +946,7 @@ def confirmed_rebuy_exposure_pct(
         _momentum_is_confirmed(diag)
         and _safe_float(diag.get("intraday_mom"), 0.0) > 0.0,
         _safe_float(diag.get("vwap_distance"), 0.0) > 0.0,
-        _safe_float(diag.get("vwap_slope_2"), 0.0) > 0.0,
         _safe_float(diag.get("relative_session_return"), 0.0) > 0.0,
-        _safe_float(diag.get("relative_return_4"), 0.0) > 0.0,
         _safe_float(diag.get("volume_time_ratio"), 0.0)
         >= float(CONFIRMED_REBUY_MIN_VOLUME_TIME_RATIO),
     )
@@ -1735,30 +1687,6 @@ def should_trade(
                 0,
                 explain + "HOLD - pyramid blocked; average entry is unavailable.",
             )
-        position_return = (price - avg_cost) / avg_cost
-        if position_return < float(CONFIRMED_PYRAMID_MIN_POSITION_RETURN):
-            unrealized_pct = position_return
-            if price < avg_cost:
-                # Risk exits remain immediate even though adding is blocked.
-                stop_decision = check_stop_tp(
-                    symbol,
-                    price,
-                    pm,
-                    prob_up=prob_up,
-                    effective_buy_threshold=effective_buy_threshold,
-                )
-                if stop_decision is not None:
-                    return stop_decision
-
-            return make_decision(
-                "hold",
-                0,
-                explain + f"HOLD - pyramid requires position return at least "
-                f"{float(CONFIRMED_PYRAMID_MIN_POSITION_RETURN):.2%} "
-                f"(entry=${avg_cost:.2f}, now=${price:.2f}, "
-                f"return={unrealized_pct:.1%}).",
-            )
-
         if session_return is None or session_return <= 0:
             detail = (
                 "unavailable" if session_return is None else f"{session_return:.2%}"
@@ -1780,7 +1708,6 @@ def should_trade(
             )
 
         confirmation_checks = (
-            ("60-minute relative strength", _safe_float(d_diag.get("relative_return_4"), None), 0.0, False),
             ("time-normalized volume", _safe_float(d_diag.get("volume_time_ratio"), None),
              float(CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO), True),
         )
@@ -1883,11 +1810,13 @@ def should_trade(
             # larger addition after the ordinary cash and exposure caps.
             qty = max(1, int(qty * pyramid_size_multiplier))
 
-        # A sell cooldown blocks every new BUY, including pyramid adds.
+        # Flat re-entries observe the ordinary sell cooldown. Pyramids do not
+        # wait after a normal sell; the post-stop lock above still applies.
         allowed, cooldown_reason = _rebuy_allowed(
             symbol,
             prob_up,
             diagnostics,
+            is_pyramid=True,
         )
 
         if not allowed:
@@ -2493,7 +2422,8 @@ def compute_strategy_decisions(
             print(f"[BLOCK] {sym}: entry blocked - chase conditions ({detail})")
             return False
 
-        # Session rebuy guard - block same-day re-entry below REBUY_THRESHOLD
+        # Same-day re-entry uses the effective BUY/pyramid threshold plus the
+        # sell/stop cooldowns; no separate REBUY_THRESHOLD buffer applies.
         if sym in _session_state["buys"]:
             allowed, reason = _rebuy_allowed(sym, preds.get(sym, 0.0))
             if not allowed:
