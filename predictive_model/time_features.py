@@ -315,8 +315,14 @@ def add_intraday_market_features(
 
     if benchmark_df is not None and not benchmark_df.empty:
         benchmark = benchmark_df
+        benchmark_close = benchmark["Close"]
+        # yfinance may return OHLC columns as a one-column DataFrame when the
+        # ticker level remains in a MultiIndex, even for a single benchmark.
+        # Normalize it to a Series before numeric conversion and alignment.
+        if isinstance(benchmark_close, pd.DataFrame):
+            benchmark_close = benchmark_close.iloc[:, 0]
         benchmark_close = pd.to_numeric(
-            benchmark["Close"], errors="coerce"
+            benchmark_close, errors="coerce"
         ).dropna()
 
         if isinstance(df.index, pd.DatetimeIndex):
