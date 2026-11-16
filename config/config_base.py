@@ -235,7 +235,11 @@ RISK_FRACTION = 0.5
 MAX_LOSS_PER_TRADE = None
 MAX_LOSS_ACCOUNT_EQUITY_PCT = 0.005
 MAX_LOSS_PER_POSITION_PCT = 0.015
-PROFIT_TRIGGER_PCT = 0.02  # +2% intraday profit trigger
+PROFIT_TRIGGER_PCT = 0.03  # +3% one-time intraday profit trim trigger
+# Once a position reaches +1%, protect the remainder with a trailing floor.
+PROFIT_FLOOR_ACTIVATE_PCT = 0.01
+PROFIT_FLOOR_MIN_LOCK_PCT = 0.002
+PROFIT_FLOOR_TRAIL_PCT = 0.0075
 
 MAX_POSITION_SIZE_PCT = 0.90
 MAX_POSITION_SIZE_DOLLARS = None
@@ -256,6 +260,11 @@ CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO = 0.30
 # Measure the loss from the broker average entry and require deteriorating
 # model or price evidence before exiting at this tighter threshold.
 CONFIRMED_LOSS_EXIT_PCT = -0.005
+
+# Exit near breakeven after persistent, multi-indicator deterioration.
+EARLY_WARNING_EXIT_MIN_RETURN_PCT = -0.0025
+EARLY_WARNING_EXIT_REQUIRED_SIGNALS = 2
+EARLY_WARNING_EXIT_CONFIRM_CYCLES = 2
 
 # Defer an ordinary model SELL while an already-profitable position continues
 # to trend upward. Risk exits are evaluated first and always take precedence.

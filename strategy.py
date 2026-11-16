@@ -42,6 +42,9 @@ from config import (
     CORE_CONFIRMED_POSITION_SYMBOLS,
     CONFIRMED_PYRAMID_MIN_VOLUME_TIME_RATIO,
     CONFIRMED_LOSS_EXIT_PCT,
+    EARLY_WARNING_EXIT_MIN_RETURN_PCT,
+    EARLY_WARNING_EXIT_REQUIRED_SIGNALS,
+    EARLY_WARNING_EXIT_CONFIRM_CYCLES,
     TREND_PROTECTED_SELL_ENABLED,
     TREND_PROTECTED_SELL_MIN_PROBABILITY,
     DIP_BUY_ENABLED,
@@ -95,6 +98,9 @@ from config import (
     SPY_MODEL_ENTRY_BUFFER,
     SPY_MODEL_EXIT_BUFFER,
     PROFIT_TRIGGER_PCT,
+    PROFIT_FLOOR_ACTIVATE_PCT,
+    PROFIT_FLOOR_MIN_LOCK_PCT,
+    PROFIT_FLOOR_TRAIL_PCT,
     ROTATION_MIN_EDGE,
     MAX_NEW_SECONDARY_BUYS_PER_CYCLE,
     MAX_NEW_SECONDARY_BUYS_WITH_NVDA,
@@ -128,6 +134,8 @@ _session_state: dict = {
     "pyramid_counts": {},
     "last_pyramid_times": {},
     "stop_exits": {},
+    "deterioration_exit_counts": {},
+    "daily_profit_trimmed": set(),
     "mr_reversal_counts": {},
     "earnings_opening_buys": set(),
 }
@@ -156,6 +164,8 @@ def reset_session_state():
     _session_state["pyramid_counts"].clear()
     _session_state["last_pyramid_times"].clear()
     _session_state["stop_exits"].clear()
+    _session_state["deterioration_exit_counts"].clear()
+    _session_state["daily_profit_trimmed"].clear()
     _session_state["mr_reversal_counts"].clear()
     _session_state["earnings_opening_buys"].clear()
     print("[SESSION] Session state reset for new trading day.")
@@ -206,6 +216,13 @@ def load_session_state():
                 for k, v in data.get("last_pyramid_times", {}).items()
             }
             _session_state["stop_exits"] = data.get("stop_exits", {})
+            _session_state["deterioration_exit_counts"] = {
+                str(k).upper(): int(v)
+                for k, v in data.get("deterioration_exit_counts", {}).items()
+            }
+            _session_state["daily_profit_trimmed"] = set(
+                str(sym).upper() for sym in data.get("daily_profit_trimmed", [])
+            )
             _session_state["mr_reversal_counts"] = {
                 str(k).upper(): int(v)
                 for k, v in data.get("mr_reversal_counts", {}).items()
@@ -243,6 +260,8 @@ def save_session_state():
                 for k, v in _session_state["last_pyramid_times"].items()
             },
             "stop_exits": _session_state["stop_exits"],
+            "deterioration_exit_counts": _session_state["deterioration_exit_counts"],
+            "daily_profit_trimmed": list(_session_state["daily_profit_trimmed"]),
             "mr_reversal_counts": _session_state["mr_reversal_counts"],
             "earnings_opening_buys": list(_session_state["earnings_opening_buys"]),
         }
@@ -310,6 +329,15 @@ def mark_session_position_closed(sym: str):
     sym = sym.upper()
     _session_state["pyramid_counts"].pop(sym, None)
     _session_state["last_pyramid_times"].pop(sym, None)
+    _session_state["daily_profit_trimmed"].discard(sym)
+
+
+def session_profit_trimmed(sym: str) -> bool:
+    return str(sym).upper() in _session_state["daily_profit_trimmed"]
+
+
+def mark_daily_profit_trimmed(sym: str):
+    _session_state["daily_profit_trimmed"].add(str(sym).upper())
 
 
 def mark_session_stop(sym: str, stop_kind: str):
@@ -1004,6 +1032,63 @@ def _confirmed_loss_exit(
     )
 
 
+def _confirmed_deterioration_exit(
+    sym: str,
+    shares: float,
+    price: float,
+    avg_cost: float,
+    diagnostics: Dict[str, dict] = None,
+):
+    """Exit near breakeven when two deterioration signals persist twice."""
+    sym = str(sym).upper()
+    counts = _session_state.setdefault("deterioration_exit_counts", {})
+    if shares <= 0 or price <= 0 or avg_cost <= 0:
+        counts.pop(sym, None)
+        return None
+
+    position_return = (float(price) - float(avg_cost)) / float(avg_cost)
+    if not (float(EARLY_WARNING_EXIT_MIN_RETURN_PCT) <= position_return <= 0.0):
+        counts.pop(sym, None)
+        return None
+
+    diag = (diagnostics or {}).get(sym, {}) or {}
+    signals = []
+    momentum = _safe_float(diag.get("intraday_mom"), None)
+    if _momentum_is_confirmed(diag) and momentum is not None and momentum < 0.0:
+        signals.append(f"confirmed momentum={momentum:.3%}<0")
+
+    vwap_distance = _safe_float(diag.get("vwap_distance"), None)
+    if vwap_distance is not None and vwap_distance < 0.0:
+        signals.append(f"VWAP distance={vwap_distance:.3%}<0")
+
+    vwap_slope_2 = _safe_float(diag.get("vwap_slope_2"), None)
+    if vwap_slope_2 is not None and vwap_slope_2 < 0.0:
+        signals.append(f"2-period VWAP slope={vwap_slope_2:.3%}<0")
+
+    if len(signals) < int(EARLY_WARNING_EXIT_REQUIRED_SIGNALS):
+        counts.pop(sym, None)
+        return None
+
+    cycle_count = int(counts.get(sym, 0)) + 1
+    counts[sym] = cycle_count
+    if cycle_count < int(EARLY_WARNING_EXIT_CONFIRM_CYCLES):
+        return None
+
+    counts.pop(sym, None)
+    return make_decision(
+        "sell",
+        int(shares),
+        (
+            f"{sym}: CONFIRMED DETERIORATION EXIT - position return "
+            f"{position_return:.2%} within [{float(EARLY_WARNING_EXIT_MIN_RETURN_PCT):.2%}, 0.00%]; "
+            f"confirmed for {cycle_count} consecutive cycles; "
+            + "; ".join(signals)
+            + "."
+        ),
+        exit_reason="confirmed_deterioration_exit",
+    )
+
+
 def _trend_protected_sell_reason(
     sym: str,
     price: float,
@@ -1235,8 +1320,7 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.015):
 # ---------------------------------------------------------
 def apply_daily_profit_guard(decisions, diagnostics=None):
     """
-    Partial take-profit: when unrealized gain crosses PROFIT_TRIGGER_PCT,
-    sell 50% of the position.
+    One-time per-position trim when unrealized gain reaches PROFIT_TRIGGER_PCT.
     """
     diagnostics = diagnostics or {}
     print(f"[DAILY PROFIT GUARD] PROFIT_TRIGGER_PCT={PROFIT_TRIGGER_PCT:.2%}")
@@ -1244,8 +1328,15 @@ def apply_daily_profit_guard(decisions, diagnostics=None):
     any_triggered = False
 
     for sym, d in list(decisions.items()):
+        sym = str(sym).upper()
         # Only consider symbols we might hold or sell
         if d.get("action") not in ("hold", "sell", "buy"):
+            continue
+        if d.get("action") == "sell":
+            # Preserve an already-selected full or risk exit.
+            continue
+        if session_profit_trimmed(sym):
+            print(f"[DAILY PROFIT GUARD] {sym}: one-time trim already executed.")
             continue
 
         pm = PortfolioManager(sym)
@@ -1266,17 +1357,20 @@ def apply_daily_profit_guard(decisions, diagnostics=None):
         unrealized_pct = (last_price - avg_price) / avg_price
 
         if unrealized_pct >= PROFIT_TRIGGER_PCT:
-            qty = max(1, int(shares * 0.5))  # sell 50%
+            qty = min(int(shares), max(1, int(shares * 0.5)))
+            is_full_exit = qty >= int(shares)
 
             decisions[sym] = {
                 "action": "sell",
                 "qty": qty,
                 "explain": (
-                    f"Daily profit guard: partial SELL at {unrealized_pct:.2%} "
-                    f"(trigger {PROFIT_TRIGGER_PCT:.2%}), 50% position trimmed."
+                    f"Daily profit guard: SELL {qty} of {int(shares)} at "
+                    f"{unrealized_pct:.2%} (trigger {PROFIT_TRIGGER_PCT:.2%}); "
+                    + ("one-share position fully exited." if is_full_exit else "one-time half trim.")
                 ),
                 "priority_rank": 0,
                 "exit_reason": "daily_profit_guard",
+                "profit_trim_full_exit": is_full_exit,
             }
             any_triggered = True
 
@@ -1516,8 +1610,29 @@ def check_stop_tp(
             "hard_stop",
         )
 
-    # 2) TRAILING STOP (ONLY AFTER +5% PROFIT)
-    if price >= entry_price * TRAIL_ACTIVATE:
+    # After a +1% high, lock at least +0.20% or trail the high by 0.75%,
+    # whichever yields the higher floor. Keep this as a normal profit exit so
+    # a valid same-day re-entry uses the standard cooldown.
+    if mp >= entry_price * (1.0 + float(PROFIT_FLOOR_ACTIVATE_PCT)):
+        profit_floor = max(
+            entry_price * (1.0 + float(PROFIT_FLOOR_MIN_LOCK_PCT)),
+            mp * (1.0 - float(PROFIT_FLOOR_TRAIL_PCT)),
+        )
+        if price <= profit_floor:
+            return make_decision(
+                "sell",
+                int(shares),
+                (
+                    f"{symbol}: PROFIT FLOOR hit {price:.2f} <= {profit_floor:.2f}; "
+                    f"high={mp:.2f}, minimum lock="
+                    f"{float(PROFIT_FLOOR_MIN_LOCK_PCT):.2%}, "
+                    f"trail={float(PROFIT_FLOOR_TRAIL_PCT):.2%}."
+                ),
+                exit_reason="profit_floor",
+            )
+
+    # 2) TRAILING STOP: remain armed after the high-water mark activates it.
+    if mp >= entry_price * TRAIL_ACTIVATE:
         trail_level = mp * TRAIL_STOP
         if price <= trail_level:
             return _margin_tiered_sell(
@@ -1626,6 +1741,19 @@ def should_trade(
     # position and suppress model-driven entries, pyramids, and exits.
     no_meaningful_move = d_diag.get("movement_expected") is False
     session_return = _safe_float(d_diag.get("session_return"), None)
+
+    # A persistent early warning can exit near breakeven before the wider
+    # confirmed-loss safeguard.
+    if shares > 0:
+        deterioration_exit = _confirmed_deterioration_exit(
+            symbol,
+            shares,
+            price,
+            float(pm.data.get("avg_price", 0.0) or 0.0),
+            diagnostics,
+        )
+        if deterioration_exit is not None:
+            return deterioration_exit
 
     # A confirmed loss exit is risk-driven and therefore bypasses the
     # 45-minute minimum hold used only for ordinary model exits.

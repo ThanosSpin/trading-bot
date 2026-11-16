@@ -20,6 +20,7 @@ from strategy import (
     mark_session_flattened,
     mark_session_position_closed,
     mark_session_stop,
+    mark_daily_profit_trimmed,
     apply_position_limits,
     exceptional_initial_exposure_pct,
     _effective_buy_threshold,
@@ -1271,11 +1272,14 @@ def execute_decisions(decisions, diagnostics=None):
             ),
         )
         mark_session_sell(sym)
+        if decision.get("exit_reason") == "daily_profit_guard":
+            mark_daily_profit_trimmed(sym)
         if decision.get("risk_exit"):
             mark_session_stop(sym, decision["risk_exit"])
         pm.refresh_live()
         if float(pm.data.get("shares", 0.0) or 0.0) <= 0:
             mark_session_position_closed(sym)
+        save_session_state()
         print(f"Updated Snapshot (cash + {sym} position): ${pm.value():.2f}")
 
     # An unresolved cancellation can still fill later. Defer all BUYs until
