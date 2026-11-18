@@ -577,17 +577,26 @@ def add_spy_regime_features(
             )
             return df
 
-        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-        if (
-            isinstance(benchmark_df.index, pd.DatetimeIndex)
-            and benchmark_df.index.tz is not None
-        ):
-            benchmark_df.index = benchmark_df.index.tz_localize(None)
-
         spy_raw = benchmark_df["Close"]
         spy_close = spy_raw.iloc[:, 0] if isinstance(spy_raw, pd.DataFrame) else spy_raw
         spy_close = pd.to_numeric(spy_close, errors="coerce").dropna()
+
+        # Align benchmark timestamps to the asset index without stripping UTC
+        # first. Intraday session helpers rely on timezone-aware timestamps to
+        # convert bars to New York time; making UTC-naive indexes would cause
+        # those later checks to interpret UTC clock time as New York time.
+        if isinstance(df.index, pd.DatetimeIndex) and isinstance(
+            spy_close.index, pd.DatetimeIndex
+        ):
+            if df.index.tz is not None:
+                if spy_close.index.tz is None:
+                    spy_close.index = spy_close.index.tz_localize(df.index.tz)
+                else:
+                    spy_close.index = spy_close.index.tz_convert(df.index.tz)
+            elif spy_close.index.tz is not None:
+                spy_close.index = (
+                    spy_close.index.tz_convert("America/New_York").tz_localize(None)
+                )
 
         if len(spy_close) < 20:
             print("[SPY-FEATURES] Insufficient benchmark data - skipping")

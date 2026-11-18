@@ -500,6 +500,7 @@ def _filter_intraday_rows_by_mode(
     mode: str,
     train_frac: float = 0.70,
     percentile: float = 0.70,
+    eligible_mask: Optional[pd.Series] = None,
 ) -> Tuple[pd.DataFrame, dict]:
     """
     Fit regime thresholds on the earliest training portion only, then apply
@@ -509,10 +510,22 @@ def _filter_intraday_rows_by_mode(
         return df_feat.copy(), {}
 
     with_regime = _add_intraday_regime_cols(df_feat)
+    eligible_count = len(with_regime)
+    if eligible_mask is not None:
+        eligible_mask = np.asarray(eligible_mask, dtype=bool)
+        if len(eligible_mask) != len(with_regime):
+            raise ValueError(
+                "Intraday target-eligibility mask length does not match feature rows"
+            )
+        eligible_count = int(eligible_mask.sum())
+        with_regime = with_regime.iloc[eligible_mask]
     with_regime = with_regime.replace([np.inf, -np.inf], np.nan)
     with_regime = with_regime.dropna(subset=["mom_4_abs", "vol_12"])
     if with_regime.empty:
-        raise ValueError(f"No valid regime rows for mode={mode}")
+        raise ValueError(
+            f"No valid target-eligible regime rows for mode={mode} "
+            f"(target_eligible={eligible_count})"
+        )
 
     fit_end = int(len(with_regime) * train_frac)
     if fit_end < 20:
@@ -544,9 +557,35 @@ def _filter_intraday_rows_by_mode(
     }
     print(
         f"[REGIME] {mode}: {len(with_regime)} -> {len(filtered)} rows "
+        f"| target-eligible={eligible_count} "
         f"| train-only mom={mom_threshold:.6f} vol={vol_threshold:.6f}"
     )
     return filtered, regime_config
+
+
+def _intraday_target_eligibility_mask(
+    df_feat: pd.DataFrame,
+    horizon_bars: int,
+) -> np.ndarray:
+    """Select rows whose forward horizon stays within one intraday session."""
+    close = df_feat["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = pd.to_numeric(close, errors="coerce")
+    eligible = (
+        close.notna() & close.shift(-horizon_bars).notna()
+    ).to_numpy(dtype=bool)
+
+    if isinstance(df_feat.index, pd.DatetimeIndex):
+        session_values = intraday_session_keys(df_feat.index).to_numpy()
+        same_session = np.zeros(len(session_values), dtype=bool)
+        if horizon_bars < len(session_values):
+            same_session[:-horizon_bars] = (
+                session_values[:-horizon_bars] == session_values[horizon_bars:]
+            )
+        eligible &= same_session
+
+    return eligible
 
 def _artifact_age_days(artifact: dict):
     if not artifact:
@@ -648,6 +687,7 @@ def train_model(
         )
 
     print(f"\n[FEATURES] Building engineered features for {symbol}/{mode}...")
+    regime_selected_index = None
     if mode == "daily":
         df_feat = build_daily_features(df)
     elif mode in ("intraday", "intraday_mr", "intraday_mom"):
@@ -659,7 +699,23 @@ def train_model(
             )
         df_feat = build_intraday_features(df, benchmark_df=benchmark_df)
         if mode in ("intraday_mr", "intraday_mom"):
-            df_feat, regime_config = _filter_intraday_rows_by_mode(df_feat, mode=mode)
+            regime_target_horizon = (
+                1 if use_multiclass else (4 if use_two_stage else 1)
+            )
+            target_eligible_mask = _intraday_target_eligibility_mask(
+                df_feat,
+                horizon_bars=regime_target_horizon,
+            )
+            regime_rows, regime_config = _filter_intraday_rows_by_mode(
+                df_feat,
+                mode=mode,
+                eligible_mask=target_eligible_mask,
+            )
+            regime_selected_index = regime_rows.index
+            # Keep the full chronological feature frame until forward targets
+            # are computed. Filtering first makes a four-bar horizon jump over
+            # omitted regime rows and can invalidate every label.
+            df_feat = _add_intraday_regime_cols(df_feat)
         for c in ["ret_12", "mom_12_abs", "mom_4_abs", "vol_12"]:
             if c in df_feat.columns:
                 df_feat = df_feat.drop(columns=[c])
@@ -686,11 +742,22 @@ def train_model(
         df_feat = create_multiclass_target(
             df_feat, forward_periods=1, thresholds=thresholds
         )
+        target_col = "Target_multiclass"
         if mode != "daily" and isinstance(df_feat.index, pd.DatetimeIndex):
             session_keys = intraday_session_keys(df_feat.index)
             same_session = session_keys.eq(session_keys.shift(-1))
             df_feat.loc[~same_session, "Target_multiclass"] = np.nan
-        target_col = "Target_multiclass"
+        if regime_selected_index is not None:
+            regime_mask = df_feat.index.isin(regime_selected_index)
+            print(
+                f"[REGIME TARGET] {symbol}/{mode}: "
+                f"frame_rows={len(df_feat)} "
+                f"regime_index_rows={len(regime_selected_index)} "
+                f"index_overlap={int(regime_mask.sum())} "
+                f"labeled_before={int(df_feat[target_col].notna().sum())} "
+                f"labeled_after={int(df_feat.loc[regime_mask, target_col].notna().sum())}"
+            )
+            df_feat = df_feat.loc[regime_mask].copy()
         num_classes = 5
         objective = "multi:softprob"
         eval_metric = "mlogloss"
@@ -721,11 +788,57 @@ def train_model(
             use_two_stage=use_two_stage,
             min_move_override=min_move_override,
         )
-        binary_evaluation_frame = df_feat.copy()
         target_col = "target"
+        if regime_selected_index is not None:
+            regime_mask = df_feat.index.isin(regime_selected_index)
+            selected_regime_rows = df_feat.loc[regime_mask]
+            selected_forward_valid = selected_regime_rows["forward_return"].notna()
+            selected_target = selected_regime_rows[target_col]
+            print(
+                f"[REGIME TARGET] {symbol}/{mode}: "
+                f"frame_rows={len(df_feat)} "
+                f"regime_index_rows={len(regime_selected_index)} "
+                f"index_overlap={int(regime_mask.sum())} "
+                f"labeled_before={int(df_feat[target_col].notna().sum())} "
+                f"labeled_after={int(selected_target.notna().sum())}"
+            )
+            print(
+                f"[REGIME TARGET DETAIL] {symbol}/{mode}: "
+                f"selected_rows={len(selected_regime_rows)} "
+                f"valid_forward_returns={int(selected_forward_valid.sum())} "
+                f"no_same_session_forward_return={int((~selected_forward_valid).sum())} "
+                f"neutral={int((selected_forward_valid & selected_target.isna()).sum())} "
+                f"class_0={int(selected_target.eq(0).sum())} "
+                f"class_1={int(selected_target.eq(1).sum())}"
+            )
+            df_feat = df_feat.loc[regime_mask].copy()
+        binary_evaluation_frame = df_feat.copy()
         num_classes = 2
         objective = "binary:logistic"
         eval_metric = "logloss"
+
+    if mode in ("intraday_mr", "intraday_mom"):
+        labeled_rows = df_feat.loc[df_feat[target_col].notna()]
+        missing_counts = labeled_rows.isna().sum()
+        missing_counts = missing_counts[missing_counts > 0].sort_values(
+            ascending=False
+        )
+        complete_labeled_rows = int(labeled_rows.notna().all(axis=1).sum())
+        print(
+            f"[ROW VALIDATION] {symbol}/{mode}: "
+            f"labeled_rows={len(labeled_rows)} "
+            f"complete_labeled_rows={complete_labeled_rows} "
+            f"rows_removed_by_dropna={len(labeled_rows) - complete_labeled_rows}"
+        )
+        if not missing_counts.empty:
+            missing_summary = ", ".join(
+                f"{column}={int(count)}/{len(labeled_rows)}"
+                for column, count in missing_counts.items()
+            )
+            print(
+                f"[ROW VALIDATION] NaNs among labeled {symbol}/{mode} rows: "
+                f"{missing_summary}"
+            )
 
     df_feat = df_feat.dropna().copy()
     if df_feat.empty:

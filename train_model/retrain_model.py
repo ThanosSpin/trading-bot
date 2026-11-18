@@ -40,7 +40,9 @@ USE_TWO_STAGE = USE_TWO_STAGE_TARGETS
 DAILY_PERIOD = "3y"
 DAILY_INTERVAL = "1d"
 
-INTRADAY_LOOKBACK = 14400
+# Request the full 60-day 15-minute history available from Yahoo. The previous
+# 14,400-minute request retained only about ten calendar days of bars.
+INTRADAY_LOOKBACK = 60 * 24 * 60
 INTRADAY_INTERVAL = "15m"
 
 
