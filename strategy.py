@@ -1277,7 +1277,33 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.015):
 
         shares = float(pm.data.get("shares", 0.0) or 0.0)
         avg_price = float(pm.data.get("avg_price", 0.0) or 0.0)
-        last_price = float(fetch_latest_price(sym) or 0.0)
+        diag = (diagnostics or {}).get(str(sym).upper(), {}) or {}
+        session = str(diag.get("market_session") or "").lower()
+        yahoo_price = _safe_float(
+            diag.get("intraday_momentum_current_price"), None
+        )
+        yahoo_price_fresh = (
+            diag.get("intraday_momentum_source") == "yfinance_1m_prepost"
+            and diag.get("pyramid_yahoo_price_fresh") is True
+            and yahoo_price is not None
+            and yahoo_price > 0
+        )
+
+        if yahoo_price_fresh:
+            last_price = float(yahoo_price)
+            price_source = (
+                "fresh Yahoo 1m extended "
+                f"(age={diag.get('pyramid_yahoo_price_age_seconds')}s)"
+            )
+        elif session in {"pre_market", "after_hours", "closed"}:
+            print(
+                f"[DAILY LOSS GUARD] {sym}: skipped; no fresh extended-hours "
+                f"price available (session={session})."
+            )
+            continue
+        else:
+            last_price = float(fetch_latest_price(sym) or 0.0)
+            price_source = "latest Alpaca/Yahoo fallback"
 
         if shares <= 0 or avg_price <= 0 or last_price <= 0:
             print(f"[DAILY LOSS GUARD] {sym}: skipped (no valid shares/price).")
@@ -1292,7 +1318,8 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.015):
                 "qty": qty,
                 "explain": (
                     f"Daily loss guard SELL: unrealized={unrealized_pct:.2%} "
-                    f"<= {loss_limit_pct:.2%}."
+                    f"<= {loss_limit_pct:.2%} (price=${last_price:.4f}, "
+                    f"avg=${avg_price:.4f}, source={price_source})."
                 ),
                 "priority_rank": 0,
                 "risk_exit": "daily_loss_guard",
@@ -1301,12 +1328,15 @@ def apply_daily_loss_guard(decisions, diagnostics, loss_limit_pct=-0.015):
             any_triggered = True
             print(
                 f"[DAILY LOSS GUARD] TRIGGERED for {sym}: "
-                f"unrealized={unrealized_pct:.2%} <= {loss_limit_pct:.2%} → SELL {qty}"
+                f"unrealized={unrealized_pct:.2%} <= {loss_limit_pct:.2%} "
+                f"at ${last_price:.4f} vs avg ${avg_price:.4f} "
+                f"({price_source}) → SELL {qty}"
             )
         else:
             print(
                 f"[DAILY LOSS GUARD] Not triggered for {sym}: "
-                f"unrealized={unrealized_pct:.2%} above limit {loss_limit_pct:.2%}."
+                f"unrealized={unrealized_pct:.2%} above limit {loss_limit_pct:.2%} "
+                f"at ${last_price:.4f} vs avg ${avg_price:.4f} ({price_source})."
             )
 
     if not any_triggered:
