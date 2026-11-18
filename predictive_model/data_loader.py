@@ -374,6 +374,7 @@ def fetch_intraday_history_alpaca(
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df = df.set_index("timestamp").sort_index().tail(bars_needed)
+        df.attrs["data_source"] = "alpaca_iex"
 
         logger.info(f"Alpaca intraday data for {symbol}: {len(df)} bars (target {bars_needed})")
         return df
@@ -455,6 +456,7 @@ def fetch_intraday_history(
         df_y = df_y.copy()
         df_y.index = pd.to_datetime(df_y.index, utc=True, errors="coerce")
         df_y = df_y.sort_index().tail(bars_needed)
+        df_y.attrs["data_source"] = f"yfinance_{yf_interval}_regular_hours"
 
         logger.info(f"yfinance intraday data for {symbol}: {len(df_y)} bars (target {bars_needed})")
         return df_y

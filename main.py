@@ -233,6 +233,8 @@ def log_signal_snapshot(
             "intradaymom",
             "intradaylatestbartime",
             "intradaybarageminutes",
+            "intradaydatasource",
+            "intradaybarfresh",
             "intradaymomentumfresh",
             "intradaymomentumconfirmed",
             "intradaymomentumbars",
@@ -279,6 +281,8 @@ def log_signal_snapshot(
             "intradaymom": sig.get("intraday_mom"),
             "intradaylatestbartime": sig.get("intraday_latest_bar_time"),
             "intradaybarageminutes": sig.get("intraday_bar_age_minutes"),
+            "intradaydatasource": sig.get("intraday_bar_source"),
+            "intradaybarfresh": sig.get("intraday_bar_fresh"),
             "intradaymomentumfresh": sig.get("intraday_momentum_fresh"),
             "intradaymomentumconfirmed": sig.get("intraday_momentum_confirmed"),
             "intradaymomentumbars": sig.get("intraday_momentum_bars"),
@@ -461,7 +465,9 @@ def get_predictions(symbols, debug=True):
                 f"{old_w:.3f} -> {w:.3f}"
             )
 
-        if daily_prob is None and intraday_prob is None:
+        if daily_prob is None and (
+            intraday_prob is None or not allow_intraday
+        ):
             print(f"[WARN] Invalid prediction for {sym}, skipping.")
             f"reasons={sig.get('failure_reasons')} "
             f"daily_rows={sig.get('daily_rows')} intraday_rows={sig.get('intraday_rows')} "
@@ -469,9 +475,11 @@ def get_predictions(symbols, debug=True):
             continue
 
         # Fallbacks if one side missing
-        if daily_prob is None:
+        if daily_prob is None and allow_intraday:
             final_prob = float(intraday_prob)
-        elif intraday_prob is None or w == 0.0:
+        elif daily_prob is None:
+            final_prob = None
+        elif intraday_prob is None or not allow_intraday or w == 0.0:
             final_prob = float(daily_prob)
         else:
             daily_prob = float(daily_prob)
@@ -562,6 +570,8 @@ def get_predictions(symbols, debug=True):
             "intraday_mom": sig.get("intraday_mom"),
             "intraday_latest_bar_time": sig.get("intraday_latest_bar_time"),
             "intraday_bar_age_minutes": sig.get("intraday_bar_age_minutes"),
+            "intraday_bar_source": sig.get("intraday_bar_source"),
+            "intraday_bar_fresh": sig.get("intraday_bar_fresh"),
             "intraday_momentum_fresh": sig.get("intraday_momentum_fresh"),
             "intraday_momentum_confirmed": sig.get(
                 "intraday_momentum_confirmed"
@@ -775,6 +785,8 @@ def print_signal_diagnostics(decisions, diagnostics):
             f"| q={fmt(q):>4} vol={fmt(vol,5)} mom={fmt(mom,4)} vr={vr} "
             f"| intraday_bar={sig.get('intraday_latest_bar_time') or 'NA'} "
             f"age={fmt(sig.get('intraday_bar_age_minutes'), 1)}m "
+            f"bar_source={sig.get('intraday_bar_source') or 'NA'} "
+            f"bar_fresh={sig.get('intraday_bar_fresh')} "
             f"mom_fresh={sig.get('intraday_momentum_fresh')} "
             f"mom_confirmed={sig.get('intraday_momentum_confirmed')} "
             f"mom_source={sig.get('intraday_momentum_source')} "

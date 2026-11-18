@@ -1975,6 +1975,8 @@ def compute_signals(
         "intraday_mom": None,
         "intraday_latest_bar_time": None,
         "intraday_bar_age_minutes": None,
+        "intraday_bar_source": None,
+        "intraday_bar_fresh": False,
         "intraday_momentum_fresh": None,
         "intraday_momentum_confirmed": False,
         "intraday_momentum_bars": 0,
@@ -2115,6 +2117,7 @@ def compute_signals(
         best_len = 0
         best_lb = lookback_minutes
         best_before = 0
+        best_source = None
         rt = str(resample_to).lower().replace("mins", "min").replace(" ", "")
 
         for lb in candidate_lookbacks:
@@ -2125,6 +2128,7 @@ def compute_signals(
                 continue
 
             before = len(df_raw)
+            data_source = df_raw.attrs.get("data_source", "unknown")
             df_raw = df_raw.sort_index()
             if rt in ["15m", "15min", "15t"]:
                 df_res = df_raw.dropna()
@@ -2137,12 +2141,14 @@ def compute_signals(
                 best_df = df_res
                 best_lb = lb
                 best_before = before
+                best_source = data_source
             if n_res >= 80:
                 break
 
         df_intra_resampled = best_df
         results["intraday_before"] = best_before
         results["used_lookback_minutes"] = best_lb
+        results["intraday_bar_source"] = best_source
         results["intraday_rows"] = (
             0 if df_intra_resampled is None else len(df_intra_resampled)
         )
@@ -2159,6 +2165,19 @@ def compute_signals(
                 / 60.0,
                 2,
             )
+            bar_age_minutes = float(results["intraday_bar_age_minutes"])
+            results["intraday_bar_fresh"] = (
+                -5.0
+                <= bar_age_minutes
+                <= float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
+            )
+        print(
+            f"[INTRADAY MODEL DATA] {symU} "
+            f"source={results['intraday_bar_source'] or 'unavailable'} "
+            f"latest={results['intraday_latest_bar_time'] or 'NA'} "
+            f"age={results['intraday_bar_age_minutes']}m "
+            f"fresh={results['intraday_bar_fresh']}"
+        )
 
         if (
             df_intra_resampled is None
@@ -2684,6 +2703,20 @@ def compute_signals(
         results["intraday_prob"] = None
         results["intraday_quality_score"] = 0.0
 
+    # Intraday probability is trained on 15-minute features. A fresh 1-minute
+    # price used by momentum/limit-price checks does not make stale 15-minute
+    # model features current. Keep the old probability visible for diagnosis,
+    # but exclude it from the blended signal when its source bar is stale.
+    if results.get("intraday_prob") is not None and not results.get(
+        "intraday_bar_fresh", False
+    ):
+        results["allow_intraday"] = False
+        results["intraday_quality_score"] = 0.0
+        print(
+            f"[INTRADAY MODEL DATA] {symU}: stale 15-minute features; "
+            "intraday probability excluded from blend"
+        )
+
     if results.get("price") is None:
         try:
             p = fetch_latest_price(symU)
@@ -2749,11 +2782,14 @@ def compute_signals(
     results["intraday_weight_used"] = weight
 
     # --- 6) Final mixing (unchanged, just uses new weight) ---
-    if dp is None and ip is None:
+    intraday_probability_usable = ip is not None and results.get(
+        "allow_intraday", False
+    )
+    if dp is None and not intraday_probability_usable:
         results["final_prob"] = None
     elif dp is None:
         results["final_prob"] = float(ip)
-    elif ip is None or weight <= 0.0:
+    elif not intraday_probability_usable or weight <= 0.0:
         results["final_prob"] = float(dp)
     else:
         raw_final = float(weight * ip + (1 - weight) * dp)
