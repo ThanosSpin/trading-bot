@@ -1421,9 +1421,27 @@ def execute_decisions(decisions, diagnostics=None):
     # -------------------------
     for sym in hold_syms:
         decision = decisions[sym]
-        price = fetch_latest_price(sym)
+        decision_diag = diagnostics.get(sym, {}) or {}
+        yahoo_price = decision_diag.get("intraday_momentum_current_price")
+        yahoo_price_fresh = (
+            decision_diag.get("intraday_momentum_source") == "yfinance_1m_prepost"
+            and decision_diag.get("pyramid_yahoo_price_fresh") is True
+        )
+        if yahoo_price_fresh and yahoo_price is not None and float(yahoo_price) > 0:
+            price = float(yahoo_price)
+            price_source = (
+                "Yahoo 1m extended @ "
+                f"{decision_diag.get('intraday_momentum_current_price_time') or 'timestamp unavailable'} "
+                f"(age={decision_diag.get('pyramid_yahoo_price_age_seconds')}s)"
+            )
+        else:
+            price = fetch_latest_price(sym)
+            price_source = "fetch_latest_price fallback"
         print(f"\n--- {sym} Decision ---")
-        print(f"Action: HOLD | Qty: 0 | Price: {price}")
+        print(
+            f"Action: HOLD | Qty: 0 | Price: {price} | "
+            f"Source: {price_source}"
+        )
         print(f"Reason: {decision.get('explain', '')}")
         _print_probabilities_with_thresholds(sym)
         print("[INFO] HOLD — No trade executed.")
