@@ -1815,15 +1815,12 @@ def should_trade(
                 0,
                 explain + "HOLD - pyramid blocked; average entry is unavailable.",
             )
-        if session_return is None or session_return <= 0:
-            detail = (
-                "unavailable" if session_return is None else f"{session_return:.2%}"
-            )
+        if session_return is None:
             return make_decision(
                 "hold",
                 0,
-                explain + f"HOLD - pyramid requires positive session return "
-                f"(current={detail}).",
+                explain + "HOLD - pyramid requires session-return data; "
+                "current value is unavailable.",
             )
 
         if not momentum_confirmed or intraday_mom is None or intraday_mom <= 0:
@@ -1872,9 +1869,14 @@ def should_trade(
                     f"from entry ${avg_cost:.2f} (chasing prevention).",
                 )
 
-        # -- Guard 2c: reduce pyramid size if SPY is declining -------------
+        # -- Reduce add size in a red session or weak broad market --------
         pyramid_size_multiplier = 1.0
         pyramid_size_reasons = []
+        if session_return < 0:
+            pyramid_size_multiplier *= 0.50
+            pyramid_size_reasons.append(
+                f"session return {session_return:.2%} is negative"
+            )
         if prob_up < effective_full_pyramid_threshold:
             pyramid_size_multiplier *= 0.50
             pyramid_size_reasons.append(
