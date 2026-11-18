@@ -190,11 +190,34 @@ def train_intraday_models(sym: str):
         sym,
         lookback_minutes=INTRADAY_LOOKBACK,
         interval=INTRADAY_INTERVAL,
+        include_extended_hours=True,
     )
 
     if df_intra is None or df_intra.empty:
         print(f"[ERROR] No intraday data for {sym}. Skipping.")
         return
+
+    benchmark_intra = (
+        df_intra
+        if sym.upper() == "SPY"
+        else fetch_intraday_history(
+            "SPY",
+            lookback_minutes=INTRADAY_LOOKBACK,
+            interval=INTRADAY_INTERVAL,
+            include_extended_hours=True,
+        )
+    )
+    if benchmark_intra is None or benchmark_intra.empty:
+        print(
+            f"[ERROR] No extended-hours SPY benchmark data for {sym}. "
+            "Skipping intraday training to avoid mismatched benchmark features."
+        )
+        return
+    print(
+        f"[DATA] {sym} extended-session source="
+        f"{df_intra.attrs.get('data_source', 'unknown')} rows={len(df_intra)}; "
+        f"SPY rows={len(benchmark_intra)}"
+    )
 
     for mode in ["intraday_mr", "intraday_mom"]:
         try:
@@ -205,6 +228,7 @@ def train_intraday_models(sym: str):
                 mode=mode,
                 use_multiclass=USE_MULTICLASS,
                 use_two_stage=USE_TWO_STAGE,
+                benchmark_df=benchmark_intra,
             )
 
             if save_model_with_backup(artifact, symbol=sym, mode=mode):

@@ -594,6 +594,23 @@ def promotion_decision(candidate: dict, champion: Optional[dict]) -> dict:
     if _finite(aggregate.get("max_drawdown"), -1.0) < -0.20:
         reasons.append("candidate walk-forward drawdown exceeds 20%")
 
+    if candidate.get("extended_hours_trained"):
+        extended_test = (candidate.get("metrics") or {}).get(
+            "extended_hours_test", {}
+        )
+        for session_name in ("premarket", "after_hours"):
+            session_metrics = extended_test.get(session_name) or {}
+            samples = int(session_metrics.get("samples", 0))
+            session_brier = session_metrics.get("brier_score")
+            if samples < 20:
+                reasons.append(
+                    f"extended-hours {session_name} test has fewer than 20 samples"
+                )
+            if session_brier is None or _finite(session_brier, 1.0) > 0.27:
+                reasons.append(
+                    f"extended-hours {session_name} Brier score exceeds 0.27"
+                )
+
     result = {
         "accepted": False,
         "kind": "absolute_gate",

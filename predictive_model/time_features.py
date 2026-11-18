@@ -6,7 +6,13 @@ Captures market microstructure patterns that repeat daily.
 
 import pandas as pd
 import numpy as np
+import pandas_market_calendars as mcal
+import pytz
 from typing import Dict, Optional
+from functools import lru_cache
+
+NY_TZ = pytz.timezone("America/New_York")
+nyse = mcal.get_calendar("NYSE")
 
 
 ######## Helper  functions ########
@@ -42,6 +48,67 @@ def _market_clock_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     if index.tz is None:
         return index
     return index.tz_convert(NY_TZ).tz_localize(None)
+
+
+@lru_cache(maxsize=128)
+def _session_bounds_for_date(session_date):
+    schedule = nyse.schedule(start_date=session_date, end_date=session_date)
+    if schedule.empty:
+        return None
+    market_open = schedule.iloc[0]["market_open"].tz_convert(NY_TZ)
+    market_close = schedule.iloc[0]["market_close"].tz_convert(NY_TZ)
+    return (
+        market_open.hour * 60 + market_open.minute,
+        market_close.hour * 60 + market_close.minute,
+    )
+
+
+def _session_bounds(index: pd.DatetimeIndex):
+    clock = _market_clock_index(index)
+    open_minutes = np.full(len(clock), -1, dtype=int)
+    close_minutes = np.full(len(clock), -1, dtype=int)
+    for session_date in pd.unique(clock.date):
+        bounds = _session_bounds_for_date(session_date)
+        if bounds is None:
+            continue
+        mask = np.asarray(clock.date == session_date)
+        open_minutes[mask], close_minutes[mask] = bounds
+    return clock, open_minutes, close_minutes
+
+
+def intraday_session_types(index: pd.DatetimeIndex) -> pd.Series:
+    """Classify bars using the NYSE's date-specific regular-session hours."""
+    clock, open_minutes, close_minutes = _session_bounds(index)
+    minute = clock.hour * 60 + clock.minute
+    session_type = np.select(
+        [
+            (open_minutes >= 0) & (minute >= 4 * 60) & (minute < open_minutes),
+            (open_minutes >= 0)
+            & (close_minutes > open_minutes)
+            & (minute >= open_minutes)
+            & (minute < close_minutes),
+            (close_minutes >= 0)
+            & (minute >= close_minutes)
+            & (minute < 20 * 60),
+        ],
+        ["premarket", "regular", "after_hours"],
+        default="closed",
+    )
+    return pd.Series(session_type, index=index, dtype="object")
+
+
+def intraday_session_keys(index: pd.DatetimeIndex) -> pd.Series:
+    """Return New York date plus session type for session-local calculations."""
+    clock = _market_clock_index(index)
+    session_type = intraday_session_types(index)
+    return pd.Series(
+        [
+            f"{day.isoformat()}|{session}"
+            for day, session in zip(clock.date, session_type)
+        ],
+        index=index,
+        dtype="object",
+    )
 
 
 
@@ -91,9 +158,17 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df['clock_minute'] = df['hour'] * 60 + df['minute']
     
-    # Distance from market open (9:30 AM = 9.5)
-    df['minutes_since_open'] = (df['clock_minute'] - MARKET_OPEN_MIN).clip(lower=0)
-    df['minutes_to_close'] = (MARKET_CLOSE_MIN - df['clock_minute']).clip(lower=0)
+    _, open_minutes, close_minutes = _session_bounds(df.index)
+    session_type = intraday_session_types(df.index)
+    session_duration = np.maximum(close_minutes - open_minutes, 1)
+
+    # Distance from the date-specific NYSE open and close.
+    df['minutes_since_open'] = (
+        df['clock_minute'] - open_minutes
+    ).clip(lower=0)
+    df['minutes_to_close'] = (
+        close_minutes - df['clock_minute']
+    ).clip(lower=0)
 
     df['time_of_day'] = df['clock_minute'] / 60.0
     # df['normalized_time'] = (df['minutes_since_open'] / FULL_SESSION_MIN).clip(0, 1)
@@ -111,10 +186,9 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # df['session_phase'] = df['minutes_since_open'].apply(get_session_phase)
 
-    df['is_regular_session'] = (
-        (df['clock_minute'] >= MARKET_OPEN_MIN) &
-        (df['clock_minute'] < MARKET_CLOSE_MIN)
-    ).astype(int)
+    df['is_regular_session'] = session_type.eq('regular').astype(int)
+    df['is_premarket'] = session_type.eq('premarket').astype(int)
+    df['is_after_hours'] = session_type.eq('after_hours').astype(int)
 
     # One-hot encode (drop session_phase after)
     df['is_opening'] = (
@@ -123,7 +197,7 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     ).astype(int)
 
     df['is_closing'] = (
-        (df['minutes_since_open'] >= 330) &
+        (df['minutes_to_close'] <= 60) &
         (df['is_regular_session'] == 1)
     ).astype(int)
 
@@ -148,7 +222,10 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Cyclical encoding (sine/cosine for full trading day cycle)
     # 390 minutes = full cycle
-    session_pos = df['minutes_since_open'].clip(0, FULL_SESSION_MIN) / FULL_SESSION_MIN
+    session_pos = (
+        df['minutes_since_open'].clip(lower=0).to_numpy()
+        / session_duration
+    )
     df['time_sin'] = np.where(
         df['is_regular_session'] == 1,
         np.sin(2 * np.pi * session_pos),
@@ -198,27 +275,26 @@ def add_intraday_compatibility_features(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     idx = _market_clock_index(df.index)
-
     clock_minute = idx.hour * 60 + idx.minute
-    market_open = 9 * 60 + 30
-    market_close = 16 * 60
+    _, open_minutes, close_minutes = _session_bounds(df.index)
+    session_type = intraday_session_types(df.index)
 
     df["clock_minute"] = clock_minute.astype(float)
-    df["is_regular_session"] = (
-        (clock_minute >= market_open)
-        & (clock_minute <= market_close)
-    ).astype(int)
+    df["is_regular_session"] = session_type.eq("regular").astype(int)
 
-    minutes_since_open = clock_minute - market_open
+    minutes_since_open = clock_minute - open_minutes
+    minutes_to_close = close_minutes - clock_minute
 
     df["is_first_15min"] = (
-        (minutes_since_open >= 0)
+        (df["is_regular_session"] == 1)
+        & (minutes_since_open >= 0)
         & (minutes_since_open < 15)
     ).astype(int)
 
     df["is_last_15min"] = (
-        (minutes_since_open >= 375)
-        & (minutes_since_open <= 390)
+        (df["is_regular_session"] == 1)
+        & (minutes_to_close >= 0)
+        & (minutes_to_close <= 15)
     ).astype(int)
 
     return df
@@ -241,16 +317,13 @@ def add_intraday_market_features(
     if isinstance(df.index, pd.DatetimeIndex):
         idx = _market_clock_index(df.index)
 
-        session_key = pd.Series(idx.date, index=df.index)
+        session_key = intraday_session_keys(df.index)
         clock_minute = pd.Series(
             idx.hour * 60 + idx.minute,
             index=df.index,
             dtype="int64",
         )
-        regular_session = clock_minute.between(
-            MARKET_OPEN_MIN,
-            MARKET_CLOSE_MIN - 1,
-        )
+        regular_session = intraday_session_types(df.index).eq("regular")
         regular_volume = volume.where(regular_session)
         cumulative_pv = (typical_price * volume).groupby(session_key).cumsum()
         cumulative_volume = volume.groupby(session_key).cumsum()
@@ -354,18 +427,20 @@ def add_intraday_market_features(
             for period in (1, 2, 4):
                 asset_return = close.pct_change(period)
                 benchmark_return = aligned_benchmark.pct_change(period)
+                same_session = session_key.eq(session_key.shift(period))
 
                 df[f"relative_return_{period}"] = (
-                    asset_return - benchmark_return
+                    (asset_return - benchmark_return).where(same_session)
                 )
 
-            df["spy_return_1"] = aligned_benchmark.pct_change(1)
-            df["spy_return_2"] = aligned_benchmark.pct_change(2)
-
-            asset_session = pd.Series(
-                output_index.date,
-                index=df.index,
+            df["spy_return_1"] = aligned_benchmark.pct_change(1).where(
+                session_key.eq(session_key.shift(1))
             )
+            df["spy_return_2"] = aligned_benchmark.pct_change(2).where(
+                session_key.eq(session_key.shift(2))
+            )
+
+            asset_session = session_key
             asset_session_return = (
                 close / close.groupby(asset_session).transform("first") - 1.0
             )

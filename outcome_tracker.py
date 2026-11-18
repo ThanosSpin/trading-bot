@@ -20,6 +20,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 import argparse
 
 from model_outcome_store import outcome_history_path, upsert_resolved_outcomes
+from predictive_model.time_features import intraday_session_types
 
 print("[DEBUG] Running outcome_tracker from:", __file__)
 
@@ -177,10 +178,16 @@ def get_intraday_horizon_close(
             int((now_utc - pred_time).total_seconds() / 60)
             + horizon_minutes * 4,
         )
+        pred_session_type = intraday_session_types(
+            pd.DatetimeIndex([pred_time])
+        ).iloc[0]
         df = fetch_intraday_history(
             symbol,
             lookback_minutes=age_minutes,
             interval="15min",
+            include_extended_hours=(
+                pred_session_type in {"premarket", "after_hours"}
+            ),
         )
         if df is None or df.empty:
             return None
@@ -194,10 +201,12 @@ def get_intraday_horizon_close(
         bar_end = df.index + pd.Timedelta(minutes=15)
         pred_session = pred_time.tz_convert("America/New_York").date()
         bar_sessions = df.index.tz_convert("America/New_York").date
+        bar_session_types = intraday_session_types(df.index).to_numpy()
         eligible = (
             (bar_end >= target_time)
             & (bar_end <= now_utc)
             & (bar_sessions == pred_session)
+            & (bar_session_types == pred_session_type)
         )
         completed = df.loc[eligible]
         if completed.empty:

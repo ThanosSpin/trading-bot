@@ -30,6 +30,10 @@ from predictive_model.data_loader import (
     fetch_intraday_price_fallback,
 )
 from predictive_model.features import build_daily_features, build_intraday_features
+from predictive_model.time_features import (
+    intraday_session_keys,
+    intraday_session_types,
+)
 from predictive_model.model_monitor import evaluate_predictions, log_prediction
 from predictive_model.model_evaluation import evaluate_walk_forward
 from predictive_model.target_labels import backtest_threshold, create_target_label
@@ -397,6 +401,10 @@ def _build_thresholded_binary_target(
 
     close = pd.to_numeric(df_feat["Close"], errors="coerce")
     next_ret = close.shift(-horizon_bars) / close - 1.0
+    if mode != "daily" and isinstance(df_feat.index, pd.DatetimeIndex):
+        session_keys = intraday_session_keys(df_feat.index)
+        same_session = session_keys.eq(session_keys.shift(-horizon_bars))
+        next_ret = next_ret.where(same_session)
 
     default_min_move = 0.002 if mode == "daily" or use_two_stage else 0.0008
     min_move = (
@@ -475,8 +483,14 @@ def _add_intraday_regime_cols(df_feat: pd.DataFrame) -> pd.DataFrame:
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
     close = pd.to_numeric(close, errors="coerce")
-    returns = close.pct_change()
-    df_feat["mom_4_abs"] = close.pct_change(4).abs()
+    if isinstance(df_feat.index, pd.DatetimeIndex):
+        session_keys = intraday_session_keys(df_feat.index)
+        returns = close.pct_change().where(session_keys.eq(session_keys.shift(1)))
+        mom_4 = close.pct_change(4).where(session_keys.eq(session_keys.shift(4)))
+    else:
+        returns = close.pct_change()
+        mom_4 = close.pct_change(4)
+    df_feat["mom_4_abs"] = mom_4.abs()
     df_feat["vol_12"] = returns.rolling(12).std()
     return df_feat
 
@@ -615,6 +629,23 @@ def train_model(
     df = df.copy()
     regime_config = None
     binary_evaluation_frame = None
+    extended_training_rows = {"premarket": 0, "after_hours": 0}
+    if mode != "daily" and isinstance(df.index, pd.DatetimeIndex):
+        session_types = intraday_session_types(df.index)
+        extended_training_rows = {
+            "premarket": int(session_types.eq("premarket").sum()),
+            "after_hours": int(session_types.eq("after_hours").sum()),
+        }
+    extended_hours_trained = all(
+        count >= 40 for count in extended_training_rows.values()
+    )
+    if mode != "daily":
+        print(
+            f"[EXTENDED-HOURS TRAINING COVERAGE] {symbol}/{mode}: "
+            f"premarket={extended_training_rows['premarket']} "
+            f"after_hours={extended_training_rows['after_hours']} "
+            f"ready={extended_hours_trained}"
+        )
 
     print(f"\n[FEATURES] Building engineered features for {symbol}/{mode}...")
     if mode == "daily":
@@ -655,6 +686,10 @@ def train_model(
         df_feat = create_multiclass_target(
             df_feat, forward_periods=1, thresholds=thresholds
         )
+        if mode != "daily" and isinstance(df_feat.index, pd.DatetimeIndex):
+            session_keys = intraday_session_keys(df_feat.index)
+            same_session = session_keys.eq(session_keys.shift(-1))
+            df_feat.loc[~same_session, "Target_multiclass"] = np.nan
         target_col = "Target_multiclass"
         num_classes = 5
         objective = "multi:softprob"
@@ -1318,6 +1353,53 @@ def train_model(
                 np.mean(np.sum((y_test_bin - y_pred_proba) ** 2, axis=1))
             )
 
+        if mode != "daily" and isinstance(X_test.index, pd.DatetimeIndex):
+            test_session_types = intraday_session_types(X_test.index)
+            extended_test_metrics = {}
+            for session_name in ("premarket", "after_hours"):
+                session_mask = test_session_types.eq(session_name).to_numpy()
+                session_labels = np.asarray(y_test)[session_mask]
+                session_probabilities = np.asarray(y_pred_proba)[session_mask]
+                session_rows = int(session_mask.sum())
+                if num_classes == 2:
+                    session_brier = (
+                        float(
+                            brier_score_loss(
+                                session_labels.astype(int),
+                                session_probabilities,
+                            )
+                        )
+                        if session_rows and len(np.unique(session_labels)) >= 2
+                        else None
+                    )
+                else:
+                    session_brier = (
+                        float(
+                            np.mean(
+                                np.sum(
+                                    (
+                                        np.eye(num_classes)[session_labels.astype(int)]
+                                        - session_probabilities
+                                    )
+                                    ** 2,
+                                    axis=1,
+                                )
+                            )
+                        )
+                        if session_rows
+                        else None
+                    )
+                extended_test_metrics[session_name] = {
+                    "samples": session_rows,
+                    "brier_score": session_brier,
+                }
+            metrics["extended_hours_test"] = extended_test_metrics
+            print(
+                f"[EXTENDED-HOURS TEST] {symbol}/{mode}: "
+                f"premarket={extended_test_metrics['premarket']} "
+                f"after_hours={extended_test_metrics['after_hours']}"
+            )
+
         metrics["train_samples"] = len(X_train)
         metrics["calibration_samples"] = len(X_cal)
         metrics["test_samples"] = len(X_test)
@@ -1444,6 +1526,8 @@ def train_model(
             "selected_metrics": metrics.get("threshold_selected_metrics"),
         },
         "feature_importance": feature_importance,
+        "extended_hours_trained": extended_hours_trained,
+        "extended_hours_training_rows": extended_training_rows,
         "trained_at": datetime.now().isoformat(),
         "symbol": symbol,
         "mode": mode,
@@ -1993,6 +2077,7 @@ def compute_signals(
         "relative_return_4_source": None,
         "volume_time_ratio_source": None,
         "market_session": None,
+        "extended_hours_model_ready": None,
         "intraday_regime": None,
         "daily_prediction": None,
         "intraday_prediction": None,
@@ -2011,6 +2096,7 @@ def compute_signals(
     market_session = get_market_session()
     results["market_session"] = market_session
     is_extended_session = market_session in {"pre_market", "after_hours"}
+    results["extended_hours_model_ready"] = not is_extended_session
     if is_extended_session:
         results["intraday_momentum_fresh"] = False
         results["intraday_momentum_freshness_reason"] = (
@@ -2122,7 +2208,10 @@ def compute_signals(
 
         for lb in candidate_lookbacks:
             df_raw = fetch_intraday_history(
-                symU, lookback_minutes=lb, interval=resample_to
+                symU,
+                lookback_minutes=lb,
+                interval=resample_to,
+                include_extended_hours=is_extended_session,
             )
             if df_raw is None or df_raw.empty:
                 continue
@@ -2564,6 +2653,23 @@ def compute_signals(
                 stale_models,
             )
             candidate_models = [(name, obj) for name, obj, _, _ in ordered_candidates]
+            if is_extended_session:
+                rejected_extended = [
+                    name
+                    for name, artifact in candidate_models
+                    if not bool((artifact or {}).get("extended_hours_trained"))
+                ]
+                candidate_models = [
+                    (name, artifact)
+                    for name, artifact in candidate_models
+                    if bool((artifact or {}).get("extended_hours_trained"))
+                ]
+                results["extended_hours_model_ready"] = bool(candidate_models)
+                if rejected_extended:
+                    print(
+                        f"[EXTENDED-HOURS MODEL GATE] {symU}: skipped "
+                        f"unvalidated artifacts={rejected_extended}"
+                    )
 
             print(
                 f"fresh={[name for name, _, _ in fresh_models]} "
@@ -2571,7 +2677,12 @@ def compute_signals(
                 f"candidate_pre={[name for name, _ in candidate_models]}"
             )
 
-            if ordered_candidates and ordered_candidates[0][3]:
+            if (
+                candidate_models
+                and ordered_candidates
+                and candidate_models[0][0] == ordered_candidates[0][0]
+                and ordered_candidates[0][3]
+            ):
                 selected_name, _, selected_age, _ = ordered_candidates[0]
                 print(
                     f"[STALE-REGIME-MATCH] {symU}: preferred {selected_name} artifact "
@@ -2593,6 +2704,7 @@ def compute_signals(
                         "SPY",
                         lookback_minutes=best_lb,
                         interval=resample_to,
+                        include_extended_hours=is_extended_session,
                     )
                 df_feat_intra = build_intraday_features(
                     df_intra_resampled,
@@ -2682,7 +2794,11 @@ def compute_signals(
                             current_price = results.get("price") or fetch_latest_price(
                                 symU
                             )
-                            if current_price and float(current_price) > 0:
+                            if (
+                                current_price
+                                and float(current_price) > 0
+                                and results.get("intraday_bar_fresh", False)
+                            ):
                                 log_prediction(
                                     symbol=symU,
                                     mode=model_used,

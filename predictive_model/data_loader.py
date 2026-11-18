@@ -391,11 +391,12 @@ def fetch_intraday_history(
     symbol: str,
     lookback_minutes: int = 900,
     interval: str = "15min",
+    include_extended_hours: bool = False,
 ) -> Optional[pd.DataFrame]:
     """
-    Wrapper used by compute_signals(). Tries Alpaca first, then yfinance fallback.
-    Normalizes both providers to return the requested number of bars rather than
-    trimming by wall-clock minutes.
+    Fetch intraday OHLCV bars and normalize providers to a requested bar count.
+    Extended-hours mode uses Yahoo consistently with pre/post-market enabled;
+    regular mode prefers Alpaca and falls back to regular-session Yahoo bars.
     """
     import math
 
@@ -407,11 +408,16 @@ def fetch_intraday_history(
     else:
         bars_needed = int(lookback_minutes) + 50
 
-    df = fetch_intraday_history_alpaca(
-        symbol,
-        lookback_minutes=lookback_minutes,
-        interval=interval,
-    )
+    # Use Yahoo consistently for extended-session model inputs. The active
+    # Alpaca feed may not return premarket/after-hours bars, and mixing it with
+    # Yahoo during training would make the session coverage unpredictable.
+    df = None
+    if not include_extended_hours:
+        df = fetch_intraday_history_alpaca(
+            symbol,
+            lookback_minutes=lookback_minutes,
+            interval=interval,
+        )
     if df is not None and not df.empty:
         latest_bar_time = pd.Timestamp(df.index[-1])
         if latest_bar_time.tzinfo is None:
@@ -435,7 +441,12 @@ def fetch_intraday_history(
 
     try:
         yf_interval = "15m" if interval_key in ("15m", "15min", "15t") else "1m"
-        yf_period = "60d" if yf_interval == "15m" else "7d"
+        if include_extended_hours and yf_interval == "15m":
+            # Inference needs a few recent sessions for warm-up; retraining
+            # requests a longer history explicitly through lookback_minutes.
+            yf_period = "60d" if int(lookback_minutes) > 2400 else "5d"
+        else:
+            yf_period = "60d" if yf_interval == "15m" else "7d"
 
         logger.debug(
             f"Falling back to yfinance for {symbol}: "
@@ -446,6 +457,7 @@ def fetch_intraday_history(
             symbol,
             period=yf_period,
             interval=yf_interval,
+            prepost=bool(include_extended_hours),
             progress=False,
             auto_adjust=True,
         )
@@ -455,8 +467,15 @@ def fetch_intraday_history(
 
         df_y = df_y.copy()
         df_y.index = pd.to_datetime(df_y.index, utc=True, errors="coerce")
+        df_y = df_y.loc[~df_y.index.isna()].sort_index()
+        if include_extended_hours:
+            ny_index = df_y.index.tz_convert("America/New_York")
+            minute_of_day = ny_index.hour * 60 + ny_index.minute
+            active_session = (minute_of_day >= 4 * 60) & (minute_of_day < 20 * 60)
+            df_y = df_y.loc[active_session]
         df_y = df_y.sort_index().tail(bars_needed)
-        df_y.attrs["data_source"] = f"yfinance_{yf_interval}_regular_hours"
+        hours_label = "extended_hours" if include_extended_hours else "regular_hours"
+        df_y.attrs["data_source"] = f"yfinance_{yf_interval}_{hours_label}"
 
         logger.info(f"yfinance intraday data for {symbol}: {len(df_y)} bars (target {bars_needed})")
         return df_y

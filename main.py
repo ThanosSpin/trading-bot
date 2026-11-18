@@ -235,6 +235,7 @@ def log_signal_snapshot(
             "intradaybarageminutes",
             "intradaydatasource",
             "intradaybarfresh",
+            "extendedhoursmodelready",
             "intradaymomentumfresh",
             "intradaymomentumconfirmed",
             "intradaymomentumbars",
@@ -283,6 +284,7 @@ def log_signal_snapshot(
             "intradaybarageminutes": sig.get("intraday_bar_age_minutes"),
             "intradaydatasource": sig.get("intraday_bar_source"),
             "intradaybarfresh": sig.get("intraday_bar_fresh"),
+            "extendedhoursmodelready": sig.get("extended_hours_model_ready"),
             "intradaymomentumfresh": sig.get("intraday_momentum_fresh"),
             "intradaymomentumconfirmed": sig.get("intraday_momentum_confirmed"),
             "intradaymomentumbars": sig.get("intraday_momentum_bars"),
@@ -572,6 +574,9 @@ def get_predictions(symbols, debug=True):
             "intraday_bar_age_minutes": sig.get("intraday_bar_age_minutes"),
             "intraday_bar_source": sig.get("intraday_bar_source"),
             "intraday_bar_fresh": sig.get("intraday_bar_fresh"),
+            "extended_hours_model_ready": sig.get(
+                "extended_hours_model_ready"
+            ),
             "intraday_momentum_fresh": sig.get("intraday_momentum_fresh"),
             "intraday_momentum_confirmed": sig.get(
                 "intraday_momentum_confirmed"
@@ -787,6 +792,7 @@ def print_signal_diagnostics(decisions, diagnostics):
             f"age={fmt(sig.get('intraday_bar_age_minutes'), 1)}m "
             f"bar_source={sig.get('intraday_bar_source') or 'NA'} "
             f"bar_fresh={sig.get('intraday_bar_fresh')} "
+            f"extended_model_ready={sig.get('extended_hours_model_ready')} "
             f"mom_fresh={sig.get('intraday_momentum_fresh')} "
             f"mom_confirmed={sig.get('intraday_momentum_confirmed')} "
             f"mom_source={sig.get('intraday_momentum_source')} "

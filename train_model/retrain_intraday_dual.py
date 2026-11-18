@@ -300,11 +300,13 @@ def main():
                 sym,
                 lookback_minutes=INTRADAY_LOOKBACK,
                 interval=INTRADAY_INTERVAL,
+                include_extended_hours=True,
             )
             spy_df = fetch_intraday_history(
                 "SPY",
                 lookback_minutes=INTRADAY_LOOKBACK,
                 interval=INTRADAY_INTERVAL,
+                include_extended_hours=True,
             )
             if spy_df is not None and not spy_df.empty:
                 spy_df = _clean_columns(spy_df)
@@ -312,6 +314,18 @@ def main():
             print(f"❌ Data fetch failed for {sym}: {e}")
             results[(sym, "intraday_mr")] = {"success": False, "reason": "Data fetch failed"}
             results[(sym, "intraday_mom")] = {"success": False, "reason": "Data fetch failed"}
+            continue
+
+        if spy_df is None or spy_df.empty:
+            print(f"❌ No extended-hours SPY benchmark data for {sym}, skipping.")
+            results[(sym, "intraday_mr")] = {
+                "success": False,
+                "reason": "No extended-hours SPY benchmark data",
+            }
+            results[(sym, "intraday_mom")] = {
+                "success": False,
+                "reason": "No extended-hours SPY benchmark data",
+            }
             continue
 
         if df is None or df.empty:
