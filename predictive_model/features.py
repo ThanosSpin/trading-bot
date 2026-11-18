@@ -1,7 +1,12 @@
 # features.py
 import pandas as pd
 import numpy as np
-from predictive_model.time_features import add_time_features,add_intraday_compatibility_features, add_intraday_market_features
+from predictive_model.time_features import (
+    add_time_features,
+    add_intraday_compatibility_features,
+    add_intraday_market_features,
+    intraday_session_types,
+)
 from predictive_model.data_loader import fetch_historical_data
 from typing import Optional
 
@@ -232,7 +237,59 @@ def _remove_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================================
 # ADVANCED FEATURE BUILDER
 # ============================================================================
-def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame:
+def _log_intraday_feature_row_loss(
+    label: str,
+    stage: str,
+    frame: pd.DataFrame,
+    complete_mask=None,
+    check_frame: Optional[pd.DataFrame] = None,
+) -> None:
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        return
+
+    session_types = intraday_session_types(frame.index).to_numpy()
+    if complete_mask is None:
+        complete_mask = np.ones(len(frame), dtype=bool)
+    else:
+        complete_mask = np.asarray(complete_mask, dtype=bool)
+    if len(complete_mask) != len(frame):
+        print(
+            f"[FEATURE SESSION COVERAGE] {label} stage={stage}: "
+            "complete-mask length mismatch"
+        )
+        return
+
+    for session_name in ("premarket", "regular", "after_hours", "closed"):
+        session_mask = session_types == session_name
+        session_count = int(session_mask.sum())
+        dropped_mask = session_mask & ~complete_mask
+        dropped_count = int(dropped_mask.sum())
+        missing_summary = ""
+        if dropped_count and check_frame is not None:
+            missing_counts = (
+                check_frame.iloc[np.flatnonzero(dropped_mask)]
+                .isna()
+                .sum()
+                .sort_values(ascending=False)
+            )
+            missing_counts = missing_counts[missing_counts > 0].head(8)
+            missing_summary = ", ".join(
+                f"{column}={int(count)}/{dropped_count}"
+                for column, count in missing_counts.items()
+            )
+        print(
+            f"[FEATURE SESSION COVERAGE] {label} stage={stage} "
+            f"session={session_name} rows={session_count} "
+            f"kept={session_count - dropped_count} dropped={dropped_count}"
+            f"{f' top_missing={missing_summary}' if missing_summary else ''}"
+        )
+
+
+def add_advanced_features(
+    df: pd.DataFrame,
+    mode: str = "daily",
+    diagnostic_label: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Adds engineered features.
     Intraday uses shorter windows so we don't require huge history to produce a row.
@@ -254,8 +311,14 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     df["return_1"] = df["Close"].pct_change(fill_method=None)
     df["return_5"] = df["Close"].pct_change(5, fill_method=None)
 
-    v = df["Volume"].replace(0, np.nan)
+    v = pd.to_numeric(df["Volume"], errors="coerce")
+    previous_volume = v.shift(1)
     df["volume_roc"] = v.pct_change(fill_method=None)
+    # A zero previous volume makes percentage change undefined (0/0 or
+    # positive/0). Treat that one case as neutral instead of dropping valid
+    # zero-volume extended-session bars. Keep genuinely missing volume as NaN.
+    zero_volume_baseline = v.notna() & previous_volume.eq(0)
+    df.loc[zero_volume_baseline, "volume_roc"] = 0.0
 
     df["close_open_ratio"] = df["Close"] / df["Open"]
     df["high_low_ratio"] = df["High"] / df["Low"]
@@ -350,9 +413,19 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
         df[f"price_position_{window}"] = (df["Close"] - low_min) / range_denom * 100
 
     # 4. Volume-weighted momentum (strong moves need volume)
-    vol_norm = df["Volume"] / df["Volume"].rolling(20).mean()
+    volume_mean_20 = v.rolling(20, min_periods=20).mean()
+    vol_norm = v / volume_mean_20
     df["vol_momentum_5"] = df["momentum_5"] * vol_norm
     df["vol_momentum_10"] = df["momentum_10"] * vol_norm
+
+    # Zero-volume windows have no volume confirmation. Their volume ratios,
+    # volume-weighted momentum, and CMF are undefined mathematically; encode
+    # these known zero-volume cases as neutral zero while preserving NaNs for
+    # genuinely missing source volume or feature warmup.
+    zero_volume_window = v.notna() & volume_mean_20.eq(0)
+    for column in ("volume_ratio", "vol_momentum_5", "vol_momentum_10", "cmf"):
+        if column in df.columns:
+            df.loc[zero_volume_window, column] = 0.0
 
     # 5. Breakout detection (price breaking above recent highs)
 
@@ -369,8 +442,25 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
     # =====================================================
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
+    diagnostic_enabled = mode == "intraday" and bool(diagnostic_label)
+    core_ohlcv = ["Open", "High", "Low", "Close", "Volume"]
+    if diagnostic_enabled:
+        _log_intraday_feature_row_loss(
+            diagnostic_label,
+            "before_core_ohlcv_drop",
+            df,
+            complete_mask=df[core_ohlcv].notna().all(axis=1).to_numpy(),
+            check_frame=df[core_ohlcv],
+        )
+
     # Always require core price columns
-    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+    df = df.dropna(subset=core_ohlcv)
+    if diagnostic_enabled:
+        _log_intraday_feature_row_loss(
+            diagnostic_label,
+            "after_core_ohlcv_drop",
+            df,
+        )
 
     # --- Dynamic warmup ---
 
@@ -388,7 +478,22 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
         return df.iloc[0:0]
 
     # Normal case: trim warmup then drop remaining NaNs
-    df = df.iloc[warmup:].dropna()
+    candidate_rows = df.iloc[warmup:]
+    if diagnostic_enabled:
+        _log_intraday_feature_row_loss(
+            diagnostic_label,
+            "before_all_feature_drop",
+            candidate_rows,
+            complete_mask=candidate_rows.notna().all(axis=1).to_numpy(),
+            check_frame=candidate_rows,
+        )
+    df = candidate_rows.dropna()
+    if diagnostic_enabled:
+        _log_intraday_feature_row_loss(
+            diagnostic_label,
+            "after_all_feature_drop",
+            df,
+        )
 
     # ✅ CRITICAL: Remove any unnamed columns before returning
     df = _remove_unnamed_columns(df)
@@ -399,9 +504,17 @@ def add_advanced_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame
 # ============================================================================
 # BASE FEATURE ENTRY POINT
 # ============================================================================
-def _build_base_features(df: pd.DataFrame, mode: str = "daily") -> pd.DataFrame:
+def _build_base_features(
+    df: pd.DataFrame,
+    mode: str = "daily",
+    diagnostic_label: Optional[str] = None,
+) -> pd.DataFrame:
     df = _fix_ohlcv(df)
-    df = add_advanced_features(df, mode=mode)
+    df = add_advanced_features(
+        df,
+        mode=mode,
+        diagnostic_label=diagnostic_label,
+    )
 
     # ✅ SAFETY: Final check for unnamed columns
     df = _remove_unnamed_columns(df)
@@ -428,8 +541,13 @@ def build_daily_features(df: pd.DataFrame) -> pd.DataFrame:
 def build_intraday_features(
     df: pd.DataFrame,
     benchmark_df: Optional[pd.DataFrame] = None,
+    diagnostic_label: Optional[str] = None,
 ) -> pd.DataFrame:
-    df = _build_base_features(df, mode="intraday")
+    df = _build_base_features(
+        df,
+        mode="intraday",
+        diagnostic_label=diagnostic_label,
+    )
 
     if isinstance(df.index, pd.DatetimeIndex):
         df = add_time_features(df)

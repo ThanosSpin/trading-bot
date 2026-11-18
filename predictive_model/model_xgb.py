@@ -477,7 +477,7 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 
 
 def _add_intraday_regime_cols(df_feat: pd.DataFrame) -> pd.DataFrame:
-    """Add the regime measures used by both training and live routing."""
+    """Add session-aware regime measures used by model training."""
     df_feat = df_feat.copy()
     close = df_feat["Close"]
     if isinstance(close, pd.DataFrame):
@@ -485,14 +485,67 @@ def _add_intraday_regime_cols(df_feat: pd.DataFrame) -> pd.DataFrame:
     close = pd.to_numeric(close, errors="coerce")
     if isinstance(df_feat.index, pd.DatetimeIndex):
         session_keys = intraday_session_keys(df_feat.index)
+        session_types = intraday_session_types(df_feat.index)
         returns = close.pct_change().where(session_keys.eq(session_keys.shift(1)))
         mom_4 = close.pct_change(4).where(session_keys.eq(session_keys.shift(4)))
+        grouped_returns = returns.groupby(session_keys)
+        regular_vol = grouped_returns.transform(
+            lambda values: values.rolling(12, min_periods=12).std()
+        )
+        extended_vol = grouped_returns.transform(
+            lambda values: values.rolling(4, min_periods=2).std()
+        )
+        df_feat["vol_12"] = regular_vol
+        df_feat["vol_extended"] = extended_vol.where(
+            session_types.isin(["premarket", "after_hours"])
+        )
+        df_feat["vol_regime"] = regular_vol.where(
+            session_types.eq("regular"), df_feat["vol_extended"]
+        ).where(session_types.isin(["regular", "premarket", "after_hours"]))
     else:
         returns = close.pct_change()
         mom_4 = close.pct_change(4)
+        df_feat["vol_12"] = returns.rolling(12, min_periods=12).std()
+        df_feat["vol_extended"] = np.nan
+        df_feat["vol_regime"] = df_feat["vol_12"]
     df_feat["mom_4_abs"] = mom_4.abs()
-    df_feat["vol_12"] = returns.rolling(12).std()
     return df_feat
+
+
+def _latest_extended_session_volatility(frame: Optional[pd.DataFrame]) -> Optional[float]:
+    """Calculate four-bar volatility from fresh 15-minute bars in this session."""
+    if frame is None or frame.empty or "Close" not in frame.columns:
+        return None
+    close = frame["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    timestamps = pd.to_datetime(frame.index, utc=True, errors="coerce")
+    close = pd.Series(
+        pd.to_numeric(close, errors="coerce").to_numpy(), index=timestamps
+    ).dropna()
+    close = close.loc[~close.index.isna()].sort_index()
+    close = close[~close.index.duplicated(keep="last")]
+    if len(close) < 3:
+        return None
+
+    age_minutes = (
+        pd.Timestamp.now(tz="UTC") - close.index[-1]
+    ).total_seconds() / 60.0
+    if age_minutes < -5.0 or age_minutes > float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES):
+        return None
+
+    session_types = intraday_session_types(close.index)
+    session_keys = intraday_session_keys(close.index)
+    latest_session_type = session_types.iloc[-1]
+    if latest_session_type not in ("premarket", "after_hours"):
+        return None
+    close = close.loc[session_keys.eq(session_keys.iloc[-1]).to_numpy()]
+    close = close.resample("15min").last().dropna()
+    returns = close.pct_change()
+    if returns.notna().sum() < 2:
+        return None
+    value = returns.rolling(4, min_periods=2).std().iloc[-1]
+    return float(value) if pd.notna(value) and np.isfinite(value) else None
 
 
 def _filter_intraday_rows_by_mode(
@@ -520,45 +573,101 @@ def _filter_intraday_rows_by_mode(
         eligible_count = int(eligible_mask.sum())
         with_regime = with_regime.iloc[eligible_mask]
     with_regime = with_regime.replace([np.inf, -np.inf], np.nan)
-    with_regime = with_regime.dropna(subset=["mom_4_abs", "vol_12"])
+    with_regime = with_regime.dropna(subset=["mom_4_abs", "vol_regime"])
     if with_regime.empty:
         raise ValueError(
             f"No valid target-eligible regime rows for mode={mode} "
             f"(target_eligible={eligible_count})"
         )
+    _log_intraday_session_coverage(
+        "REGIME", mode, "valid_regime_metrics", with_regime.index
+    )
 
-    fit_end = int(len(with_regime) * train_frac)
-    if fit_end < 20:
-        raise ValueError(
-            f"Insufficient pre-split rows to fit regime thresholds: {fit_end}"
+    if isinstance(with_regime.index, pd.DatetimeIndex):
+        session_types = intraday_session_types(with_regime.index)
+        extended_mask = session_types.isin(["premarket", "after_hours"])
+        regular_threshold_rows = with_regime.loc[
+            ~session_types.eq("after_hours")
+        ].dropna(subset=["mom_4_abs", "vol_12"])
+        fit_end = int(len(regular_threshold_rows) * train_frac)
+        if fit_end < 20:
+            raise ValueError(
+                f"Insufficient pre-split rows to fit regular thresholds: {fit_end}"
+            )
+        regular_fit = regular_threshold_rows.iloc[:fit_end]
+        fit_cutoff = regular_fit.index[-1]
+        extended_fit = with_regime.loc[
+            extended_mask & (with_regime.index <= fit_cutoff)
+        ].dropna(subset=["mom_4_abs", "vol_extended"])
+    else:
+        session_types = pd.Series("regular", index=with_regime.index)
+        extended_mask = pd.Series(False, index=with_regime.index)
+        regular_threshold_rows = with_regime.dropna(
+            subset=["mom_4_abs", "vol_12"]
         )
-    threshold_frame = with_regime.iloc[:fit_end]
-    mom_threshold = float(threshold_frame["mom_4_abs"].quantile(percentile))
-    vol_threshold = float(threshold_frame["vol_12"].quantile(percentile))
-    if not np.isfinite(mom_threshold) or not np.isfinite(vol_threshold):
+        fit_end = int(len(regular_threshold_rows) * train_frac)
+        if fit_end < 20:
+            raise ValueError(
+                f"Insufficient pre-split rows to fit regular thresholds: {fit_end}"
+            )
+        regular_fit = regular_threshold_rows.iloc[:fit_end]
+        fit_cutoff = regular_fit.index[-1]
+        extended_fit = with_regime.iloc[0:0]
+
+    mom_threshold = float(regular_fit["mom_4_abs"].quantile(percentile))
+    vol_threshold = float(regular_fit["vol_12"].quantile(percentile))
+    if len(extended_fit) >= 20:
+        extended_mom_threshold = float(
+            extended_fit["mom_4_abs"].quantile(percentile)
+        )
+        extended_vol_threshold = float(
+            extended_fit["vol_extended"].quantile(percentile)
+        )
+    else:
+        raise ValueError(
+            "Insufficient extended-session rows to fit regime thresholds: "
+            f"{len(extended_fit)}"
+        )
+    if not all(np.isfinite(value) for value in (
+        mom_threshold, vol_threshold, extended_mom_threshold, extended_vol_threshold
+    )):
         raise ValueError("Regime thresholds are not finite")
 
-    momentum_mask = (with_regime["mom_4_abs"] >= mom_threshold) | (
-        with_regime["vol_12"] >= vol_threshold
+    row_mom_threshold = pd.Series(
+        np.where(extended_mask, extended_mom_threshold, mom_threshold),
+        index=with_regime.index,
     )
+    row_vol_threshold = pd.Series(
+        np.where(extended_mask, extended_vol_threshold, vol_threshold),
+        index=with_regime.index,
+    )
+    momentum_mask = (
+        with_regime["mom_4_abs"] >= row_mom_threshold
+    ) | (with_regime["vol_regime"] >= row_vol_threshold)
     selected_mask = momentum_mask if mode == "intraday_mom" else ~momentum_mask
     filtered = with_regime.loc[selected_mask].copy()
 
     regime_config = {
-        "version": 1,
+        "version": 2,
         "momentum_bars": 4,
         "volatility_bars": 12,
+        "extended_volatility_bars": 4,
+        "extended_volatility_min_periods": 2,
         "percentile": float(percentile),
         "momentum_threshold": mom_threshold,
         "volatility_threshold": vol_threshold,
+        "extended_momentum_threshold": extended_mom_threshold,
+        "extended_volatility_threshold": extended_vol_threshold,
         "fit_rows": fit_end,
-        "fit_end": str(threshold_frame.index[-1]),
-        "rule": "mom_when_abs_momentum_or_volatility_meets_threshold",
+        "fit_end": str(fit_cutoff),
+        "rule": "session_specific_volatility; mom_when_abs_momentum_or_volatility_meets_threshold",
     }
     print(
         f"[REGIME] {mode}: {len(with_regime)} -> {len(filtered)} rows "
         f"| target-eligible={eligible_count} "
-        f"| train-only mom={mom_threshold:.6f} vol={vol_threshold:.6f}"
+        f"| regular mom={mom_threshold:.6f} vol12={vol_threshold:.6f} "
+        f"| extended mom={extended_mom_threshold:.6f} "
+        f"vol4={extended_vol_threshold:.6f} min_periods=2"
     )
     return filtered, regime_config
 
@@ -586,6 +695,33 @@ def _intraday_target_eligibility_mask(
         eligible &= same_session
 
     return eligible
+
+
+def _log_intraday_session_coverage(
+    symbol: str,
+    mode: str,
+    stage: str,
+    index: pd.Index,
+) -> None:
+    """Log New York session counts for rows surviving a training stage."""
+    if not isinstance(index, pd.DatetimeIndex):
+        print(
+            f"[SESSION COVERAGE] {symbol}/{mode} stage={stage}: "
+            f"rows={len(index)} index_type={type(index).__name__}"
+        )
+        return
+
+    session_types = intraday_session_types(index)
+    counts = session_types.value_counts()
+    print(
+        f"[SESSION COVERAGE] {symbol}/{mode} stage={stage}: "
+        f"rows={len(index)} tz={index.tz} "
+        f"premarket={int(counts.get('premarket', 0))} "
+        f"regular={int(counts.get('regular', 0))} "
+        f"after_hours={int(counts.get('after_hours', 0))} "
+        f"closed={int(counts.get('closed', 0))}"
+    )
+
 
 def _artifact_age_days(artifact: dict):
     if not artifact:
@@ -685,6 +821,7 @@ def train_model(
             f"after_hours={extended_training_rows['after_hours']} "
             f"ready={extended_hours_trained}"
         )
+        _log_intraday_session_coverage(symbol, mode, "raw_input", df.index)
 
     print(f"\n[FEATURES] Building engineered features for {symbol}/{mode}...")
     regime_selected_index = None
@@ -697,7 +834,14 @@ def train_model(
                 if symbol.upper() == "SPY"
                 else fetch_historical_data("SPY", period="60d", interval="15m")
             )
-        df_feat = build_intraday_features(df, benchmark_df=benchmark_df)
+        df_feat = build_intraday_features(
+            df,
+            benchmark_df=benchmark_df,
+            diagnostic_label=f"{symbol}/{mode}",
+        )
+        _log_intraday_session_coverage(
+            symbol, mode, "engineered_features", df_feat.index
+        )
         if mode in ("intraday_mr", "intraday_mom"):
             regime_target_horizon = (
                 1 if use_multiclass else (4 if use_two_stage else 1)
@@ -706,17 +850,26 @@ def train_model(
                 df_feat,
                 horizon_bars=regime_target_horizon,
             )
+            _log_intraday_session_coverage(
+                symbol,
+                mode,
+                "target_horizon_eligible",
+                df_feat.index[target_eligible_mask],
+            )
             regime_rows, regime_config = _filter_intraday_rows_by_mode(
                 df_feat,
                 mode=mode,
                 eligible_mask=target_eligible_mask,
             )
             regime_selected_index = regime_rows.index
+            _log_intraday_session_coverage(
+                symbol, mode, "regime_selected", regime_selected_index
+            )
             # Keep the full chronological feature frame until forward targets
             # are computed. Filtering first makes a four-bar horizon jump over
             # omitted regime rows and can invalidate every label.
             df_feat = _add_intraday_regime_cols(df_feat)
-        for c in ["ret_12", "mom_12_abs", "mom_4_abs", "vol_12"]:
+        for c in ["ret_12", "mom_12_abs", "mom_4_abs", "vol_12", "vol_extended", "vol_regime"]:
             if c in df_feat.columns:
                 df_feat = df_feat.drop(columns=[c])
     else:
@@ -819,6 +972,9 @@ def train_model(
 
     if mode in ("intraday_mr", "intraday_mom"):
         labeled_rows = df_feat.loc[df_feat[target_col].notna()]
+        _log_intraday_session_coverage(
+            symbol, mode, "regime_labeled_targets", labeled_rows.index
+        )
         missing_counts = labeled_rows.isna().sum()
         missing_counts = missing_counts[missing_counts > 0].sort_values(
             ascending=False
@@ -840,9 +996,20 @@ def train_model(
                 f"{missing_summary}"
             )
 
-    df_feat = df_feat.dropna().copy()
+    # XGBoost supports missing feature values natively. Keep labeled intraday
+    # rows with unavailable session-specific indicators (for example, VWAP
+    # when extended-hours volume is zero) instead of excluding the whole row.
+    # Daily training retains its existing complete-row requirement.
+    if mode in ("intraday", "intraday_mr", "intraday_mom"):
+        df_feat = df_feat.dropna(subset=[target_col]).copy()
+    else:
+        df_feat = df_feat.dropna().copy()
     if df_feat.empty:
         raise ValueError(f"No rows left after feature engineering for {symbol}/{mode}")
+    if mode in ("intraday_mr", "intraday_mom"):
+        _log_intraday_session_coverage(
+            symbol, mode, "complete_labeled_rows", df_feat.index
+        )
 
     class_counts = df_feat[target_col].value_counts()
     unique_classes = sorted(class_counts.index.tolist())
@@ -911,7 +1078,25 @@ def train_model(
 
     if X.isna().any().any():
         nan_cols = X.columns[X.isna().any()].tolist()
-        raise ValueError(f"NaNs remain in training matrix. Columns: {nan_cols[:10]}")
+        extended_session_optional = {
+            "vwap_distance",
+            "vwap_slope_2",
+            "vwap_slope_4",
+            "relative_vwap_strength",
+        }
+        unexpected_nan_cols = [
+            column for column in nan_cols if column not in extended_session_optional
+        ]
+        if mode == "daily" or unexpected_nan_cols:
+            columns = unexpected_nan_cols if unexpected_nan_cols else nan_cols
+            raise ValueError(
+                f"Unexpected NaNs remain in training matrix. Columns: {columns[:10]}"
+            )
+        missing_counts = X[nan_cols].isna().sum().to_dict()
+        print(
+            "[VALIDATION] XGBoost will handle missing extended-session features: "
+            f"{missing_counts}"
+        )
 
     feature_list = list(X.columns)
     if not feature_list:
@@ -953,21 +1138,28 @@ def train_model(
             ],
             axis=1,
         ).replace([np.inf, -np.inf], np.nan)
-        # Feature and realized-return values are required on every evaluation
-        # row. training_target intentionally remains nullable for neutral bars.
+        # XGBoost accepts missing feature values. Require valid outcome labels
+        # and realized returns, while retaining rows with unavailable features.
         evaluation_bundle = evaluation_bundle.dropna(
-            subset=evaluation_columns
-            + ["evaluation_target", "forward_return", "movement_target"]
+            subset=["evaluation_target", "forward_return", "movement_target"]
         )
         evaluation_X = evaluation_bundle.loc[:, evaluation_columns].copy()
         evaluation_training_target = evaluation_bundle["training_target"].copy()
         evaluation_target = evaluation_bundle["evaluation_target"].astype(int)
         evaluation_returns = evaluation_bundle["forward_return"].copy()
         evaluation_movement_target = evaluation_bundle["movement_target"].astype(int)
+        if mode in ("intraday_mr", "intraday_mom"):
+            _log_intraday_session_coverage(
+                symbol, mode, "evaluation_universe", evaluation_X.index
+            )
 
     X_train, y_train, X_cal, y_cal, X_test, y_test = _time_ordered_train_cal_test_split(
         X, y
     )
+    if mode in ("intraday_mr", "intraday_mom"):
+        _log_intraday_session_coverage(
+            symbol, mode, "final_test_labeled_rows", X_test.index
+        )
 
     print(f"\n[SPLIT] Train={len(X_train)} Cal={len(X_cal)} Test={len(X_test)}")
     print(f"[SPLIT] Train classes: {y_train.value_counts().to_dict()}")
@@ -1049,6 +1241,7 @@ def train_model(
     selected_feature_metadata = None
     selected_features = feature_list
     walk_forward_evaluation = None
+    extended_hours_oof_metrics = None
     walk_forward_threshold = None
     artifact_decision_threshold = None
 
@@ -1121,9 +1314,26 @@ def train_model(
         # Walk-forward receives the complete evaluation schema.
         # Each fold performs feature selection using only that fold's training window,
         # capped at the final model's selected-feature count.
+        walk_forward_bundle = evaluation_bundle.loc[
+            evaluation_bundle.index < X_test.index.min()
+        ].sort_index()
+        # Forward labels near the final holdout boundary can include prices from
+        # inside that holdout. Remove a full target horizon before creating OOF
+        # predictions so the extended-hours gate remains independent of holdout.
+        oof_label_horizon = 4 if use_two_stage and mode != "daily" else 1
+        if len(walk_forward_bundle) > oof_label_horizon:
+            walk_forward_bundle = walk_forward_bundle.iloc[:-oof_label_horizon]
+        else:
+            walk_forward_bundle = walk_forward_bundle.iloc[0:0]
+        walk_forward_X = walk_forward_bundle.loc[:, evaluation_columns].copy()
+        walk_forward_target = walk_forward_bundle["evaluation_target"].astype(int)
+        walk_forward_training_target = walk_forward_bundle["training_target"].copy()
+        walk_forward_returns = walk_forward_bundle["forward_return"].copy()
+        walk_forward_movement_target = walk_forward_bundle["movement_target"].astype(int)
+
         eval_counts = _print_chronological_class_counts(
             f"{symbol}/{mode} walk_forward_eval_target",
-            evaluation_target,
+            walk_forward_target,
         )
 
         min_eval_classes = min(
@@ -1140,31 +1350,80 @@ def train_model(
 
         evaluation_feature_columns = list(feature_list)
 
-        evaluation_X_for_walk_forward = evaluation_X.loc[
+        evaluation_X_for_walk_forward = walk_forward_X.loc[
             :, evaluation_feature_columns
         ].copy()
 
         print(
             f"[WALK-FORWARD SCHEMA] "
-            f"evaluation_features={evaluation_X.shape[1]} "
+            f"evaluation_features={walk_forward_X.shape[1]} "
             f"max_features={len(feature_list)} "
             f"selected_features={len(selected_features)}"
         )
 
         walk_forward_evaluation = evaluate_walk_forward(
             X=evaluation_X_for_walk_forward,
-            y=evaluation_target,
-            forward_returns=evaluation_returns,
-            training_target=evaluation_training_target,
+            y=walk_forward_target,
+            forward_returns=walk_forward_returns,
+            training_target=walk_forward_training_target,
             model_params=params,
             mode=mode,
             n_splits=MODEL_EVAL_WALK_FORWARD_FOLDS,
             gap_bars=MODEL_EVAL_GAP_BARS,
             cost_bps=MODEL_EVAL_TRANSACTION_COST_BPS,
             max_features=len(feature_list),
-            movement_target=evaluation_movement_target if use_two_stage else None,
+            movement_target=walk_forward_movement_target if use_two_stage else None,
             holding_period_bars=4 if use_two_stage and mode != "daily" else 1,
         )
+        if mode in ("intraday_mr", "intraday_mom"):
+            oof_frame = pd.DataFrame(walk_forward_evaluation.get("predictions", []))
+            if not oof_frame.empty:
+                oof_frame["timestamp"] = pd.to_datetime(
+                    oof_frame["timestamp"], errors="coerce", utc=True
+                )
+                oof_frame["actual"] = pd.to_numeric(
+                    oof_frame["actual"], errors="coerce"
+                )
+                oof_frame["calibration_probability"] = pd.to_numeric(
+                    oof_frame["calibration_probability"], errors="coerce"
+                )
+                oof_frame = oof_frame.dropna(
+                    subset=["timestamp", "actual", "calibration_probability"]
+                )
+                oof_index = pd.DatetimeIndex(oof_frame["timestamp"])
+                oof_session_types = intraday_session_types(oof_index)
+                extended_hours_oof_metrics = {}
+                for session_name in ("premarket", "after_hours"):
+                    session_mask = oof_session_types.eq(session_name).to_numpy()
+                    session_rows = oof_frame.loc[session_mask]
+                    session_labels = session_rows["actual"].astype(int).to_numpy()
+                    session_probabilities = session_rows[
+                        "calibration_probability"
+                    ].to_numpy(dtype=float)
+                    session_brier = (
+                        float(brier_score_loss(session_labels, session_probabilities))
+                        if len(session_rows)
+                        and len(np.unique(session_labels)) >= 2
+                        else None
+                    )
+                    extended_hours_oof_metrics[session_name] = {
+                        "samples": int(len(session_rows)),
+                        "brier_score": session_brier,
+                    }
+                print(
+                    f"[EXTENDED-HOURS OOF] {symbol}/{mode}: "
+                    f"premarket={extended_hours_oof_metrics['premarket']} "
+                    f"after_hours={extended_hours_oof_metrics['after_hours']}"
+                )
+            else:
+                oof_index = pd.DatetimeIndex([], tz="UTC")
+                extended_hours_oof_metrics = {
+                    "premarket": {"samples": 0, "brier_score": None},
+                    "after_hours": {"samples": 0, "brier_score": None},
+                }
+            _log_intraday_session_coverage(
+                symbol, mode, "walk_forward_oof_predictions", oof_index
+            )
         wf_metrics = walk_forward_evaluation["aggregate"]
         walk_forward_threshold = float(
             walk_forward_evaluation.get("decision_threshold", 0.5)
@@ -1184,8 +1443,8 @@ def train_model(
         print(
             "[WALK-FORWARD DIAGNOSTICS] "
             f"{symbol}/{mode} "
-            f"evaluation_rows={len(evaluation_X)} "
-            f"evaluation_positive_rate={float(np.mean(evaluation_target)):.2%} "
+            f"evaluation_rows={len(walk_forward_X)} "
+            f"evaluation_positive_rate={float(np.mean(walk_forward_target)):.2%} "
             f"wf_threshold={walk_forward_evaluation.get('decision_threshold')} "
             f"wf_trade_count={wf_metrics.get('trade_count')}"
         )
@@ -1532,6 +1791,9 @@ def train_model(
             "num_classes": num_classes,
             "error": str(e),
         }
+
+    if extended_hours_oof_metrics is not None:
+        metrics["extended_hours_oof"] = extended_hours_oof_metrics
 
     print(f"\n{'=' * 60}")
     print(f"MODEL VALIDATION: {symbol}/{mode.upper()}")
@@ -2299,6 +2561,7 @@ def compute_signals(
 
     df_intra_resampled = None
     vol = None
+    extended_session_vol = None
     mom1h = None
     close = pd.Series(dtype=float)
 
@@ -2477,6 +2740,14 @@ def compute_signals(
                 else momentum_close
             )
             momentum_close = pd.to_numeric(momentum_close, errors="coerce").dropna()
+            if is_extended_session:
+                extended_session_vol = _latest_extended_session_volatility(
+                    momentum_frame
+                )
+                results["intraday_volatility_4bar"] = extended_session_vol
+                results["intraday_volatility_4bar_source"] = (
+                    momentum_source if extended_session_vol is not None else None
+                )
             results["intraday_momentum_bars"] = len(momentum_close)
 
             # If no price point from this session exists, retain a clearly
@@ -2666,6 +2937,17 @@ def compute_signals(
             if regime_config:
                 MOMTRIG = float(regime_config["momentum_threshold"])
                 VOLTRIG = float(regime_config["volatility_threshold"])
+                if is_extended_session and "extended_volatility_threshold" in regime_config:
+                    MOMTRIG = float(
+                        regime_config.get("extended_momentum_threshold", MOMTRIG)
+                    )
+                    VOLTRIG = float(regime_config["extended_volatility_threshold"])
+                    vol = extended_session_vol
+                    results["intraday_vol"] = vol
+                    results["intraday_volatility_window_bars"] = 4
+                    results["intraday_volatility_source"] = (
+                        results.get("intraday_volatility_4bar_source")
+                    )
                 results["intraday_regime_source"] = "model_artifact"
                 print(
                     f"[REGIME] {symU} artifact thresholds: "
