@@ -1391,7 +1391,11 @@ def execute_decisions(decisions, diagnostics=None):
             current_position_value=max(0.0, shares_before) * price,
             is_pyramid=bool(decision.get("pyramid")),
             is_confirmed_rebuy=bool(decision.get("confirmed_rebuy", False)),
-            initial_exposure_pct=initial_exposure_pct,
+            # Pyramid orders use their dedicated total-position ceiling; the
+            # 30% initial-entry cap applies only to opening a new position.
+            initial_exposure_pct=(
+                None if decision.get("pyramid") else initial_exposure_pct
+            ),
         )
 
         if qty <= 0:
