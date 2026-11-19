@@ -154,7 +154,11 @@ def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
 
-def _clean_feature_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def _clean_feature_dataframe(
+    df: pd.DataFrame,
+    *,
+    drop_all_nan: bool = True,
+) -> pd.DataFrame:
     """
     Clean DataFrame to ensure all columns are proper 1D Series.
     This fixes issues with XGBoost complaining about DataFrame columns.
@@ -180,7 +184,8 @@ def _clean_feature_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df.dropna(axis=1, how="all")
+    if drop_all_nan:
+        df = df.dropna(axis=1, how="all")
     return df
 
 
@@ -262,7 +267,10 @@ def _validate_exact_feature_schema(
         )
 
     aligned = df_features.loc[:, expected_features].copy()
-    aligned = _clean_feature_dataframe(aligned)
+    # Keep schema columns even when an extended-hours sample has no usable
+    # values for them. Training explicitly permits these VWAP features to be
+    # missing, and XGBoost handles NaNs through its learned missing-value path.
+    aligned = _clean_feature_dataframe(aligned, drop_all_nan=False)
 
     unnamed_cols = [
         col
@@ -279,8 +287,21 @@ def _validate_exact_feature_schema(
         raise ValueError(f"Non-numeric features present: {non_numeric[:10]}")
 
     if aligned.isna().any().any():
+        optional_nan_features = {
+            "vwap_distance",
+            "vwap_slope_2",
+            "vwap_slope_4",
+            "relative_vwap_strength",
+        }
         nan_cols = aligned.columns[aligned.isna().any()].tolist()
-        raise ValueError(f"NaNs present in inference features: {nan_cols[:10]}")
+        unexpected_nan_cols = [
+            column for column in nan_cols if column not in optional_nan_features
+        ]
+        if unexpected_nan_cols:
+            raise ValueError(
+                "NaNs present in inference features: "
+                f"{unexpected_nan_cols[:10]}"
+            )
 
     return aligned
 
