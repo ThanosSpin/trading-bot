@@ -31,6 +31,7 @@ from config import (
     MARGIN_EMERGENCY_STOP,
     RS_MARGIN,
     MAX_POSITION_SIZE_PCT,
+    CASH_CAP,
     MAX_POSITION_SIZE_DOLLARS,
     INITIAL_POSITION_EQUITY_PCT,
     EXCEPTIONAL_INITIAL_POSITION_EQUITY_PCT,
@@ -124,6 +125,7 @@ NY_TZ = pytz.timezone("America/New_York")
 # ---------------------------------------------------------
 _session_state: dict = {
     "session_date": None,  # New York trading date (YYYY-MM-DD)
+    "cash_cap_starting_cash": None,  # Cash captured on first bot cycle
     "buys": set(),  # symbols bought at least once today
     "sells": set(),  # symbols sold at least once today
     "flattened": set(),  # symbols force-flattened near close today
@@ -154,6 +156,7 @@ SESSION_STATE_PATH = os.path.join(
 def reset_session_state():
     """Call once at bot startup each trading day."""
     _session_state["session_date"] = _dt.now(NY_TZ).date().isoformat()
+    _session_state["cash_cap_starting_cash"] = None
     _session_state["buys"].clear()
     _session_state["sells"].clear()
     _session_state["flattened"].clear()
@@ -191,6 +194,10 @@ def load_session_state():
                 return
 
             _session_state["session_date"] = current_session_date
+            starting_cash = data.get("cash_cap_starting_cash")
+            _session_state["cash_cap_starting_cash"] = (
+                max(0.0, float(starting_cash)) if starting_cash is not None else None
+            )
 
             _session_state["buys"] = set(data.get("buys", []))
             _session_state["sells"] = set(data.get("sells", []))
@@ -241,6 +248,7 @@ def save_session_state():
             "session_date": (
                 _session_state.get("session_date") or _dt.now(NY_TZ).date().isoformat()
             ),
+            "cash_cap_starting_cash": _session_state.get("cash_cap_starting_cash"),
             "buys": list(_session_state["buys"]),
             "sells": list(_session_state["sells"]),
             "flattened": list(_session_state["flattened"]),
@@ -268,8 +276,10 @@ def save_session_state():
         with open(SESSION_STATE_PATH, "w") as f:
             json.dump(data, f)
         print(f"[SESSION] Saved state to {SESSION_STATE_PATH}")
+        return True
     except Exception as e:
         print(f"[WARN] Failed to save session_state: {e}")
+        return False
 
 
 def record_broker_sell_fills(fills):
@@ -583,6 +593,7 @@ def apply_position_limits(
     if qty <= 0 or price <= 0:
         return 0
 
+    cash = cash_available_under_cap(cash)
     proposed_value = qty * price
 
     # Use equity for exposure limits so repeated additions cannot each consume
@@ -642,6 +653,45 @@ def apply_position_limits(
         return max_allowed
 
     return qty
+
+
+def initialize_cash_cap_starting_cash(cash: float) -> float:
+    """Capture available cash once per New York trading day."""
+    starting_cash = _session_state.get("cash_cap_starting_cash")
+    if starting_cash is None:
+        starting_cash = max(0.0, float(cash or 0.0))
+        _session_state["cash_cap_starting_cash"] = starting_cash
+        _session_state["session_date"] = _dt.now(NY_TZ).date().isoformat()
+        allowed_fraction = float(MAX_POSITION_SIZE_PCT) * float(CASH_CAP)
+        reserve_floor = starting_cash * (1.0 - allowed_fraction)
+        print(
+            f"[CASH CAP] Starting cash=${starting_cash:.2f}; "
+            f"bot-buy budget=${starting_cash * allowed_fraction:.2f}; "
+            f"reserve floor=${reserve_floor:.2f}"
+        )
+        if not save_session_state():
+            raise RuntimeError(
+                "Cash-cap starting balance could not be persisted; "
+                "refusing to size BUY orders."
+            )
+    return float(starting_cash)
+
+
+def cash_available_under_cap(cash: float) -> float:
+    """Return cash above the configured daily manual-use reserve."""
+    available_cash = max(0.0, float(cash or 0.0))
+    cap = float(CASH_CAP)
+    max_cash_pct = float(MAX_POSITION_SIZE_PCT)
+    if not 0.0 <= cap <= 1.0:
+        raise ValueError(f"CASH_CAP must be between 0 and 1; received {cap}")
+    if not 0.0 <= max_cash_pct <= 1.0:
+        raise ValueError(
+            "MAX_POSITION_SIZE_PCT must be between 0 and 1; "
+            f"received {max_cash_pct}"
+        )
+    starting_cash = initialize_cash_cap_starting_cash(available_cash)
+    reserve_floor = starting_cash * (1.0 - max_cash_pct * cap)
+    return min(available_cash, max(0.0, available_cash - reserve_floor))
 
 
 # ---------------------------------------------------------
@@ -2605,6 +2655,10 @@ def compute_strategy_decisions(
     # Fetch account state ONCE
     account_cache.invalidate()  # Fresh data for this strategy cycle
     account_state = account_cache.get_account()
+    starting_cash = max(
+        0.0, float((account_state or {}).get("cash", 0.0) or 0.0)
+    )
+    initialize_cash_cap_starting_cash(starting_cash)
 
     pms = {}
     prices = {}

@@ -242,6 +242,11 @@ PROFIT_FLOOR_MIN_LOCK_PCT = 0.002
 PROFIT_FLOOR_TRAIL_PCT = 0.0075
 
 MAX_POSITION_SIZE_PCT = 0.90
+# Fraction of the existing cash allowance available to the bot during a
+# trading day. 0.50 permits up to 50% of the 90% allowance (45% of starting
+# cash), keeping the remaining 55% available for manual use. Set to 1.0 for
+# the full existing cash allowance.
+CASH_CAP = 0.50
 MAX_POSITION_SIZE_DOLLARS = None
 # New positions start small enough to leave room for confirmation-based adds.
 INITIAL_POSITION_EQUITY_PCT = 0.30
