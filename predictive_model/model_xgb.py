@@ -56,7 +56,9 @@ from config import (
     USE_TWO_STAGE_TARGETS,
     EXTENDED_HOURS_MAX_FALLBACK_PRICE_AGE_SECONDS,
     EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES,
+    EXTENDED_HOURS_MAX_INTRADAY_MODEL_AGE_DAYS,
     EXTENDED_HOURS_MIN_MOMENTUM_BARS,
+    INTRADAY_MODEL_MAX_AGE_DAYS,
 )
 from market import get_current_session_start, get_market_session
 
@@ -763,26 +765,25 @@ def _artifact_age_days(artifact: dict):
         return None
 
 
-def _artifact_is_fresh(artifact: dict, max_age_days: int = 30) -> bool:
+def _artifact_is_fresh(
+    artifact: dict,
+    max_age_days: int = INTRADAY_MODEL_MAX_AGE_DAYS,
+) -> bool:
     age = _artifact_age_days(artifact)
     if age is None:
         return False
-    return age <= float(max_age_days)
+    return age < float(max_age_days)
 
 
-def _order_intraday_model_candidates(preferred_order, fresh_models, stale_models):
-    """Keep regime preference ahead of cross-regime artifact freshness."""
+def _order_intraday_model_candidates(preferred_order, fresh_models):
+    """Order fresh intraday models by regime preference; never use stale ones."""
     fresh_by_name = {name: (obj, age) for name, obj, age in fresh_models}
-    stale_by_name = {name: (obj, age) for name, obj, age in stale_models}
     candidates = []
 
     for name in preferred_order:
         if name in fresh_by_name:
             obj, age = fresh_by_name[name]
             candidates.append((name, obj, age, False))
-        elif name in stale_by_name:
-            obj, age = stale_by_name[name]
-            candidates.append((name, obj, age, True))
 
     return candidates
 
@@ -2520,16 +2521,40 @@ def compute_signals(
             continue
 
         age = _artifact_age_days(model_obj)
-
-        if age is None:
-            print(f"[STALE] {symU} {mode_name} skipped: missing/invalid trained_at")
-            continue
-
-        if age <= 30:
+        max_age_days = (
+            EXTENDED_HOURS_MAX_INTRADAY_MODEL_AGE_DAYS
+            if is_extended_session
+            else INTRADAY_MODEL_MAX_AGE_DAYS
+        )
+        if age is not None and age < max_age_days:
             fresh_models.append((mode_name, model_obj, age))
         else:
-            print(f"[STALE] {symU} {mode_name} stale: age={age:.1f}d > 30d")
+            age_description = (
+                f"age={age:.1f}d >= {max_age_days}d"
+                if age is not None
+                else "missing/invalid trained_at"
+            )
+            session_description = (
+                "extended-hours" if is_extended_session else "regular-hours"
+            )
+            regular_fallback = (
+                " (still eligible during regular hours)"
+                if is_extended_session
+                and age is not None
+                and age < INTRADAY_MODEL_MAX_AGE_DAYS
+                else ""
+            )
+            print(
+                f"[STALE] {symU} {mode_name} excluded from {session_description} "
+                f"inference: {age_description}{regular_fallback}"
+            )
             stale_models.append((mode_name, model_obj, age))
+            if mode_name == "intraday_mr":
+                model_intra_mr = None
+            elif mode_name == "intraday_mom":
+                model_intra_mom = None
+            else:
+                model_intraday_legacy = None
 
     vix_level = fetch_vix_level()
     results["vix_level"] = vix_level
@@ -2998,31 +3023,6 @@ def compute_signals(
                         VOLTRIG = float(ovr.get("vol_trig", VOLTRIG))
                     results["intraday_regime_source"] = "legacy_config"
 
-            fresh_models = []
-            stale_models = []
-
-            for mode_name, model_obj in [
-                ("intraday_mr", model_intra_mr),
-                ("intraday_mom", model_intra_mom),
-                ("intraday", model_intraday_legacy),
-            ]:
-                if model_obj is None:
-                    continue
-
-                age = _artifact_age_days(model_obj)
-
-                if age is None:
-                    print(f"[STALE] {symU} {mode_name} skipped: missing/invalid trained_at")
-                    continue
-                elif age <= 30:
-                    fresh_models.append((mode_name, model_obj, age))
-                else:
-                    print(f"[STALE] {symU} {mode_name} stale: age={age:.1f}d > 30d")
-                    stale_models.append((mode_name, model_obj, age))
-                    print(
-                        f"stale_now={[name for name, _, _ in stale_models]}"
-                    )
-
             if vol is not None and mom1h is not None:
                 raw_regime = "mom" if (abs(mom1h) >= MOMTRIG or vol >= VOLTRIG) else "mr"
                 latest_bar_time = df_intra_resampled.index[-1] if len(df_intra_resampled) else None
@@ -3071,7 +3071,6 @@ def compute_signals(
             ordered_candidates = _order_intraday_model_candidates(
                 preferred_order,
                 fresh_models,
-                stale_models,
             )
             candidate_models = [(name, obj) for name, obj, _, _ in ordered_candidates]
             diagnostic_only_models = []
@@ -3128,26 +3127,17 @@ def compute_signals(
                 f"diagnostic_pre={[name for name, _ in diagnostic_only_models]}"
             )
 
-            if (
-                candidate_models
-                and ordered_candidates
-                and candidate_models[0][0] == ordered_candidates[0][0]
-                and ordered_candidates[0][3]
-            ):
-                selected_name, _, selected_age, _ = ordered_candidates[0]
-                print(
-                    f"[STALE-REGIME-MATCH] {symU}: preferred {selected_name} artifact "
-                    f"is {selected_age:.1f}d old; keeping regime match ahead of "
-                    "opposite-regime fallbacks"
-                )
-
             results["intraday_candidate_order"] = [name for name, _ in candidate_models]
 
             if not prediction_models:
                 results["allow_intraday"] = False
                 results["intraday_prob"] = None
                 results["intraday_quality_score"] = 0.0
-                if is_extended_session:
+                if stale_models:
+                    results["intraday_probability_status"] = (
+                        "stale_intraday_model_excluded"
+                    )
+                elif is_extended_session:
                     results["intraday_probability_status"] = (
                         "no_validated_or_fresh_diagnostic_model"
                     )

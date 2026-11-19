@@ -182,8 +182,8 @@ def train_daily_model(sym: str):
         traceback.print_exc()
 
 
-def train_intraday_models(sym: str):
-    """Train intraday MR and MOM models using patched train_model()."""
+def train_intraday_models(sym: str, modes=None):
+    """Train selected intraday modes (MR/MOM by default) using train_model()."""
     print(f"\n{'=' * 60}")
     print(f"🔄 Training {sym} - INTRADAY MODELS")
     print(f"{'=' * 60}")
@@ -221,7 +221,12 @@ def train_intraday_models(sym: str):
         f"SPY rows={len(benchmark_intra)}"
     )
 
-    for mode in ["intraday_mr", "intraday_mom"]:
+    modes_to_train = list(modes or ("intraday_mr", "intraday_mom"))
+    invalid_modes = set(modes_to_train) - {"intraday_mr", "intraday_mom"}
+    if invalid_modes:
+        raise ValueError(f"Unsupported intraday training modes: {sorted(invalid_modes)}")
+
+    for mode in modes_to_train:
         try:
             print(f"\n🔧 Training {sym} {mode.upper()}...")
             artifact = train_model(
