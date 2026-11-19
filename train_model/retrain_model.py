@@ -14,6 +14,7 @@ Patched behavior:
 import os
 import glob
 import shutil
+import argparse
 from datetime import datetime
 import sys
 import smtplib
@@ -310,13 +311,21 @@ def send_status_email(success: bool, details: str) -> None:
 # ---------------- main with success/failure email ----------------
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Retrain model challengers.")
+    parser.add_argument(
+        "--daily-only",
+        action="store_true",
+        help="Train daily challengers only; skip intraday MR/MOM models.",
+    )
+    args = parser.parse_args(argv)
     symbols = TRAIN_SYMBOLS if isinstance(TRAIN_SYMBOLS, list) else [TRAIN_SYMBOLS]
 
     print("\n" + "=" * 80)
     print("MODEL RETRAINING (Patched artifact-compatible mode)")
     print("=" * 80)
     print(f"📌 Symbols: {symbols}")
+    print(f"🧭 Scope: {'daily only' if args.daily_only else 'daily + intraday'}")
     print(f"📂 MODEL_DIR: {os.path.abspath(MODEL_DIR)}")
     print(
         f"🎯 Target: {'Multi-class (5 classes)' if USE_MULTICLASS else 'Binary (2 classes)'}"
@@ -326,7 +335,8 @@ def main() -> int:
     try:
         for sym in symbols:
             train_daily_model(sym)
-            train_intraday_models(sym)
+            if not args.daily_only:
+                train_intraday_models(sym)
 
         print("\n" + "=" * 80)
         print("🎉 All retraining tasks complete.")
