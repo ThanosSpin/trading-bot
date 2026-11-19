@@ -3068,7 +3068,7 @@ def compute_signals(
                 fresh_names = {name for name, _, _ in fresh_models}
                 diagnostic_only_models = [
                     (name, artifact)
-                    for name, artifact in ordered_candidates
+                    for name, artifact, _, _ in ordered_candidates
                     if name in fresh_names
                     and not bool((artifact or {}).get("extended_hours_trained"))
                 ]
