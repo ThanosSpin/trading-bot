@@ -2430,6 +2430,10 @@ def compute_signals(
         "used_lookback_minutes": lookback_minutes,
         "intraday_quality_score": 0.0,
         "intraday_model_used": None,
+        "intraday_diagnostic_model_used": None,
+        "intraday_probability_status": "unavailable",
+        "intraday_diagnostic_prediction": None,
+        "intraday_diagnostic_signal": None,
         "intraday_vol": None,
         "intraday_mom": None,
         "intraday_latest_bar_time": None,
@@ -2651,6 +2655,7 @@ def compute_signals(
             results["allow_intraday"] = False
             results["intraday_prob"] = None
             results["intraday_quality_score"] = 0.0
+            results["intraday_probability_status"] = "insufficient_or_stale_bars"
             if is_extended_session:
                 results["intraday_momentum_fresh"] = False
                 results["intraday_momentum_freshness_reason"] = (
@@ -3048,6 +3053,7 @@ def compute_signals(
                 stale_models,
             )
             candidate_models = [(name, obj) for name, obj, _, _ in ordered_candidates]
+            diagnostic_only_models = []
             if is_extended_session:
                 rejected_extended = [
                     name
@@ -3059,6 +3065,13 @@ def compute_signals(
                     for name, artifact in candidate_models
                     if bool((artifact or {}).get("extended_hours_trained"))
                 ]
+                fresh_names = {name for name, _, _ in fresh_models}
+                diagnostic_only_models = [
+                    (name, artifact)
+                    for name, artifact in ordered_candidates
+                    if name in fresh_names
+                    and not bool((artifact or {}).get("extended_hours_trained"))
+                ]
                 results["extended_hours_model_ready"] = bool(candidate_models)
                 if rejected_extended:
                     print(
@@ -3066,10 +3079,32 @@ def compute_signals(
                         f"unvalidated artifacts={rejected_extended}"
                     )
 
+            diagnostic_only = bool(
+                is_extended_session
+                and not candidate_models
+                and diagnostic_only_models
+                and results.get("intraday_bar_fresh") is True
+            )
+            prediction_models = (
+                diagnostic_only_models if diagnostic_only else candidate_models
+            )
+            if diagnostic_only:
+                results["intraday_probability_status"] = (
+                    "unvalidated_extended_hours_blend"
+                )
+                print(
+                    f"[EXTENDED-HOURS UNVALIDATED BLEND] {symU}: "
+                    f"using fresh unvalidated artifacts in the daily/intraday "
+                    "blend; existing BUY safeguards and sizing limits remain active"
+                )
+            elif candidate_models:
+                results["intraday_probability_status"] = "validated_model"
+
             print(
                 f"fresh={[name for name, _, _ in fresh_models]} "
                 f"stale={[name for name, _, _ in stale_models]} "
-                f"candidate_pre={[name for name, _ in candidate_models]}"
+                f"candidate_pre={[name for name, _ in candidate_models]} "
+                f"diagnostic_pre={[name for name, _ in diagnostic_only_models]}"
             )
 
             if (
@@ -3087,10 +3122,14 @@ def compute_signals(
 
             results["intraday_candidate_order"] = [name for name, _ in candidate_models]
 
-            if not candidate_models:
+            if not prediction_models:
                 results["allow_intraday"] = False
                 results["intraday_prob"] = None
                 results["intraday_quality_score"] = 0.0
+                if is_extended_session:
+                    results["intraday_probability_status"] = (
+                        "no_validated_or_fresh_diagnostic_model"
+                    )
             else:
                 if symU == "SPY":
                     benchmark_intra = df_intra_resampled
@@ -3109,6 +3148,11 @@ def compute_signals(
                     results["allow_intraday"] = False
                     results["intraday_prob"] = None
                     results["intraday_quality_score"] = 0.0
+                    results["intraday_probability_status"] = (
+                        "diagnostic_feature_build_failed"
+                        if diagnostic_only
+                        else "feature_build_failed"
+                    )
                 else:
                     latest_context = df_feat_intra.iloc[-1]
                     for context_name in (
@@ -3157,7 +3201,7 @@ def compute_signals(
                     intraday_prediction = None
                     model_used = None
 
-                    for cand_name, cand_model in candidate_models:
+                    for cand_name, cand_model in prediction_models:
                         try:
                             pred = predict_from_model(cand_model, df_feat_intra)
                             if pred is not None:
@@ -3174,45 +3218,81 @@ def compute_signals(
                         results["allow_intraday"] = False
                         results["intraday_prob"] = None
                         results["intraday_quality_score"] = 0.0
-                    else:
-                        results["intraday_model_used"] = model_used
-                    results["intraday_prediction"] = intraday_prediction
-                    results["intraday_signal"] = get_signal_details(intraday_prediction)
-                    results["intraday_candidate_order"] = [name for name, _ in candidate_models]
-                    ip = get_final_prob(intraday_prediction)
-                    if ip is not None:
-                        results["intraday_prob"] = float(ip)
+                        if diagnostic_only:
+                            results["intraday_probability_status"] = (
+                                "diagnostic_prediction_failed"
+                            )
+                    elif diagnostic_only:
+                        results["intraday_diagnostic_model_used"] = model_used
+                        results["intraday_diagnostic_prediction"] = intraday_prediction
+                        results["intraday_diagnostic_signal"] = get_signal_details(
+                            intraday_prediction
+                        )
+                        # Use only its probability in the blend. Keep this
+                        # unvalidated artifact out of active-model metadata
+                        # (thresholds, movement gates, and promotion monitoring).
+                        results["intraday_probability_status"] = (
+                            "unvalidated_extended_hours_blend"
+                        )
+                        results["allow_intraday"] = True
                         results["intraday_quality_score"] = min(
                             1.0, len(df_intra_resampled) / 120.0
                         )
-                        try:
-                            current_price = results.get("price") or fetch_latest_price(
-                                symU
+                    else:
+                        results["intraday_model_used"] = model_used
+                        results["intraday_prediction"] = intraday_prediction
+                        results["intraday_signal"] = get_signal_details(
+                            intraday_prediction
+                        )
+                        results["intraday_probability_status"] = "validated_model"
+                    results["intraday_candidate_order"] = [
+                        name for name, _ in candidate_models
+                    ]
+                    results["intraday_diagnostic_candidate_order"] = [
+                        name for name, _ in diagnostic_only_models
+                    ]
+                    ip = get_final_prob(intraday_prediction)
+                    if ip is not None:
+                        results["intraday_prob"] = float(ip)
+                        if diagnostic_only:
+                            print(
+                                f"[EXTENDED-HOURS UNVALIDATED BLEND] {symU}: "
+                                f"model={model_used} probability={float(ip):.4f}; "
+                                "included in the normal adaptive daily/intraday blend"
                             )
-                            if (
-                                current_price
-                                and float(current_price) > 0
-                                and results.get("intraday_bar_fresh", False)
-                            ):
-                                log_prediction(
-                                    symbol=symU,
-                                    mode=model_used,
-                                    predicted_prob=float(ip),
-                                    price=float(current_price),
-                                    prediction_details=(
-                                        intraday_prediction
-                                        if isinstance(intraday_prediction, dict)
-                                        else None
-                                    ),
+                        else:
+                            results["intraday_quality_score"] = min(
+                                1.0, len(df_intra_resampled) / 120.0
+                            )
+                            try:
+                                current_price = results.get("price") or fetch_latest_price(
+                                    symU
                                 )
-                        except Exception as e:
-                            print(f"[WARN] Could not log prediction: {e}")
+                                if (
+                                    current_price
+                                    and float(current_price) > 0
+                                    and results.get("intraday_bar_fresh", False)
+                                ):
+                                    log_prediction(
+                                        symbol=symU,
+                                        mode=model_used,
+                                        predicted_prob=float(ip),
+                                        price=float(current_price),
+                                        prediction_details=(
+                                            intraday_prediction
+                                            if isinstance(intraday_prediction, dict)
+                                            else None
+                                        ),
+                                    )
+                            except Exception as e:
+                                print(f"[WARN] Could not log prediction: {e}")
     except Exception as e:
         print(f"[ERROR] Intraday prediction error: {e}")
         traceback.print_exc()
         results["allow_intraday"] = False
         results["intraday_prob"] = None
         results["intraday_quality_score"] = 0.0
+        results["intraday_probability_status"] = "inference_error"
 
     # Intraday probability is trained on 15-minute features. A fresh 1-minute
     # price used by momentum/limit-price checks does not make stale 15-minute
@@ -3223,6 +3303,8 @@ def compute_signals(
     ):
         results["allow_intraday"] = False
         results["intraday_quality_score"] = 0.0
+        if results.get("intraday_probability_status") == "validated_model":
+            results["intraday_probability_status"] = "stale_bar_excluded"
         print(
             f"[INTRADAY MODEL DATA] {symU}: stale 15-minute features; "
             "intraday probability excluded from blend"

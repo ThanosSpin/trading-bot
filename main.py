@@ -228,6 +228,8 @@ def log_signal_snapshot(
             "finalprob",
             "intradayweight",
             "intradaymodelused",
+            "intradaydiagnosticmodelused",
+            "intradayprobabilitystatus",
             "intradayqualityscore",
             "intradayvol",
             "intradaymom",
@@ -277,6 +279,10 @@ def log_signal_snapshot(
             "finalprob": final_prob if final_prob is not None else sig.get("final_prob"),
             "intradayweight": intraday_weight if intraday_weight is not None else sig.get("intraday_weight"),
             "intradaymodelused": sig.get("intraday_model_used"),
+            "intradaydiagnosticmodelused": sig.get(
+                "intraday_diagnostic_model_used"
+            ),
+            "intradayprobabilitystatus": sig.get("intraday_probability_status"),
             "intradayqualityscore": sig.get("intraday_quality_score"),
             "intradayvol": sig.get("intraday_vol"),
             "intradaymom": sig.get("intraday_mom"),
@@ -409,7 +415,11 @@ def get_predictions(symbols, debug=True):
 
         # ✅ DEBUG
         print(
-            f"[MAIN] {sym} regime={sig.get('intraday_regime')} model={sig.get('intraday_model_used')} ip={sig.get('intraday_prob')}"
+            f"[MAIN] {sym} regime={sig.get('intraday_regime')} "
+            f"model={sig.get('intraday_model_used') or sig.get('intraday_diagnostic_model_used')} "
+            f"ip={sig.get('intraday_prob')} "
+            f"probability_status={sig.get('intraday_probability_status')} "
+            f"allow_intraday={sig.get('allow_intraday')}"
         )
 
         if debug:
@@ -514,7 +524,11 @@ def get_predictions(symbols, debug=True):
         active_model_predictions = []
         if daily_prob is not None:
             active_model_predictions.append(daily_prediction)
-        if intraday_prob is not None and w > 0.0:
+        if (
+            intraday_prob is not None
+            and w > 0.0
+            and isinstance(intraday_prediction, dict)
+        ):
             active_model_predictions.append(intraday_prediction)
 
         movement_expected = None
@@ -567,6 +581,12 @@ def get_predictions(symbols, debug=True):
             # adaptive weight actually used when mixing
             "intraday_weight_used": w,
             "intraday_model_used": sig.get("intraday_model_used"),
+            "intraday_diagnostic_model_used": sig.get(
+                "intraday_diagnostic_model_used"
+            ),
+            "intraday_probability_status": sig.get(
+                "intraday_probability_status"
+            ),
             "intraday_quality_score": sig.get("intraday_quality_score"),
             "intraday_vol": sig.get("intraday_vol"),
             "intraday_mom": sig.get("intraday_mom"),
@@ -798,7 +818,9 @@ def print_signal_diagnostics(decisions, diagnostics):
             f"mom_source={sig.get('intraday_momentum_source')} "
             f"mom_window={fmt(sig.get('intraday_momentum_window_minutes'), 1)}m "
             f"session={sig.get('market_session')} "
-            f"| regime={sig.get('intraday_regime')} | model={model_used} | {action}"
+            f"| regime={sig.get('intraday_regime')} | model={model_used} "
+            f"| probability_status={sig.get('intraday_probability_status')} "
+            f"| diagnostic_model={sig.get('intraday_diagnostic_model_used')} | {action}"
         )
         if sig.get("intraday_momentum_current_price_time") or sig.get(
             "intraday_momentum_reference_time"
