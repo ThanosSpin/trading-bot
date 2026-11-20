@@ -252,7 +252,7 @@ MAX_POSITION_SIZE_PCT = 0.90
 # trading day. 0.50 permits up to 50% of the 90% allowance (45% of starting
 # cash), keeping the remaining 55% available for manual use. Set to 1.0 for
 # the full existing cash allowance.
-CASH_CAP = 0.50
+CASH_CAP = 1.0
 MAX_POSITION_SIZE_DOLLARS = None
 # New positions start small enough to leave room for confirmation-based adds.
 INITIAL_POSITION_EQUITY_PCT = 0.30
