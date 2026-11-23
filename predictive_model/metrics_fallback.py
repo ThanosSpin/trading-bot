@@ -150,12 +150,27 @@ def load_metrics_fallback() -> Optional[dict]:
         return None
 
 
+def _scope_key(symbol: str, session: str) -> str:
+    return f"{str(symbol).upper()}|{str(session).lower()}"
+
+
 def metrics_fallback_is_ready(artifact: dict, symbol: str, session: str) -> bool:
     symbol = str(symbol).upper()
     session = str(session).lower()
     if session == "pre_market":
         session = "premarket"
-    age_days = _artifact_age_days(artifact)
+    key = _scope_key(symbol, session)
+    scope_dates = artifact.get("scope_calibration_dates") or {}
+    scope_models = artifact.get("scope_models") or {}
+    freshness_source = scope_dates.get(key)
+    if freshness_source is None:
+        freshness_source = (scope_models.get(key) or {}).get(
+            "calibration_data_through"
+        )
+    age_artifact = artifact if freshness_source is None else {
+        "calibration_data_through": freshness_source
+    }
+    age_days = _artifact_age_days(age_artifact)
     return bool(
         artifact
         and session in SESSIONS
@@ -186,17 +201,26 @@ def predict_metrics_fallback(
     if int(values.notna().sum()) < 4:
         return None
 
-    symbols = artifact.get("symbols") or []
+    key = _scope_key(symbol, session)
+    scope_model = (artifact.get("scope_models") or {}).get(key) or {}
+    symbols = scope_model.get("symbols") or artifact.get("symbols") or []
     if symbol not in symbols:
         return None
     row = pd.DataFrame([values.to_dict()])
     row["symbol"] = symbol
     row["session"] = session
+    features = scope_model.get("features") or artifact.get("features", [])
     x = _add_indicator_columns(row, symbols).reindex(
-        columns=artifact.get("features", []), fill_value=0.0
+        columns=features, fill_value=0.0
     )
-    raw_probability = float(artifact["model"].predict_proba(x)[0, 1])
-    calibrated = artifact["calibrator"].predict_proba(_logit([raw_probability]))[0, 1]
+    model = scope_model.get("model") or artifact["model"]
+    calibrator = (
+        scope_model.get("calibrator")
+        or (artifact.get("calibrators") or {}).get(key)
+        or artifact["calibrator"]
+    )
+    raw_probability = float(model.predict_proba(x)[0, 1])
+    calibrated = calibrator.predict_proba(_logit([raw_probability]))[0, 1]
     if not np.isfinite(calibrated):
         return None
     return float(np.clip(calibrated, 0.0, 1.0))
@@ -290,12 +314,49 @@ def train_metrics_fallback() -> bool:
     )
     model.fit(x_train, y_train)
     raw_cal = model.predict_proba(x_cal)[:, 1]
-    calibrator = LogisticRegression(C=1.0, max_iter=500)
-    calibrator.fit(_logit(raw_cal), y_cal)
-    calibrated_test = calibrator.predict_proba(_logit(model.predict_proba(x_test)[:, 1]))[:, 1]
+    global_calibrator = LogisticRegression(C=1.0, max_iter=500)
+    global_calibrator.fit(_logit(raw_cal), y_cal)
+
+    # A pooled calibrator can be biased for one ticker/session even when its
+    # ranking is useful. Fit a small Platt map per scope using calibration data
+    # only; scopes without enough calibration examples retain the pooled map.
+    calibration = calibration.copy()
+    calibration["raw_probability"] = raw_cal
+    scope_calibrators = {}
+    min_scope_calibration_samples = max(50, int(INTRADAY_METRICS_FALLBACK_MIN_TEST_SAMPLES) // 2)
+    for symbol in symbols_with_data:
+        for session in SESSIONS:
+            key = _scope_key(symbol, session)
+            rows = calibration[
+                (calibration["symbol"] == symbol)
+                & (calibration["session"] == session)
+            ]
+            if (
+                len(rows) >= min_scope_calibration_samples
+                and rows["session_date"].nunique() >= 5
+                and rows["target"].nunique() == 2
+            ):
+                scope_calibrator = LogisticRegression(C=1.0, max_iter=500)
+                scope_calibrator.fit(
+                    _logit(rows["raw_probability"].to_numpy()),
+                    rows["target"].astype(int),
+                )
+                scope_calibrators[key] = scope_calibrator
 
     test = test.copy()
-    test["probability"] = calibrated_test
+    test["raw_probability"] = model.predict_proba(x_test)[:, 1]
+    test["probability"] = np.nan
+    for symbol in symbols_with_data:
+        for session in SESSIONS:
+            mask = (test["symbol"] == symbol) & (test["session"] == session)
+            if not mask.any():
+                continue
+            calibrator_for_scope = scope_calibrators.get(
+                _scope_key(symbol, session), global_calibrator
+            )
+            test.loc[mask, "probability"] = calibrator_for_scope.predict_proba(
+                _logit(test.loc[mask, "raw_probability"].to_numpy())
+            )[:, 1]
     supported: Dict[str, dict] = {}
     validation = {}
     for symbol in symbols_with_data:
@@ -360,13 +421,23 @@ def train_metrics_fallback() -> bool:
         print("[METRICS FALLBACK] No symbol/session passed validation; keeping current artifact")
         return False
 
+    scope_calibration_dates = {
+        _scope_key(symbol, session): calibration_date_list[-1].isoformat()
+        for symbol, sessions in supported.items()
+        for session, ready in sessions.items()
+        if ready
+    }
+    scope_models = {}
     candidate = {
         "model": model,
-        "calibrator": calibrator,
+        "calibrator": global_calibrator,
+        "calibrators": scope_calibrators,
         "features": feature_columns,
         "metric_features": list(METRIC_FEATURES),
         "symbols": symbols_with_data,
         "supported": supported,
+        "scope_calibration_dates": scope_calibration_dates,
+        "scope_models": scope_models,
         "validation": validation,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "training_data_through": train_date_list[-1].isoformat(),
@@ -381,25 +452,53 @@ def train_metrics_fallback() -> bool:
     }
 
     current = load_metrics_fallback()
-    current_age = _artifact_age_days(current) if current else None
-    if (
-        current
-        and current_age is not None
-        and current_age < float(INTRADAY_METRICS_FALLBACK_MAX_AGE_DAYS)
-    ):
+    if current:
         current_supported = current.get("supported", {})
-        lost_scopes = [
-            f"{symbol}/{session}"
-            for symbol, sessions in current_supported.items()
-            for session, enabled in sessions.items()
-            if enabled and not candidate["supported"].get(symbol, {}).get(session, False)
-        ]
-        if lost_scopes:
-            print(
-                "[METRICS FALLBACK] Candidate would remove currently supported "
-                f"scopes {lost_scopes}; keeping current artifact"
-            )
-            return False
+        current_scope_models = current.get("scope_models", {})
+        current_scope_dates = current.get("scope_calibration_dates", {})
+        for old_symbol, sessions in current_supported.items():
+            for old_session, enabled in sessions.items():
+                if not enabled or candidate["supported"].get(old_symbol, {}).get(old_session, False):
+                    continue
+                key = _scope_key(old_symbol, old_session)
+                old_scope = current_scope_models.get(key)
+                old_date = current_scope_dates.get(key)
+                if old_scope is None:
+                    old_date = old_date or current.get("calibration_data_through") or current.get("trained_at")
+                    old_calibrator = (current.get("calibrators") or {}).get(key) or current.get("calibrator")
+                    old_scope = {
+                        "model": current.get("model"),
+                        "calibrator": old_calibrator,
+                        "features": current.get("features", []),
+                        "symbols": current.get("symbols", []),
+                        "calibration_data_through": old_date,
+                    }
+                else:
+                    old_date = old_date or old_scope.get("calibration_data_through")
+                old_scope_age = _artifact_age_days({"calibration_data_through": old_date})
+                if (
+                    old_scope.get("model") is None
+                    or old_scope.get("calibrator") is None
+                    or old_scope_age is None
+                    or old_scope_age >= float(INTRADAY_METRICS_FALLBACK_MAX_AGE_DAYS)
+                ):
+                    continue
+                old_scope = dict(old_scope)
+                old_scope["calibration_data_through"] = old_date
+                candidate["scope_models"][key] = old_scope
+                candidate["scope_calibration_dates"][key] = old_date
+                candidate["supported"].setdefault(old_symbol, {})[old_session] = True
+                validation.setdefault(old_symbol, {}).setdefault(old_session, {})[
+                    "retained_incumbent"
+                ] = True
+                print(
+                    f"[METRICS FALLBACK] Retaining validated incumbent scope "
+                    f"{old_symbol}/{old_session} while updating other scopes"
+                )
+
+    if not any(any(session_map.values()) for session_map in candidate["supported"].values()):
+        print("[METRICS FALLBACK] No fresh symbol/session passed validation; keeping current artifact")
+        return False
 
     ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = ARTIFACT_PATH.with_suffix(".pkl.tmp")
