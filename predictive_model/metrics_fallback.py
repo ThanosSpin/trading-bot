@@ -255,9 +255,14 @@ def train_metrics_fallback() -> bool:
     if calibration_end >= len(unique_dates) - 5:
         print("[METRICS FALLBACK] Chronological calibration/test windows too small")
         return False
-    train_dates = set(unique_dates[:train_end])
-    calibration_dates = set(unique_dates[train_end:calibration_end])
-    test_dates = set(unique_dates[calibration_end:])
+    # Keep ordered date lists for artifact metadata, and sets for efficient
+    # membership filtering. Sets cannot safely supply chronological endpoints.
+    train_date_list = unique_dates[:train_end]
+    calibration_date_list = unique_dates[train_end:calibration_end]
+    test_date_list = unique_dates[calibration_end:]
+    train_dates = set(train_date_list)
+    calibration_dates = set(calibration_date_list)
+    test_dates = set(test_date_list)
     train = data[data["session_date"].isin(train_dates)].copy()
     calibration = data[data["session_date"].isin(calibration_dates)].copy()
     test = data[data["session_date"].isin(test_dates)].copy()
@@ -364,13 +369,13 @@ def train_metrics_fallback() -> bool:
         "supported": supported,
         "validation": validation,
         "trained_at": datetime.now(timezone.utc).isoformat(),
-        "training_data_through": train_dates[-1].isoformat(),
-        "calibration_data_through": calibration_dates[-1].isoformat(),
-        "validation_data_through": test_dates[-1].isoformat(),
+        "training_data_through": train_date_list[-1].isoformat(),
+        "calibration_data_through": calibration_date_list[-1].isoformat(),
+        "validation_data_through": test_date_list[-1].isoformat(),
         "fit_window": {
-            "train_sessions": len(train_dates),
-            "calibration_sessions": len(calibration_dates),
-            "test_sessions": len(test_dates),
+            "train_sessions": len(train_date_list),
+            "calibration_sessions": len(calibration_date_list),
+            "test_sessions": len(test_date_list),
         },
         "target": "next_15m_close_up_same_session",
     }
