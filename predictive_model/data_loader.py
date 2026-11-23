@@ -392,11 +392,16 @@ def fetch_intraday_history(
     lookback_minutes: int = 900,
     interval: str = "15min",
     include_extended_hours: bool = False,
+    minimum_bars: Optional[int] = None,
+    prefer_yahoo: bool = False,
 ) -> Optional[pd.DataFrame]:
     """
     Fetch intraday OHLCV bars and normalize providers to a requested bar count.
     Extended-hours mode uses Yahoo consistently with pre/post-market enabled;
     regular mode prefers Alpaca and falls back to regular-session Yahoo bars.
+    When ``minimum_bars`` is set, an otherwise fresh but undersized Alpaca
+    response also falls back to Yahoo. ``prefer_yahoo`` forces that provider
+    for a retry when Alpaca bars cannot produce the requested metrics.
     """
     import math
 
@@ -412,7 +417,7 @@ def fetch_intraday_history(
     # Alpaca feed may not return premarket/after-hours bars, and mixing it with
     # Yahoo during training would make the session coverage unpredictable.
     df = None
-    if not include_extended_hours:
+    if not include_extended_hours and not prefer_yahoo:
         df = fetch_intraday_history_alpaca(
             symbol,
             lookback_minutes=lookback_minutes,
@@ -429,15 +434,25 @@ def fetch_intraday_history(
         ).total_seconds() / 60.0
         from config import EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES
 
+        enough_bars = minimum_bars is None or len(df) >= int(minimum_bars)
         if (
             -5.0 <= age_minutes
             <= float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
+            and enough_bars
         ):
             return df.tail(bars_needed)
-        logger.warning(
-            f"Alpaca intraday bars for {symbol} are stale "
-            f"({age_minutes:.1f}m); trying Yahoo history instead"
-        )
+        if not enough_bars:
+            logger.warning(
+                f"Alpaca intraday bars for {symbol} are fresh but insufficient "
+                f"({len(df)} < {minimum_bars}); trying Yahoo history instead"
+            )
+        else:
+            logger.warning(
+                f"Alpaca intraday bars for {symbol} are stale "
+                f"({age_minutes:.1f}m); trying Yahoo history instead"
+            )
+    elif prefer_yahoo and not include_extended_hours:
+        logger.info(f"Retrying intraday history for {symbol} from Yahoo")
 
     try:
         yf_interval = "15m" if interval_key in ("15m", "15min", "15t") else "1m"

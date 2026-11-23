@@ -120,22 +120,33 @@ def main() -> int:
         if due_modes:
             due_by_symbol[symbol.upper()] = due_modes
 
-    if not due_by_symbol:
-        print("[STALE INTRADAY RETRAIN] No models are due.")
-        return 0
-
-    _save_attempt_state(attempts)
     failures = []
-    for symbol, modes in due_by_symbol.items():
-        print(
-            f"[STALE INTRADAY RETRAIN] Training {symbol}: "
-            f"modes={','.join(modes)}"
-        )
-        try:
-            train_intraday_models(symbol, modes=modes)
-        except Exception as exc:
-            failures.append(f"{symbol}: {exc}")
-            print(f"[ERROR] Stale intraday retrain failed for {symbol}: {exc}")
+    if due_by_symbol:
+        _save_attempt_state(attempts)
+        for symbol, modes in due_by_symbol.items():
+            print(
+                f"[STALE INTRADAY RETRAIN] Training {symbol}: "
+                f"modes={','.join(modes)}"
+            )
+            try:
+                train_intraday_models(symbol, modes=modes)
+            except Exception as exc:
+                failures.append(f"{symbol}: {exc}")
+                print(f"[ERROR] Stale intraday retrain failed for {symbol}: {exc}")
+
+    # The metrics fallback has its own validation and promotion state. Refresh
+    # it on every scheduled weekly run, including weeks with no stale XGBoost
+    # artifacts, so its validation artifact does not expire between runs.
+    try:
+        from predictive_model.metrics_fallback import train_metrics_fallback
+
+        train_metrics_fallback()
+    except Exception as exc:
+        failures.append(f"metrics fallback: {exc}")
+        print(f"[ERROR] Metrics fallback training failed: {exc}")
+
+    if not due_by_symbol:
+        print("[STALE INTRADAY RETRAIN] No primary models were due.")
 
     if failures:
         print("[STALE INTRADAY RETRAIN] Failures: " + "; ".join(failures))

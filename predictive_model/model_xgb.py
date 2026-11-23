@@ -30,6 +30,11 @@ from predictive_model.data_loader import (
     fetch_intraday_price_fallback,
 )
 from predictive_model.features import build_daily_features, build_intraday_features
+from predictive_model.metrics_fallback import (
+    load_metrics_fallback,
+    metrics_fallback_is_ready,
+    predict_metrics_fallback,
+)
 from predictive_model.time_features import (
     intraday_session_keys,
     intraday_session_types,
@@ -2435,6 +2440,158 @@ def _resolve_intraday_regime_with_confirmation(
     }
 
 # ---------------------------------------------------------
+# METRICS-ONLY STALE-MODEL FALLBACK
+# ---------------------------------------------------------
+def _try_metrics_fallback(
+    symbol: str,
+    market_session: str,
+    bars: pd.DataFrame,
+    source: str,
+    lookback_minutes: int,
+    interval: str,
+):
+    """Try the validated metrics estimator, then retry Yahoo if Alpaca metrics fail."""
+    normalized_interval = str(interval).lower().replace("mins", "min").replace(" ", "")
+    if normalized_interval not in {"15m", "15min", "15t"}:
+        return None
+
+    session = {
+        "pre_market": "premarket",
+        "premarket": "premarket",
+        "regular": "regular",
+        "after_hours": "after_hours",
+    }.get(str(market_session).lower())
+    artifact = load_metrics_fallback()
+    if artifact is None or not metrics_fallback_is_ready(artifact, symbol, session):
+        return None
+
+    is_extended = session in {"premarket", "after_hours"}
+
+    def evaluate(candidate_bars, candidate_source, force_yahoo=False):
+        if candidate_bars is None or len(candidate_bars) < MIN_INTRADAY_BARS_FOR_FEATURES:
+            return None
+        latest_bar_time = pd.Timestamp(candidate_bars.index[-1])
+        if latest_bar_time.tzinfo is None:
+            latest_bar_time = latest_bar_time.tz_localize("UTC")
+        else:
+            latest_bar_time = latest_bar_time.tz_convert("UTC")
+        age_minutes = (
+            pd.Timestamp.now(tz="UTC") - latest_bar_time
+        ).total_seconds() / 60.0
+        if not (
+            -5.0 <= age_minutes <= float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES)
+        ):
+            print(
+                f"[METRICS FALLBACK] {symbol}: candidate bars are stale "
+                f"({age_minutes:.1f}m); refusing fallback"
+            )
+            return None
+        if intraday_session_types(pd.DatetimeIndex([latest_bar_time])).iloc[0] != session:
+            print(
+                f"[METRICS FALLBACK] {symbol}: latest {candidate_source} bar is "
+                f"not in the active {session} session"
+            )
+            return None
+
+        if str(symbol).upper() == "SPY":
+            benchmark = candidate_bars
+        else:
+            benchmark = fetch_intraday_history(
+                "SPY",
+                lookback_minutes=lookback_minutes,
+                interval=interval,
+                include_extended_hours=is_extended,
+                minimum_bars=MIN_INTRADAY_BARS_FOR_FEATURES,
+                prefer_yahoo=force_yahoo,
+            )
+        if benchmark is None or benchmark.empty:
+            return None
+        benchmark_time = pd.Timestamp(benchmark.index[-1])
+        if benchmark_time.tzinfo is None:
+            benchmark_time = benchmark_time.tz_localize("UTC")
+        else:
+            benchmark_time = benchmark_time.tz_convert("UTC")
+        benchmark_age = (
+            pd.Timestamp.now(tz="UTC") - benchmark_time
+        ).total_seconds() / 60.0
+        benchmark_session = intraday_session_types(
+            pd.DatetimeIndex([benchmark_time])
+        ).iloc[0]
+        same_ny_date = (
+            benchmark_time.tz_convert("America/New_York").date()
+            == latest_bar_time.tz_convert("America/New_York").date()
+        )
+        if (
+            not (-5.0 <= benchmark_age <= float(EXTENDED_HOURS_MAX_INTRADAY_BAR_AGE_MINUTES))
+            or benchmark_session != session
+            or not same_ny_date
+        ):
+            print(
+                f"[METRICS FALLBACK] {symbol}: benchmark bars are not fresh "
+                f"and aligned to the active {session} session"
+            )
+            return None
+
+        try:
+            feature_frame = build_intraday_features(
+                candidate_bars,
+                benchmark_df=benchmark,
+                diagnostic_label=f"{symbol}/metrics_fallback",
+            )
+            probability = predict_metrics_fallback(
+                artifact, symbol, session, feature_frame
+            )
+        except Exception as exc:
+            print(
+                f"[METRICS FALLBACK] {symbol}: {candidate_source} metrics "
+                f"unavailable: {exc}"
+            )
+            return None
+        if probability is None:
+            return None
+        return {
+            "probability": probability,
+            "bars": candidate_bars,
+            "features": feature_frame,
+            "source": candidate_source,
+            "bar_time": latest_bar_time,
+            "bar_age_minutes": age_minutes,
+        }
+
+    result = evaluate(bars, source)
+    if result is not None:
+        return result
+
+    # A fresh Alpaca response may still be too sparse or have incomplete
+    # benchmark-derived metrics. Retry both asset and benchmark from Yahoo.
+    if not is_extended and str(source).startswith("alpaca"):
+        yahoo_bars = fetch_intraday_history(
+            symbol,
+            lookback_minutes=lookback_minutes,
+            interval=interval,
+            include_extended_hours=False,
+            minimum_bars=MIN_INTRADAY_BARS_FOR_FEATURES,
+            prefer_yahoo=True,
+        )
+        if yahoo_bars is not None and not yahoo_bars.empty:
+            yahoo_source = yahoo_bars.attrs.get(
+                "data_source", "yfinance_15m_regular_hours"
+            )
+            result = evaluate(yahoo_bars, yahoo_source, force_yahoo=True)
+            if result is not None:
+                print(
+                    f"[METRICS FALLBACK] {symbol}: Alpaca metrics unavailable; "
+                    f"Yahoo retry succeeded ({len(yahoo_bars)} bars)"
+                )
+                return result
+            print(
+                f"[METRICS FALLBACK] {symbol}: Yahoo retry had insufficient "
+                "fresh metrics; keeping daily-only probability"
+            )
+    return None
+
+
+# ---------------------------------------------------------
 # COMPUTE SIGNALS (kept compatible; inference now uses strict schema)
 # ---------------------------------------------------------
 def compute_signals(
@@ -2454,6 +2611,7 @@ def compute_signals(
         "intraday_model_used": None,
         "intraday_diagnostic_model_used": None,
         "intraday_probability_status": "unavailable",
+        "intraday_probability_source": None,
         "intraday_diagnostic_prediction": None,
         "intraday_diagnostic_signal": None,
         "intraday_vol": None,
@@ -2638,6 +2796,7 @@ def compute_signals(
                 lookback_minutes=lb,
                 interval=resample_to,
                 include_extended_hours=is_extended_session,
+                minimum_bars=MIN_INTRADAY_BARS_FOR_FEATURES,
             )
             if df_raw is None or df_raw.empty:
                 continue
@@ -3141,6 +3300,88 @@ def compute_signals(
                     results["intraday_probability_status"] = (
                         "no_validated_or_fresh_diagnostic_model"
                     )
+                metrics_result = _try_metrics_fallback(
+                    symbol=symU,
+                    market_session=market_session,
+                    bars=df_intra_resampled,
+                    source=best_source or "unknown",
+                    lookback_minutes=best_lb,
+                    interval=resample_to,
+                )
+                if metrics_result is not None:
+                    metrics_probability = float(metrics_result["probability"])
+                    metrics_bars = metrics_result["bars"]
+                    metrics_features = metrics_result["features"]
+                    metrics_source = metrics_result["source"]
+                    results["intraday_prob"] = metrics_probability
+                    results["allow_intraday"] = True
+                    results["intraday_quality_score"] = min(
+                        1.0, len(metrics_bars) / 120.0
+                    )
+                    results["intraday_probability_status"] = (
+                        "validated_metrics_fallback"
+                    )
+                    results["intraday_probability_source"] = "metrics_fallback"
+                    if is_extended_session:
+                        results["extended_hours_model_ready"] = True
+                    results["intraday_diagnostic_model_used"] = "metrics_fallback"
+                    results["intraday_diagnostic_prediction"] = {
+                        "final_prob": metrics_probability,
+                        "model_type": "metrics_fallback",
+                        "target_horizon": "next_15m_close_up_same_session",
+                    }
+                    latest_time = metrics_result["bar_time"]
+                    age_minutes = float(metrics_result["bar_age_minutes"])
+                    results["intraday_bar_source"] = metrics_source
+                    results["intraday_latest_bar_time"] = latest_time.isoformat()
+                    results["intraday_bar_age_minutes"] = round(age_minutes, 2)
+                    results["intraday_bar_fresh"] = True
+                    results["intraday_rows"] = len(metrics_bars)
+                    if metrics_source != best_source:
+                        metrics_close = pd.to_numeric(
+                            metrics_bars["Close"], errors="coerce"
+                        )
+                        if isinstance(metrics_close, pd.DataFrame):
+                            metrics_close = metrics_close.iloc[:, 0]
+                        metrics_close = metrics_close.dropna()
+                        if len(metrics_close):
+                            results["price"] = float(metrics_close.iloc[-1])
+                    context = metrics_features.iloc[-1]
+                    for context_name in (
+                        "return_1",
+                        "return_5",
+                        "momentum_accel_5",
+                        "relative_return_2",
+                        "relative_return_4",
+                        "relative_session_return",
+                        "relative_strength_accel",
+                        "relative_market_available",
+                        "session_return",
+                    ):
+                        if context_name in context.index:
+                            value = context.get(context_name)
+                            results[context_name] = (
+                                float(value) if pd.notna(value) else None
+                            )
+                    results["relative_return_4_source"] = metrics_source
+                    if is_extended_session:
+                        results["volume_time_ratio"] = 1.0
+                        results["volume_time_ratio_source"] = (
+                            "extended_session_neutral"
+                        )
+                    elif "volume_time_ratio" in context.index:
+                        value = context.get("volume_time_ratio")
+                        results["volume_time_ratio"] = (
+                            float(value) if pd.notna(value) else None
+                        )
+                        results["volume_time_ratio_source"] = (
+                            "metrics_fallback_features"
+                        )
+                    print(
+                        f"[METRICS FALLBACK] {symU}: session={market_session} "
+                        f"source={metrics_source} bar={latest_time.isoformat()} "
+                        f"age={age_minutes:.1f}m probability={metrics_probability:.4f}"
+                    )
             else:
                 if symU == "SPY":
                     benchmark_intra = df_intra_resampled
@@ -3150,6 +3391,7 @@ def compute_signals(
                         lookback_minutes=best_lb,
                         interval=resample_to,
                         include_extended_hours=is_extended_session,
+                        minimum_bars=MIN_INTRADAY_BARS_FOR_FEATURES,
                     )
                 df_feat_intra = build_intraday_features(
                     df_intra_resampled,
@@ -3265,6 +3507,11 @@ def compute_signals(
                     ip = get_final_prob(intraday_prediction)
                     if ip is not None:
                         results["intraday_prob"] = float(ip)
+                        results["intraday_probability_source"] = (
+                            "unvalidated_intraday_model"
+                            if diagnostic_only
+                            else "intraday_model"
+                        )
                         if diagnostic_only:
                             print(
                                 f"[EXTENDED-HOURS UNVALIDATED BLEND] {symU}: "
